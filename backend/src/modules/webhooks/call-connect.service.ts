@@ -289,7 +289,9 @@ export class CallConnectService {
   }
 
   /**
-   * Returns TwiML for the lead leg — always joins the conference.
+   * Returns TwiML for the lead leg — joins the conference immediately.
+   * Greeting is played via the conference waitUrl (eliminates TTS startup delay
+   * on pick-up: lead hears hold music right away instead of waiting for TTS).
    */
   async handleLeadTwiml(sessionId: string): Promise<string> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
@@ -302,12 +304,50 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
+    const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
-    response.say(settings?.leadGreetingMessage || 'Please hold while we connect you.');
     const dial = response.dial();
+
+    // Use waitUrl for greeting so lead joins conference immediately (no TTS startup delay on pick-up).
+    // If a custom greeting is configured, our /lead/wait endpoint voices it; otherwise Twilio plays default hold music.
+    const waitUrl = settings?.leadGreetingMessage
+      ? `${baseUrl}/api/webhooks/twilio/voice/lead/wait?sessionId=${sessionId}`
+      : undefined;
+
     dial.conference(
-      { startConferenceOnEnter: false, endConferenceOnExit: true },
+      {
+        startConferenceOnEnter: false,
+        endConferenceOnExit: true,
+        ...(waitUrl ? { waitUrl, waitMethod: 'POST' } : {}),
+      } as any,
       session.conferenceName,
+    );
+
+    return response.toString();
+  }
+
+  /**
+   * Conference waitUrl TwiML — looping greeting played to lead while waiting for agent.
+   * Runs inside the conference hold state (after lead has already connected, no TTS delay).
+   */
+  async handleLeadWaitTwiml(sessionId: string): Promise<string> {
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session) return this.hangupTwiml();
+
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+
+    const greeting = settings?.leadGreetingMessage || 'Please hold while we connect you.';
+    const baseUrl = this.getBaseUrl();
+
+    const response = new twilio.twiml.VoiceResponse();
+    response.say(greeting);
+    response.pause({ length: 3 });
+    // Loop: redirect back to this endpoint so the greeting repeats
+    response.redirect(
+      { method: 'POST' },
+      `${baseUrl}/api/webhooks/twilio/voice/lead/wait?sessionId=${sessionId}`,
     );
 
     return response.toString();

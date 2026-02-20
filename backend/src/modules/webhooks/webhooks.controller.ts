@@ -184,6 +184,24 @@ export class WebhooksController {
   }
 
   /**
+   * Conference waitUrl TwiML for the lead.
+   * Plays the configured greeting in a loop while the lead waits for the agent to join.
+   * Running inside the conference hold state means no TTS startup delay on pick-up.
+   *
+   * POST /webhooks/twilio/voice/lead/wait?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/wait')
+  async handleCallConnectLeadWait(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect lead wait TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadWaitTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
    * Async AMD callback for the lead leg.
    * Called when Twilio determines if the lead answered or voicemail picked up.
    *
