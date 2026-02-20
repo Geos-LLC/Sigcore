@@ -619,10 +619,19 @@ export class CallConnectService {
           );
           await this.tryNextAgentOrFail(session, settings, 'Agent did not accept (gather timeout or hangup)');
         } else if (isAgentLeg && session.status === SessionStatus.CALLING_LEAD) {
-          // AGENT_FIRST: agent accepted and joined conference, but then dropped while lead was ringing
-          this.logger.log(`Session ${session.id}: agent dropped while lead was ringing`);
+          // AGENT_FIRST: agent accepted, but dropped while lead was ringing.
+          // Cancel the ringing lead call, then attempt voicemail drop if configured —
+          // the lead didn't answer so we should still try to leave a message.
+          this.logger.log(`Session ${session.id}: agent completed while lead was ringing`);
           await this.hangUpLeadCall(session);
-          await this.failSession(session, 'Agent disconnected while calling lead');
+          const canDropVoicemail =
+            settings?.leadVoicemailEnabled && settings?.leadVoicemailMessage;
+          if (canDropVoicemail) {
+            this.logger.log(`Session ${session.id}: agent dropped, attempting voicemail drop`);
+            await this.dropVoicemailToLead(session, settings!);
+          } else {
+            await this.failSession(session, 'Agent disconnected while calling lead');
+          }
         } else if (isLeadLeg) {
           await this.failSession(session, 'Lead call ended before bridging');
         }
@@ -848,6 +857,15 @@ export class CallConnectService {
       `Voicemail drop for session ${session.id} → ${session.leadPhoneE164} (mode=${speakMode ? 'SPEAK' : 'TTS'})`,
     );
 
+    // Mark ENDED immediately — before any Twilio calls — so concurrent status callbacks
+    // (e.g. agent 'completed' arriving milliseconds later) see a terminal status and bail out,
+    // preventing a race condition that would overwrite this with FAILED.
+    await this.updateSession(session, { status: SessionStatus.ENDED });
+    await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+      reason: 'voicemail_drop',
+      voicemailMode: speakMode ? 'SPEAK' : 'TTS',
+    });
+
     try {
       const client = await this.getTwilioClient(session.businessId, session.tenantId);
 
@@ -886,11 +904,6 @@ export class CallConnectService {
       });
 
       this.logger.log(`Voicemail drop call placed for session ${session.id}`);
-      await this.updateSession(session, { status: SessionStatus.ENDED });
-      await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
-        reason: 'voicemail_drop',
-        voicemailMode: speakMode ? 'SPEAK' : 'TTS',
-      });
     } catch (err: any) {
       this.logger.error(
         `Voicemail drop call failed for session ${session.id}: ${err.message}`,
