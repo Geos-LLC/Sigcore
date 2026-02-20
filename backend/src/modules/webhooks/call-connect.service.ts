@@ -638,16 +638,21 @@ export class CallConnectService {
           }
           await this.updateSession(session, updates);
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED);
-        } else if (
-          isAgentLeg &&
-          (session.status === SessionStatus.CALLING_AGENT ||
-            session.status === SessionStatus.AGENT_ANSWERED)
-        ) {
-          // Agent hung up / gather timed out without pressing accept digit
+        } else if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
+          // Call ended before the agent answered.
+          // Fast-answer detection already handles voicemail (hangs up + retries there).
+          // This path catches cases where the call was terminated for other reasons.
+          this.logger.log(`Session ${session.id}: agent call completed before answering`);
+          await this.tryNextAgentOrFail(session, settings, 'Agent call ended before answer');
+        } else if (isAgentLeg && session.status === SessionStatus.AGENT_ANSWERED) {
+          // Agent answered and then hung up without pressing the accept digit.
+          // With fast-answer detection in place, this is always a real human who chose
+          // not to connect — do NOT retry (retrying immediately would call them again
+          // while they're still processing the first call / are actively declining).
           this.logger.log(
-            `Session ${session.id}: agent call completed without accepting (status was ${session.status})`,
+            `Session ${session.id}: agent answered but did not accept (hung up or gather timeout)`,
           );
-          await this.tryNextAgentOrFail(session, settings, 'Agent did not accept (gather timeout or hangup)');
+          await this.failSession(session, 'Agent answered but did not accept');
         } else if (isAgentLeg && session.status === SessionStatus.CALLING_LEAD) {
           // AGENT_FIRST: agent accepted but dropped while lead was ringing.
           // Cancel the lead call and fail — the agent issue is the root cause.
