@@ -299,13 +299,15 @@ export class CallConnectService {
   /**
    * Returns TwiML for the lead leg.
    *
-   * When voicemail is enabled the lead call uses `machineDetection: 'DetectMessageEnd'`
-   * (sync AMD). Twilio waits for the voicemail beep, then POSTs to this URL with
-   * `AnsweredBy=machine_end_beep` in the body. For a human, `AnsweredBy=human` is set
-   * and TwiML fires quickly.
+   * When voicemail is enabled the lead call uses `machineDetection: 'Enable'` (sync AMD).
+   * Twilio detects the machine early (~3-5s after answer) and POSTs to this URL with
+   * `AnsweredBy=machine_start`. This fires BEFORE the voicemail greeting finishes, so the
+   * agent notification goes out immediately. A pause in the TwiML allows the voicemail
+   * greeting + beep to complete before the message plays.
+   * For a human, `AnsweredBy=human` is set quickly and TwiML fires without delay.
    *
    * - human / no answeredBy  → join conference (normal bridge flow)
-   * - machine + TTS mode     → say the voicemail message and hang up (beep already passed)
+   * - machine + TTS mode     → notify agent immediately, pause for beep, play message, hang up
    * - machine + SPEAK mode   → redirect the agent to voicemail hold, bridge voicemail to agent
    */
   async handleLeadTwiml(sessionId: string, answeredBy?: string): Promise<string> {
@@ -320,6 +322,7 @@ export class CallConnectService {
     });
 
     const isMachine =
+      answeredBy === 'machine_start' ||
       answeredBy === 'machine_end_beep' ||
       answeredBy === 'machine_end_silence' ||
       answeredBy === 'machine_end_other' ||
@@ -350,8 +353,12 @@ export class CallConnectService {
         }
         return this.handleLeadVoicemailAgentTwiml(sessionId);
       } else {
-        // TTS / recording mode: beep already happened — play the message immediately and hang up.
+        // TTS / recording mode.
+        // machineDetection: 'Enable' fires here early (machine_start), before the greeting ends.
+        // Notify the agent immediately so they hear it well before the message is sent,
+        // then pause ~10s for the voicemail greeting + beep before playing our message.
         const response = new twilio.twiml.VoiceResponse();
+        response.pause({ length: 10 });
         if (settings.leadVoicemailRecordingUrl) {
           // Pre-recorded audio takes priority over TTS
           response.play({}, settings.leadVoicemailRecordingUrl);
@@ -859,12 +866,12 @@ export class CallConnectService {
         // message on this same call. If we still get no-answer after 60s, voicemail
         // is not set up and no second call is attempted.
         timeout: settings.leadVoicemailEnabled ? 60 : settings.ringTimeoutSeconds,
-        // DetectMessageEnd (sync AMD): Twilio waits for the voicemail beep before calling
-        // the TwiML URL, so the message plays immediately after the beep with no extra pause.
-        // For human leads, Twilio detects 'human' quickly and fires TwiML without waiting.
-        // No asyncAmdStatusCallback — AnsweredBy arrives in the TwiML POST body instead.
+        // Enable (sync AMD): fires TwiML URL ~3-5s after voicemail answers (machine_start),
+        // long before the greeting finishes. Agent is notified immediately. A pause in the
+        // TwiML covers the voicemail greeting + beep before the message plays.
+        // For human leads, 'human' is detected quickly and TwiML fires without delay.
         ...(settings.leadVoicemailEnabled
-          ? { machineDetection: 'DetectMessageEnd' }
+          ? { machineDetection: 'Enable' }
           : {}),
       }),
     ]);
@@ -899,11 +906,11 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings?.leadVoicemailEnabled ? 60 : (settings?.ringTimeoutSeconds ?? 30),
-      // DetectMessageEnd (sync AMD): Twilio waits for the voicemail beep before firing the
-      // TwiML URL, so the message plays right after the beep. For humans, 'human' is detected
-      // quickly and TwiML fires without delay. AnsweredBy is in the TwiML POST body.
+      // Enable (sync AMD): fires TwiML URL ~3-5s after voicemail answers (machine_start),
+      // long before the greeting finishes. This lets us notify the agent immediately.
+      // A pause in the TwiML then covers the voicemail greeting + beep before the message plays.
       ...(settings?.leadVoicemailEnabled
-        ? { machineDetection: 'DetectMessageEnd' }
+        ? { machineDetection: 'Enable' }
         : {}),
     });
 
