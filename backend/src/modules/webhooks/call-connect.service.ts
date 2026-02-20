@@ -295,11 +295,18 @@ export class CallConnectService {
   }
 
   /**
-   * Returns TwiML for the lead leg — joins the conference immediately.
-   * Greeting is played via the conference waitUrl (eliminates TTS startup delay
-   * on pick-up: lead hears hold music right away instead of waiting for TTS).
+   * Returns TwiML for the lead leg.
+   *
+   * When voicemail is enabled the lead call uses `machineDetection: 'DetectMessageEnd'`
+   * (sync AMD). Twilio waits for the voicemail beep, then POSTs to this URL with
+   * `AnsweredBy=machine_end_beep` in the body. For a human, `AnsweredBy=human` is set
+   * and TwiML fires quickly.
+   *
+   * - human / no answeredBy  → join conference (normal bridge flow)
+   * - machine + TTS mode     → say the voicemail message and hang up (beep already passed)
+   * - machine + SPEAK mode   → redirect the agent to voicemail hold, bridge voicemail to agent
    */
-  async handleLeadTwiml(sessionId: string): Promise<string> {
+  async handleLeadTwiml(sessionId: string, answeredBy?: string): Promise<string> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) {
       this.logger.error(`Lead TwiML: session ${sessionId} not found`);
@@ -310,12 +317,65 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
+    const isMachine =
+      answeredBy === 'machine_end_beep' ||
+      answeredBy === 'machine_end_silence' ||
+      answeredBy === 'machine_end_other' ||
+      answeredBy === 'fax';
+
+    if (isMachine && settings?.leadVoicemailEnabled) {
+      this.logger.log(
+        `Lead TwiML: voicemail detected (${answeredBy}) for session ${sessionId}, mode=${settings.agentVoicemailMode}`,
+      );
+
+      if (settings.agentVoicemailMode === AgentVoicemailMode.SPEAK) {
+        // SPEAK mode: redirect the agent out of the main conference into the voicemail bridge
+        // conference, then bridge the lead's voicemail leg into the same conference.
+        const baseUrl = this.getBaseUrl();
+        if (session.agentCallSid) {
+          this.getTwilioClient(session.businessId, session.tenantId)
+            .then((client) =>
+              client.calls(session.agentCallSid!).update({
+                url: `${baseUrl}/api/webhooks/twilio/voice/agent/voicemail-hold?sessionId=${sessionId}`,
+                method: 'POST',
+              }),
+            )
+            .catch((err) =>
+              this.logger.error(
+                `Failed to redirect agent to voicemail hold for session ${sessionId}: ${err.message}`,
+              ),
+            );
+        }
+        return this.handleLeadVoicemailAgentTwiml(sessionId);
+      } else {
+        // TTS mode: beep already happened — say the message immediately and hang up.
+        const message =
+          settings.leadVoicemailMessage ||
+          'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
+
+        const response = new twilio.twiml.VoiceResponse();
+        response.say(message);
+        response.hangup();
+
+        // Persist session end + emit event asynchronously (don't block TwiML response)
+        this.updateSession(session, { status: SessionStatus.ENDED })
+          .then(() =>
+            this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+              reason: 'voicemail_drop',
+            }),
+          )
+          .catch(() => {});
+
+        return response.toString();
+      }
+    }
+
+    // Human answered (or voicemail not enabled): join the conference.
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
     const dial = response.dial();
 
-    // Always use waitUrl so lead joins the conference immediately (no TTS startup delay).
-    // Twilio fetches the greeting from /lead/wait while hold music plays — zero silence on pick-up.
+    // waitUrl plays the greeting loop while the lead waits for the agent to join.
     const waitUrl = `${baseUrl}/api/webhooks/twilio/voice/lead/wait?sessionId=${sessionId}`;
 
     dial.conference(
@@ -794,12 +854,12 @@ export class CallConnectService {
         // message on this same call. If we still get no-answer after 60s, voicemail
         // is not set up and no second call is attempted.
         timeout: settings.leadVoicemailEnabled ? 60 : settings.ringTimeoutSeconds,
+        // DetectMessageEnd (sync AMD): Twilio waits for the voicemail beep before calling
+        // the TwiML URL, so the message plays immediately after the beep with no extra pause.
+        // For human leads, Twilio detects 'human' quickly and fires TwiML without waiting.
+        // No asyncAmdStatusCallback — AnsweredBy arrives in the TwiML POST body instead.
         ...(settings.leadVoicemailEnabled
-          ? {
-              machineDetection: 'Enable',
-              asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
-              asyncAmdStatusCallbackMethod: 'POST',
-            }
+          ? { machineDetection: 'DetectMessageEnd' }
           : {}),
       }),
     ]);
@@ -834,12 +894,11 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings?.leadVoicemailEnabled ? 60 : (settings?.ringTimeoutSeconds ?? 30),
+      // DetectMessageEnd (sync AMD): Twilio waits for the voicemail beep before firing the
+      // TwiML URL, so the message plays right after the beep. For humans, 'human' is detected
+      // quickly and TwiML fires without delay. AnsweredBy is in the TwiML POST body.
       ...(settings?.leadVoicemailEnabled
-        ? {
-            machineDetection: 'Enable',
-            asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
-            asyncAmdStatusCallbackMethod: 'POST',
-          }
+        ? { machineDetection: 'DetectMessageEnd' }
         : {}),
     });
 

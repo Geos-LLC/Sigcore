@@ -175,10 +175,11 @@ export class WebhooksController {
   @Post('twilio/voice/lead')
   async handleCallConnectLeadTwiml(
     @Query('sessionId') sessionId: string,
+    @Body('AnsweredBy') answeredBy: string,
     @Res() res: Response,
   ) {
-    this.logger.log(`Call Connect lead TwiML: sessionId=${sessionId}`);
-    const twiml = await this.callConnectService.handleLeadTwiml(sessionId);
+    this.logger.log(`Call Connect lead TwiML: sessionId=${sessionId}, answeredBy=${answeredBy || 'none'}`);
+    const twiml = await this.callConnectService.handleLeadTwiml(sessionId, answeredBy);
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
   }
