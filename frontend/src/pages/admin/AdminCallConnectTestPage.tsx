@@ -389,19 +389,22 @@ export default function AdminCallConnectTestPage() {
                         className="input w-full text-sm"
                       />
                     </div>
-                    {/* TTS message (used when no recording URL is set) */}
-                    {!leadVoicemailRecordingUrl && (
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">TTS message</label>
-                        <textarea
-                          rows={3}
-                          value={leadVoicemailMessage}
-                          onChange={e => setLeadVoicemailMessage(e.target.value)}
-                          placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
-                          className="input w-full resize-none text-sm"
-                        />
-                      </div>
-                    )}
+                    {/* TTS message — always editable; used as fallback when no recording URL is set */}
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        TTS message
+                        {leadVoicemailRecordingUrl && (
+                          <span className="text-gray-400 font-normal"> — fallback if audio URL fails</span>
+                        )}
+                      </label>
+                      <textarea
+                        rows={3}
+                        value={leadVoicemailMessage}
+                        onChange={e => setLeadVoicemailMessage(e.target.value)}
+                        placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
+                        className="input w-full resize-none text-sm"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
