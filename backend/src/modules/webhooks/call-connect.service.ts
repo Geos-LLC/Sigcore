@@ -664,18 +664,13 @@ export class CallConnectService {
             await this.failSession(session, `Agent ${callStatus} — lead was left waiting`);
           }
         } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
-          // Lead didn't answer or declined — attempt voicemail drop if configured, else fail.
-          // 'no-answer': rang until timeout. 'busy': lead pressed red button (declined).
-          const canDropVoicemail =
-            (callStatus === 'no-answer' || callStatus === 'busy') &&
-            settings?.leadVoicemailEnabled &&
-            settings.leadVoicemailMessage;
-
-          if (canDropVoicemail) {
-            await this.dropVoicemailToLead(session, settings!);
-          } else {
-            await this.failSession(session, `Lead ${callStatus}`);
-          }
+          // Lead didn't answer or declined.
+          // When voicemail is enabled the lead call rings for 60s — long enough for
+          // the carrier to forward to voicemail. If AMD detected a machine on that call,
+          // handleLeadAmd() already redirected it to play the message on the SAME call.
+          // Getting here means voicemail is either not set up or the lead actively declined
+          // (busy) — a second call won't help in either case, so just fail.
+          await this.failSession(session, `Lead ${callStatus} — no voicemail engaged`);
         }
         // If lead no-answer but session already BRIDGED, ignore (conference handles its own end)
         break;
@@ -771,12 +766,11 @@ export class CallConnectService {
         statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-        // When voicemail is enabled, use at least 40s — US carriers typically forward
-        // to voicemail after 25-30s of ringing. Shorter timeouts kill the call before
-        // voicemail can pick up, forcing a slower second call.
-        timeout: settings.leadVoicemailEnabled
-          ? Math.max(settings.ringTimeoutSeconds, 40)
-          : settings.ringTimeoutSeconds,
+        // When voicemail is enabled, use 60s — the maximum carriers take to forward
+        // to voicemail. AMD will detect the machine and redirect the call to play the
+        // message on this same call. If we still get no-answer after 60s, voicemail
+        // is not set up and no second call is attempted.
+        timeout: settings.leadVoicemailEnabled ? 60 : settings.ringTimeoutSeconds,
         ...(settings.leadVoicemailEnabled
           ? {
               machineDetection: 'Enable',
@@ -816,9 +810,7 @@ export class CallConnectService {
       statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      timeout: settings?.leadVoicemailEnabled
-        ? Math.max(settings?.ringTimeoutSeconds ?? 30, 40)
-        : (settings?.ringTimeoutSeconds ?? 30),
+      timeout: settings?.leadVoicemailEnabled ? 60 : (settings?.ringTimeoutSeconds ?? 30),
       ...(settings?.leadVoicemailEnabled
         ? {
             machineDetection: 'Enable',
