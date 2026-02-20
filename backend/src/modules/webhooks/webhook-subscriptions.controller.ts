@@ -225,6 +225,7 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED]: 'Call Connect: agent accepted the call',
       [WebhookEventType.CALL_CONNECT_LEAD_RINGING]: 'Call Connect: lead phone is ringing',
       [WebhookEventType.CALL_CONNECT_BRIDGED]: 'Call Connect: agent and lead are bridged',
+      [WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP]: 'Call Connect: voicemail drop started on lead voicemail',
       [WebhookEventType.CALL_CONNECT_ENDED]: 'Call Connect: session ended successfully',
       [WebhookEventType.CALL_CONNECT_FAILED]: 'Call Connect: session failed',
     };
