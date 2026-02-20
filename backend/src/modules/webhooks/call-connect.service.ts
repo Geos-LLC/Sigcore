@@ -269,7 +269,15 @@ export class CallConnectService {
       response.hangup();
     } else {
       // PARALLEL: agent joins conference immediately
-      response.say('Connecting you now.');
+      const digit = settings?.agentAcceptDigits || '1';
+      const summary = session.leadSummary || 'a new lead';
+      const template =
+        settings?.agentWhisperMessage ||
+        'Connecting you to a new lead: {summary}.';
+      const whisper = template
+        .replace(/\{summary\}/g, summary)
+        .replace(/\{digit\}/g, digit);
+      response.say(whisper);
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: true, endConferenceOnExit: true },
@@ -510,20 +518,12 @@ export class CallConnectService {
       case 'in-progress':
         if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
           await this.updateSession(session, { status: SessionStatus.AGENT_ANSWERED });
-          // For PARALLEL mode: agent is in conference, now emit bridged if lead also in
-          if (session.mode === CallConnectMode.PARALLEL && session.leadCallSid) {
-            await this.updateSession(session, { status: SessionStatus.BRIDGED });
-            await this.emitEvent(session, WebhookEventType.CALL_CONNECT_BRIDGED);
-          }
-        } else if (isLeadLeg) {
-          if (session.status !== SessionStatus.BRIDGED) {
-            await this.updateSession(session, {
-              status: SessionStatus.LEAD_ANSWERED,
-            });
-            // Both legs in-progress → bridged
-            await this.updateSession(session, { status: SessionStatus.BRIDGED });
-            await this.emitEvent(session, WebhookEventType.CALL_CONNECT_BRIDGED);
-          }
+          await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_RINGING);
+          // PARALLEL: wait for lead to also answer before marking BRIDGED
+        } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
+          await this.updateSession(session, { status: SessionStatus.LEAD_ANSWERED });
+          await this.updateSession(session, { status: SessionStatus.BRIDGED });
+          await this.emitEvent(session, WebhookEventType.CALL_CONNECT_BRIDGED);
         }
         break;
 
@@ -558,14 +558,20 @@ export class CallConnectService {
       case 'failed':
       case 'canceled':
         if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
-          await this.tryNextAgentOrFail(
-            session,
-            settings,
-            `Agent ${callStatus}`,
-          );
-        } else if (isLeadLeg) {
-          await this.failSession(session, `Lead ${callStatus}`);
+          await this.tryNextAgentOrFail(session, settings, `Agent ${callStatus}`);
+        } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
+          // Lead didn't answer — attempt voicemail drop if configured, else fail
+          if (
+            callStatus === 'no-answer' &&
+            settings?.leadVoicemailEnabled &&
+            settings.leadVoicemailMessage
+          ) {
+            await this.dropVoicemailToLead(session, settings);
+          } else {
+            await this.failSession(session, `Lead ${callStatus}`);
+          }
         }
+        // If lead no-answer but session already BRIDGED, ignore (agent is still in conference)
         break;
     }
   }
@@ -716,6 +722,43 @@ export class CallConnectService {
 
     this.logger.log(`Lead call initiated: ${leadCall.sid}`);
     await this.emitEvent(session, WebhookEventType.CALL_CONNECT_LEAD_RINGING);
+  }
+
+  /**
+   * Makes a dedicated outbound call to the lead with DetectMessageEnd AMD.
+   * Twilio waits for the voicemail beep, then executes the voicemail TwiML URL.
+   * This reliably drops a voice message even when the lead's phone never picked up.
+   */
+  private async dropVoicemailToLead(
+    session: CallConnectSession,
+    settings: CallConnectSettings,
+  ): Promise<void> {
+    const baseUrl = this.getBaseUrl();
+    this.logger.log(
+      `Attempting voicemail drop for session ${session.id} → ${session.leadPhoneE164}`,
+    );
+
+    try {
+      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      await client.calls.create({
+        to: session.leadPhoneE164,
+        from: session.fromNumberE164,
+        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${session.id}`,
+        // DetectMessageEnd waits for the voicemail beep before executing TwiML
+        machineDetection: 'DetectMessageEnd',
+        timeout: 30,
+      });
+      this.logger.log(`Voicemail drop call placed for session ${session.id}`);
+      await this.updateSession(session, { status: SessionStatus.ENDED });
+      await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+        reason: 'voicemail_drop',
+      });
+    } catch (err: any) {
+      this.logger.error(
+        `Voicemail drop call failed for session ${session.id}: ${err.message}`,
+      );
+      await this.failSession(session, `Lead did not answer; voicemail drop failed: ${err.message}`);
+    }
   }
 
   private async tryNextAgentOrFail(
