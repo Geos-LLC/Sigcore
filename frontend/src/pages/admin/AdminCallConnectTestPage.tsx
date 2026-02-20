@@ -69,6 +69,10 @@ export default function AdminCallConnectTestPage() {
   const [agentPhone, setAgentPhone] = useState(() => localStorage.getItem('cc_agent_phone') || '');
   const [mode, setMode] = useState<'AGENT_FIRST' | 'PARALLEL'>('AGENT_FIRST');
   const [ringTimeout, setRingTimeout] = useState(20);
+  const [agentWhisperMessage, setAgentWhisperMessage] = useState('');
+  const [leadGreetingMessage, setLeadGreetingMessage] = useState('');
+  const [leadVoicemailEnabled, setLeadVoicemailEnabled] = useState(false);
+  const [leadVoicemailMessage, setLeadVoicemailMessage] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsResult, setSettingsResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -94,6 +98,10 @@ export default function AdminCallConnectTestPage() {
           if (s.agentPhoneE164) setAgentPhone(s.agentPhoneE164);
           if (s.mode) setMode(s.mode);
           if (s.ringTimeoutSeconds) setRingTimeout(s.ringTimeoutSeconds);
+          if (s.agentWhisperMessage) setAgentWhisperMessage(s.agentWhisperMessage);
+          if (s.leadGreetingMessage) setLeadGreetingMessage(s.leadGreetingMessage);
+          setLeadVoicemailEnabled(!!s.leadVoicemailEnabled);
+          if (s.leadVoicemailMessage) setLeadVoicemailMessage(s.leadVoicemailMessage);
         }
       })
       .catch(() => {});
@@ -137,6 +145,10 @@ export default function AdminCallConnectTestPage() {
         agentPhoneE164: agentPhone,
         ringTimeoutSeconds: ringTimeout,
         maxAgentAttempts: 2,
+        ...(agentWhisperMessage ? { agentWhisperMessage } : {}),
+        ...(leadGreetingMessage ? { leadGreetingMessage } : {}),
+        leadVoicemailEnabled,
+        ...(leadVoicemailMessage ? { leadVoicemailMessage } : {}),
       });
       setSettingsResult({ ok: true, msg: 'Settings saved.' });
     } catch (err: any) {
@@ -296,6 +308,61 @@ export default function AdminCallConnectTestPage() {
                   onChange={e => setRingTimeout(Number(e.target.value))}
                   className="input w-full"
                 />
+              </div>
+            </div>
+
+            {/* Message customization */}
+            <div className="border-t border-gray-100 pt-4 space-y-4">
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Custom Messages</p>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Agent Whisper
+                  <span className="text-xs text-gray-400 ml-1">— what agent hears. Use {'{summary}'} and {'{digit}'}</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={agentWhisperMessage}
+                  onChange={e => setAgentWhisperMessage(e.target.value)}
+                  placeholder="You have a new lead: {summary}. Press {digit} to connect."
+                  className="input w-full resize-none text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Lead Greeting
+                  <span className="text-xs text-gray-400 ml-1">— what lead hears while waiting</span>
+                </label>
+                <input
+                  type="text"
+                  value={leadGreetingMessage}
+                  onChange={e => setLeadGreetingMessage(e.target.value)}
+                  placeholder="Please hold while we connect you."
+                  className="input w-full"
+                />
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer mb-2">
+                  <input
+                    type="checkbox"
+                    checked={leadVoicemailEnabled}
+                    onChange={e => setLeadVoicemailEnabled(e.target.checked)}
+                    className="rounded"
+                  />
+                  Auto Voicemail Drop
+                  <span className="text-xs text-gray-400 font-normal">— leave a message if lead doesn't answer</span>
+                </label>
+                {leadVoicemailEnabled && (
+                  <textarea
+                    rows={3}
+                    value={leadVoicemailMessage}
+                    onChange={e => setLeadVoicemailMessage(e.target.value)}
+                    placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
+                    className="input w-full resize-none text-sm"
+                  />
+                )}
               </div>
             </div>
 

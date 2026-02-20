@@ -50,4 +50,24 @@ export class UpsertCallConnectSettingsDto {
   @IsOptional()
   @IsString()
   agentPhoneE164?: string;
+
+  /** Custom whisper to agent. Supports {summary} and {digit} placeholders. */
+  @IsOptional()
+  @IsString()
+  agentWhisperMessage?: string;
+
+  /** Custom TTS greeting for the lead leg. */
+  @IsOptional()
+  @IsString()
+  leadGreetingMessage?: string;
+
+  /** Enable automatic voicemail drop when lead doesn't answer. */
+  @IsOptional()
+  @IsBoolean()
+  leadVoicemailEnabled?: boolean;
+
+  /** Message to leave on lead voicemail (requires leadVoicemailEnabled=true). */
+  @IsOptional()
+  @IsString()
+  leadVoicemailMessage?: string;
 }

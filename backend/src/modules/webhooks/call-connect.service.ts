@@ -247,8 +247,15 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
+      const digit = settings?.agentAcceptDigits || '1';
       const summary = session.leadSummary || 'a new lead';
-      response.say(`You have a new lead: ${summary}. Press ${settings?.agentAcceptDigits || '1'} to connect.`);
+      const template =
+        settings?.agentWhisperMessage ||
+        'You have a new lead: {summary}. Press {digit} to connect.';
+      const whisper = template
+        .replace(/\{summary\}/g, summary)
+        .replace(/\{digit\}/g, digit);
+      response.say(whisper);
 
       const gather = response.gather({
         numDigits: 1,
@@ -256,7 +263,7 @@ export class CallConnectService {
         method: 'POST',
         timeout: settings?.ringTimeoutSeconds || 20,
       });
-      gather.say(''); // keep gather active during timeout
+      gather.say('');
 
       response.say('No input received. Goodbye.');
       response.hangup();
@@ -283,13 +290,45 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+
     const response = new twilio.twiml.VoiceResponse();
-    response.say('Please hold while we connect you.');
+    response.say(settings?.leadGreetingMessage || 'Please hold while we connect you.');
     const dial = response.dial();
     dial.conference(
       { startConferenceOnEnter: false, endConferenceOnExit: true },
       session.conferenceName,
     );
+
+    return response.toString();
+  }
+
+  /**
+   * Returns TwiML that plays the configured voicemail drop message.
+   * Called by Twilio when we redirect a lead call that hit voicemail.
+   */
+  async handleLeadVoicemailTwiml(sessionId: string): Promise<string> {
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session) return this.hangupTwiml();
+
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+
+    const message =
+      settings?.leadVoicemailMessage ||
+      'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
+
+    const response = new twilio.twiml.VoiceResponse();
+    response.say(message);
+    response.hangup();
+
+    await this.updateSession(session, { status: SessionStatus.ENDED });
+    await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+      reason: 'voicemail_drop',
+    });
 
     return response.toString();
   }
@@ -374,6 +413,56 @@ export class CallConnectService {
     }
 
     await this.tryNextAgentOrFail(session, settings, `Voicemail detected (${answeredBy})`);
+  }
+
+  /**
+   * Handles AMD callback for the lead leg.
+   * If voicemail detected and voicemail drop is enabled, redirects the call
+   * to play the voicemail drop message.
+   */
+  async handleLeadAmd(sessionId: string, callSid: string, answeredBy: string): Promise<void> {
+    const isMachine =
+      answeredBy === 'machine_start' ||
+      answeredBy === 'machine_end_beep' ||
+      answeredBy === 'machine_end_silence' ||
+      answeredBy === 'machine_end_other' ||
+      answeredBy === 'fax';
+
+    this.logger.log(
+      `Lead AMD result for session ${sessionId}: answeredBy=${answeredBy}, isMachine=${isMachine}`,
+    );
+
+    if (!isMachine) return; // Human answered — conference flow proceeds normally
+
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session || TERMINAL_STATUSES.has(session.status)) return;
+
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+
+    if (!settings?.leadVoicemailEnabled || !settings.leadVoicemailMessage) {
+      // Voicemail drop not configured — just hang up and fail
+      try {
+        const client = await this.getTwilioClient(session.businessId, session.tenantId);
+        await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
+      } catch {}
+      await this.failSession(session, `Lead did not answer (${answeredBy})`);
+      return;
+    }
+
+    // Redirect call to voicemail drop TwiML
+    const baseUrl = this.getBaseUrl();
+    try {
+      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      await client.calls(callSid).update({
+        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}`,
+        method: 'POST',
+      });
+      this.logger.log(`Voicemail drop initiated for session ${sessionId}`);
+    } catch (err: any) {
+      this.logger.error(`Failed to redirect lead call to voicemail for session ${sessionId}: ${err.message}`);
+    }
   }
 
   /**
@@ -571,6 +660,13 @@ export class CallConnectService {
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: settings.ringTimeoutSeconds,
+        ...(settings.leadVoicemailEnabled
+          ? {
+              machineDetection: 'Enable',
+              asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
+              asyncAmdStatusCallbackMethod: 'POST',
+            }
+          : {}),
       }),
     ]);
 
@@ -604,6 +700,13 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings?.ringTimeoutSeconds || 30,
+      ...(settings?.leadVoicemailEnabled
+        ? {
+            machineDetection: 'Enable',
+            asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
+            asyncAmdStatusCallbackMethod: 'POST',
+          }
+        : {}),
     });
 
     await this.updateSession(session, {

@@ -184,6 +184,41 @@ export class WebhooksController {
   }
 
   /**
+   * Async AMD callback for the lead leg.
+   * Called when Twilio determines if the lead answered or voicemail picked up.
+   *
+   * POST /webhooks/twilio/voice/lead/amd?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/amd')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async handleCallConnectLeadAmd(
+    @Query('sessionId') sessionId: string,
+    @Body('CallSid') callSid: string,
+    @Body('AnsweredBy') answeredBy: string,
+  ) {
+    this.logger.log(`Lead AMD: sessionId=${sessionId}, callSid=${callSid}, answeredBy=${answeredBy}`);
+    if (sessionId && callSid) {
+      await this.callConnectService.handleLeadAmd(sessionId, callSid, answeredBy);
+    }
+  }
+
+  /**
+   * Voicemail drop TwiML — played to the lead's voicemail when AMD detects a machine.
+   *
+   * POST /webhooks/twilio/voice/lead/voicemail?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/voicemail')
+  async handleCallConnectLeadVoicemail(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Lead voicemail drop TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadVoicemailTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
    * Gather action callback — called when the agent presses a digit.
    * Advances the session state machine and returns conference TwiML (accepted)
    * or hangup TwiML (declined).

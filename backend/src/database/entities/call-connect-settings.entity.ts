@@ -81,6 +81,32 @@ export class CallConnectSettings {
   @Column({ name: 'agent_phone_e164', nullable: true })
   agentPhoneE164: string;
 
+  /**
+   * Custom TTS message spoken to the agent when they pick up.
+   * Supports {summary} and {digit} placeholders.
+   * Default: "You have a new lead: {summary}. Press {digit} to connect."
+   */
+  @Column({ name: 'agent_whisper_message', type: 'text', nullable: true })
+  agentWhisperMessage: string;
+
+  /**
+   * Custom TTS message spoken to the lead when they answer and wait for bridge.
+   * Default: "Please hold while we connect you."
+   */
+  @Column({ name: 'lead_greeting_message', type: 'text', nullable: true })
+  leadGreetingMessage: string;
+
+  /** Enable automatic voicemail drop when lead doesn't answer */
+  @Column({ name: 'lead_voicemail_enabled', default: false })
+  leadVoicemailEnabled: boolean;
+
+  /**
+   * TTS message to leave on lead voicemail if they don't answer.
+   * Only used when leadVoicemailEnabled is true.
+   */
+  @Column({ name: 'lead_voicemail_message', type: 'text', nullable: true })
+  leadVoicemailMessage: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
