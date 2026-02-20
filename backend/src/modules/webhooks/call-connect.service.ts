@@ -11,6 +11,7 @@ import * as twilio from 'twilio';
 import {
   CallConnectSettings,
   CallConnectMode,
+  AgentVoicemailMode,
 } from '../../database/entities/call-connect-settings.entity';
 import {
   CallConnectSession,
@@ -376,6 +377,41 @@ export class CallConnectService {
   }
 
   /**
+   * TwiML for the agent in SPEAK voicemail mode.
+   * Plays a brief notification then parks the agent in a private conference,
+   * waiting for the lead's voicemail leg to join and start the conference.
+   */
+  async handleAgentVoicemailHoldTwiml(sessionId: string): Promise<string> {
+    const response = new twilio.twiml.VoiceResponse();
+    response.say(
+      "The customer didn't answer. You'll be connected to their voicemail. Please leave a message after the beep, then hang up when done.",
+    );
+    response.pause({ length: 1 });
+    const dial = response.dial();
+    dial.conference(
+      { startConferenceOnEnter: false, endConferenceOnExit: true } as any,
+      `ccvm_${sessionId}`,
+    );
+    return response.toString();
+  }
+
+  /**
+   * TwiML for the lead's voicemail leg in SPEAK voicemail mode.
+   * Called by Twilio after DetectMessageEnd fires (beep detected).
+   * Joins the same conference as the agent, which starts the conference
+   * and bridges both legs — the agent then speaks directly into the voicemail.
+   */
+  async handleLeadVoicemailAgentTwiml(sessionId: string): Promise<string> {
+    const response = new twilio.twiml.VoiceResponse();
+    const dial = response.dial();
+    dial.conference(
+      { startConferenceOnEnter: true, endConferenceOnExit: true } as any,
+      `ccvm_${sessionId}`,
+    );
+    return response.toString();
+  }
+
+  /**
    * Handles the Gather action callback when the agent presses a digit.
    * Returns TwiML: conference join if accepted, hangup if declined.
    */
@@ -615,13 +651,15 @@ export class CallConnectService {
             await this.failSession(session, `Agent ${callStatus} — lead was left waiting`);
           }
         } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
-          // Lead didn't answer — attempt voicemail drop if configured, else fail
-          if (
-            callStatus === 'no-answer' &&
+          // Lead didn't answer or declined — attempt voicemail drop if configured, else fail.
+          // 'no-answer': rang until timeout. 'busy': lead pressed red button (declined).
+          const canDropVoicemail =
+            (callStatus === 'no-answer' || callStatus === 'busy') &&
             settings?.leadVoicemailEnabled &&
-            settings.leadVoicemailMessage
-          ) {
-            await this.dropVoicemailToLead(session, settings);
+            settings.leadVoicemailMessage;
+
+          if (canDropVoicemail) {
+            await this.dropVoicemailToLead(session, settings!);
           } else {
             await this.failSession(session, `Lead ${callStatus}`);
           }
@@ -804,24 +842,54 @@ export class CallConnectService {
     settings: CallConnectSettings,
   ): Promise<void> {
     const baseUrl = this.getBaseUrl();
+    const speakMode = settings.agentVoicemailMode === AgentVoicemailMode.SPEAK;
+
     this.logger.log(
-      `Attempting voicemail drop for session ${session.id} → ${session.leadPhoneE164}`,
+      `Voicemail drop for session ${session.id} → ${session.leadPhoneE164} (mode=${speakMode ? 'SPEAK' : 'TTS'})`,
     );
 
     try {
       const client = await this.getTwilioClient(session.businessId, session.tenantId);
+
+      if (speakMode && session.agentCallSid) {
+        // SPEAK mode: redirect agent to a hold conference so they can leave a personal voicemail.
+        // The lead voicemail call will join the same conference once the beep fires, bridging them.
+        this.logger.log(`SPEAK mode: redirecting agent ${session.agentCallSid} to voicemail hold`);
+        await client.calls(session.agentCallSid).update({
+          url: `${baseUrl}/api/webhooks/twilio/voice/agent/voicemail-hold?sessionId=${session.id}`,
+          method: 'POST',
+        }).catch((err: any) => {
+          this.logger.warn(`Could not redirect agent to voicemail hold: ${err.message}`);
+        });
+      } else {
+        // TTS mode: release the agent — they are no longer needed.
+        if (session.agentCallSid) {
+          await client.calls(session.agentCallSid).update({ status: 'completed' }).catch(() => {});
+          this.logger.log(`TTS mode: hung up agent call ${session.agentCallSid}`);
+        }
+      }
+
+      // Voicemail URL differs by mode:
+      // TTS  → plays the configured TTS message on the voicemail
+      // SPEAK → joins the agent-hold conference so agent speaks directly
+      const voicemailUrl = speakMode
+        ? `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${session.id}`
+        : `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${session.id}`;
+
       await client.calls.create({
         to: session.leadPhoneE164,
         from: session.fromNumberE164,
-        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${session.id}`,
+        url: voicemailUrl,
         // DetectMessageEnd waits for the voicemail beep before executing TwiML
         machineDetection: 'DetectMessageEnd',
         timeout: 30,
       });
+
       this.logger.log(`Voicemail drop call placed for session ${session.id}`);
       await this.updateSession(session, { status: SessionStatus.ENDED });
       await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
         reason: 'voicemail_drop',
+        voicemailMode: speakMode ? 'SPEAK' : 'TTS',
       });
     } catch (err: any) {
       this.logger.error(

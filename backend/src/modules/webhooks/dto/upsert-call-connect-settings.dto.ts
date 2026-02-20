@@ -1,5 +1,5 @@
 import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
-import { CallConnectMode, AgentStrategy, CallerIdStrategy } from '../../../database/entities/call-connect-settings.entity';
+import { CallConnectMode, AgentStrategy, CallerIdStrategy, AgentVoicemailMode } from '../../../database/entities/call-connect-settings.entity';
 
 export class UpsertCallConnectSettingsDto {
   @IsOptional()
@@ -70,4 +70,13 @@ export class UpsertCallConnectSettingsDto {
   @IsOptional()
   @IsString()
   leadVoicemailMessage?: string;
+
+  /**
+   * How the voicemail is delivered.
+   * TTS (default): agent released, configured text is read by TTS.
+   * SPEAK: agent is bridged into the voicemail call to leave a personal message.
+   */
+  @IsOptional()
+  @IsEnum(AgentVoicemailMode)
+  agentVoicemailMode?: AgentVoicemailMode;
 }

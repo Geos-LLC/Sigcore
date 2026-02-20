@@ -73,6 +73,7 @@ export default function AdminCallConnectTestPage() {
   const [leadGreetingMessage, setLeadGreetingMessage] = useState('');
   const [leadVoicemailEnabled, setLeadVoicemailEnabled] = useState(false);
   const [leadVoicemailMessage, setLeadVoicemailMessage] = useState('');
+  const [agentVoicemailMode, setAgentVoicemailMode] = useState<'TTS' | 'SPEAK'>('TTS');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsResult, setSettingsResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -102,6 +103,7 @@ export default function AdminCallConnectTestPage() {
           if (s.leadGreetingMessage) setLeadGreetingMessage(s.leadGreetingMessage);
           setLeadVoicemailEnabled(!!s.leadVoicemailEnabled);
           if (s.leadVoicemailMessage) setLeadVoicemailMessage(s.leadVoicemailMessage);
+          if (s.agentVoicemailMode) setAgentVoicemailMode(s.agentVoicemailMode);
         }
       })
       .catch(() => {});
@@ -149,6 +151,7 @@ export default function AdminCallConnectTestPage() {
         ...(leadGreetingMessage ? { leadGreetingMessage } : {}),
         leadVoicemailEnabled,
         ...(leadVoicemailMessage ? { leadVoicemailMessage } : {}),
+        agentVoicemailMode,
       });
       setSettingsResult({ ok: true, msg: 'Settings saved.' });
     } catch (err: any) {
@@ -355,13 +358,47 @@ export default function AdminCallConnectTestPage() {
                   <span className="text-xs text-gray-400 font-normal">— leave a message if lead doesn't answer</span>
                 </label>
                 {leadVoicemailEnabled && (
-                  <textarea
-                    rows={3}
-                    value={leadVoicemailMessage}
-                    onChange={e => setLeadVoicemailMessage(e.target.value)}
-                    placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
-                    className="input w-full resize-none text-sm"
-                  />
+                  <div className="space-y-3">
+                    {/* Voicemail delivery mode */}
+                    <div className="flex gap-3">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="radio"
+                          name="agentVoicemailMode"
+                          value="TTS"
+                          checked={agentVoicemailMode === 'TTS'}
+                          onChange={() => setAgentVoicemailMode('TTS')}
+                        />
+                        <span className="font-medium">TTS template</span>
+                        <span className="text-xs text-gray-400">— play the message below automatically</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="radio"
+                          name="agentVoicemailMode"
+                          value="SPEAK"
+                          checked={agentVoicemailMode === 'SPEAK'}
+                          onChange={() => setAgentVoicemailMode('SPEAK')}
+                        />
+                        <span className="font-medium">Agent speaks</span>
+                        <span className="text-xs text-gray-400">— bridge agent to voicemail to record personally</span>
+                      </label>
+                    </div>
+                    {agentVoicemailMode === 'TTS' && (
+                      <textarea
+                        rows={3}
+                        value={leadVoicemailMessage}
+                        onChange={e => setLeadVoicemailMessage(e.target.value)}
+                        placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
+                        className="input w-full resize-none text-sm"
+                      />
+                    )}
+                    {agentVoicemailMode === 'SPEAK' && (
+                      <p className="text-xs text-gray-500 bg-blue-50 border border-blue-200 rounded px-3 py-2">
+                        When the lead doesn't answer, the agent is kept on the line and bridged to the lead's voicemail after the beep. The agent speaks the message personally then hangs up.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

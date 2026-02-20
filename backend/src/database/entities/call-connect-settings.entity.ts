@@ -22,6 +22,13 @@ export enum CallerIdStrategy {
   BUSINESS_NUMBER = 'BUSINESS_NUMBER',
 }
 
+export enum AgentVoicemailMode {
+  /** Play the configured TTS message (default). Agent call is released immediately. */
+  TTS = 'TTS',
+  /** Bridge the agent into the voicemail call so they can leave a personal message. */
+  SPEAK = 'SPEAK',
+}
+
 @Entity('call_connect_settings')
 export class CallConnectSettings {
   /** Primary key = workspaceId (one row per business) */
@@ -106,6 +113,19 @@ export class CallConnectSettings {
    */
   @Column({ name: 'lead_voicemail_message', type: 'text', nullable: true })
   leadVoicemailMessage: string;
+
+  /**
+   * How the voicemail message is delivered when leadVoicemailEnabled is true.
+   * TTS (default): agent is released, configured text is read by TTS.
+   * SPEAK: agent is kept on the line and bridged into the voicemail call to speak personally.
+   */
+  @Column({
+    name: 'agent_voicemail_mode',
+    type: 'enum',
+    enum: AgentVoicemailMode,
+    default: AgentVoicemailMode.TTS,
+  })
+  agentVoicemailMode: AgentVoicemailMode;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -237,6 +237,43 @@ export class WebhooksController {
   }
 
   /**
+   * Agent voicemail hold TwiML — SPEAK voicemail mode only.
+   * Plays a notification then parks the agent in a private conference waiting
+   * for the lead's voicemail leg to join (which starts the conference and bridges them).
+   *
+   * POST /webhooks/twilio/voice/agent/voicemail-hold?sessionId=<uuid>
+   */
+  @Post('twilio/voice/agent/voicemail-hold')
+  async handleCallConnectAgentVoicemailHold(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect agent voicemail hold TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleAgentVoicemailHoldTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
+   * Lead voicemail bridge TwiML — SPEAK voicemail mode only.
+   * Called by Twilio after DetectMessageEnd fires (beep detected).
+   * Joins the same private conference as the agent, bridging them so the agent
+   * can speak directly into the lead's voicemail.
+   *
+   * POST /webhooks/twilio/voice/lead/voicemail-agent?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/voicemail-agent')
+  async handleCallConnectLeadVoicemailAgent(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect lead voicemail-agent TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadVoicemailAgentTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
    * Gather action callback — called when the agent presses a digit.
    * Advances the session state machine and returns conference TwiML (accepted)
    * or hangup TwiML (declined).
