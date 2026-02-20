@@ -75,7 +75,6 @@ export default function AdminCallConnectTestPage() {
   // Call form state
   const [leadPhone, setLeadPhone] = useState(() => localStorage.getItem('cc_lead_phone') || '');
   const [leadSummary, setLeadSummary] = useState('Test lead from admin UI');
-  const [leadId, setLeadId] = useState(() => `test-${Date.now()}`);
 
   // Session state
   const [session, setSession] = useState<Session | null>(null);
@@ -154,7 +153,6 @@ export default function AdminCallConnectTestPage() {
     saveCredentials();
     localStorage.setItem('cc_lead_phone', leadPhone);
     const newLeadId = `test-${Date.now()}`;
-    setLeadId(newLeadId);
     try {
       const res = await makeClient(apiKey).post('/internal/call-connect/start', {
         businessId: workspaceId,
@@ -494,13 +492,6 @@ export default function AdminCallConnectTestPage() {
             )}
           </div>
 
-          {session.status === 'AGENT_FIRST' && session.status === 'CALLING_AGENT' && (
-            <div className="px-5 pb-5">
-              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-                <strong>Your phone should be ringing.</strong> Answer and press <kbd className="bg-white border border-blue-300 px-1.5 py-0.5 rounded font-mono text-xs">1</kbd> to connect the lead.
-              </div>
-            </div>
-          )}
           {session.status === 'CALLING_AGENT' && (
             <div className="px-5 pb-5">
               <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
