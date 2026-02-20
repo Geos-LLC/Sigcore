@@ -256,20 +256,20 @@ export class CallConnectService {
       const whisper = template
         .replace(/\{summary\}/g, summary)
         .replace(/\{digit\}/g, digit);
-      // Gather timeout is separate from ringTimeoutSeconds (which controls how long the phone rings).
-      // 10s is plenty for a human to press a digit after hearing the whisper.
-      // Whisper is placed INSIDE the gather so Twilio starts the timeout immediately —
-      // this limits wasted time on voicemail (which can't press digits) even when AMD
-      // fails to detect it. The agent can press the digit at any point while the whisper
-      // is playing; it will interrupt and accept immediately.
-      const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 10);
+      // Play the whisper BEFORE the gather so the agent hears the full message
+      // and has the complete gather window to press a digit.
+      response.say(whisper);
+
+      // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
+      // already short-circuits voicemail calls before this TwiML runs.
+      const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 15);
       const gather = response.gather({
         numDigits: 1,
         action: `${baseUrl}/api/webhooks/twilio/voice/agent/gather?sessionId=${sessionId}`,
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.say(whisper);
+      gather.say('');
 
       response.say('No input received. Goodbye.');
       response.hangup();
@@ -600,6 +600,23 @@ export class CallConnectService {
 
       case 'in-progress':
         if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
+          if (session.mode === CallConnectMode.AGENT_FIRST) {
+            // Voicemail answers in 0-4s. Humans almost never pick up in < 5s.
+            // Detect fast answer and immediately retry instead of waiting for gather timeout.
+            // This handles "Silence Unknown Callers" (iOS) and similar carrier voicemail routing.
+            const msSinceCalling = Date.now() - session.updatedAt.getTime();
+            if (msSinceCalling < 5000) {
+              this.logger.log(
+                `Session ${session.id}: agent answered in ${msSinceCalling}ms — voicemail (fast answer), retrying`,
+              );
+              try {
+                const client = await this.getTwilioClient(session.businessId, session.tenantId);
+                await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
+              } catch { /* ignore — call may have already ended */ }
+              await this.tryNextAgentOrFail(session, settings, `Voicemail (answered in ${msSinceCalling}ms)`);
+              return;
+            }
+          }
           await this.updateSession(session, { status: SessionStatus.AGENT_ANSWERED });
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_RINGING);
           // PARALLEL: wait for lead to also answer before marking BRIDGED
