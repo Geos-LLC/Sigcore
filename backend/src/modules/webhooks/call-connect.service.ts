@@ -308,18 +308,12 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
     const dial = response.dial();
 
-    // Use waitUrl for greeting so lead joins conference immediately (no TTS startup delay on pick-up).
-    // If a custom greeting is configured, our /lead/wait endpoint voices it; otherwise Twilio plays default hold music.
-    const waitUrl = settings?.leadGreetingMessage
-      ? `${baseUrl}/api/webhooks/twilio/voice/lead/wait?sessionId=${sessionId}`
-      : undefined;
+    // Always use waitUrl so lead joins the conference immediately (no TTS startup delay).
+    // Twilio fetches the greeting from /lead/wait while hold music plays — zero silence on pick-up.
+    const waitUrl = `${baseUrl}/api/webhooks/twilio/voice/lead/wait?sessionId=${sessionId}`;
 
     dial.conference(
-      {
-        startConferenceOnEnter: false,
-        endConferenceOnExit: true,
-        ...(waitUrl ? { waitUrl, waitMethod: 'POST' } : {}),
-      } as any,
+      { startConferenceOnEnter: false, endConferenceOnExit: true, waitUrl, waitMethod: 'POST' } as any,
       session.conferenceName,
     );
 
@@ -873,6 +867,22 @@ export class CallConnectService {
     reason: string,
   ): Promise<void> {
     this.logger.warn(`Session ${session.id} FAILED: ${reason}`);
+
+    // Hang up any active Twilio calls so neither party is left on a dead line
+    if (session.agentCallSid || session.leadCallSid) {
+      try {
+        const client = await this.getTwilioClient(session.businessId, session.tenantId);
+        if (session.agentCallSid) {
+          await client.calls(session.agentCallSid).update({ status: 'completed' }).catch(() => {});
+        }
+        if (session.leadCallSid) {
+          await client.calls(session.leadCallSid).update({ status: 'completed' }).catch(() => {});
+        }
+      } catch (err: any) {
+        this.logger.warn(`Could not hang up calls for failed session ${session.id}: ${err.message}`);
+      }
+    }
+
     await this.updateSession(session, {
       status: SessionStatus.FAILED,
       failureReason: reason,
