@@ -771,7 +771,12 @@ export class CallConnectService {
         statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-        timeout: settings.ringTimeoutSeconds,
+        // When voicemail is enabled, use at least 40s — US carriers typically forward
+        // to voicemail after 25-30s of ringing. Shorter timeouts kill the call before
+        // voicemail can pick up, forcing a slower second call.
+        timeout: settings.leadVoicemailEnabled
+          ? Math.max(settings.ringTimeoutSeconds, 40)
+          : settings.ringTimeoutSeconds,
         ...(settings.leadVoicemailEnabled
           ? {
               machineDetection: 'Enable',
@@ -811,7 +816,9 @@ export class CallConnectService {
       statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      timeout: settings?.ringTimeoutSeconds || 30,
+      timeout: settings?.leadVoicemailEnabled
+        ? Math.max(settings?.ringTimeoutSeconds ?? 30, 40)
+        : (settings?.ringTimeoutSeconds ?? 30),
       ...(settings?.leadVoicemailEnabled
         ? {
             machineDetection: 'Enable',
@@ -902,9 +909,11 @@ export class CallConnectService {
         to: session.leadPhoneE164,
         from: session.fromNumberE164,
         url: voicemailUrl,
-        // DetectMessageEnd waits for the voicemail beep before executing TwiML
+        // DetectMessageEnd waits for the voicemail beep before executing TwiML.
+        // 45s gives the carrier time to forward to voicemail (typically 25-30s)
+        // plus Twilio's beep detection window.
         machineDetection: 'DetectMessageEnd',
-        timeout: 30,
+        timeout: 45,
       });
 
       this.logger.log(`Voicemail drop call placed for session ${session.id}`);
