@@ -68,12 +68,12 @@ export default function AdminCallConnectTestPage() {
   const [botNumber, setBotNumber] = useState(() => localStorage.getItem('cc_bot_number') || '+19045778584');
   const [agentPhone, setAgentPhone] = useState(() => localStorage.getItem('cc_agent_phone') || '');
   const [mode, setMode] = useState<'AGENT_FIRST' | 'PARALLEL'>('AGENT_FIRST');
-  const [ringTimeout, setRingTimeout] = useState(20);
+  const [ringTimeout, setRingTimeout] = useState(60);
   const [agentWhisperMessage, setAgentWhisperMessage] = useState('');
   const [leadGreetingMessage, setLeadGreetingMessage] = useState('');
-  const [leadVoicemailEnabled, setLeadVoicemailEnabled] = useState(false);
+  const [leadVoicemailEnabled, setLeadVoicemailEnabled] = useState(true);
   const [leadVoicemailMessage, setLeadVoicemailMessage] = useState('');
-  const [agentVoicemailMode, setAgentVoicemailMode] = useState<'TTS' | 'SPEAK'>('TTS');
+  const [leadVoicemailRecordingUrl, setLeadVoicemailRecordingUrl] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsResult, setSettingsResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -103,7 +103,7 @@ export default function AdminCallConnectTestPage() {
           if (s.leadGreetingMessage) setLeadGreetingMessage(s.leadGreetingMessage);
           setLeadVoicemailEnabled(!!s.leadVoicemailEnabled);
           if (s.leadVoicemailMessage) setLeadVoicemailMessage(s.leadVoicemailMessage);
-          if (s.agentVoicemailMode) setAgentVoicemailMode(s.agentVoicemailMode);
+          if (s.leadVoicemailRecordingUrl) setLeadVoicemailRecordingUrl(s.leadVoicemailRecordingUrl);
         }
       })
       .catch(() => {});
@@ -150,8 +150,9 @@ export default function AdminCallConnectTestPage() {
         ...(agentWhisperMessage ? { agentWhisperMessage } : {}),
         ...(leadGreetingMessage ? { leadGreetingMessage } : {}),
         leadVoicemailEnabled,
-        ...(leadVoicemailMessage ? { leadVoicemailMessage } : {}),
-        agentVoicemailMode,
+        ...(leadVoicemailEnabled && leadVoicemailRecordingUrl ? { leadVoicemailRecordingUrl } : {}),
+        ...(leadVoicemailEnabled && leadVoicemailMessage ? { leadVoicemailMessage } : {}),
+        ...(leadVoicemailEnabled ? { agentVoicemailMode: 'TTS' } : {}),
       });
       setSettingsResult({ ok: true, msg: 'Settings saved.' });
     } catch (err: any) {
@@ -306,7 +307,7 @@ export default function AdminCallConnectTestPage() {
                 <input
                   type="number"
                   min={5}
-                  max={60}
+                  max={120}
                   value={ringTimeout}
                   onChange={e => setRingTimeout(Number(e.target.value))}
                   className="input w-full"
@@ -347,56 +348,59 @@ export default function AdminCallConnectTestPage() {
               </div>
 
               <div>
-                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer mb-2">
-                  <input
-                    type="checkbox"
-                    checked={leadVoicemailEnabled}
-                    onChange={e => setLeadVoicemailEnabled(e.target.checked)}
-                    className="rounded"
-                  />
-                  Auto Voicemail Drop
-                  <span className="text-xs text-gray-400 font-normal">— leave a message if lead doesn't answer</span>
-                </label>
+                {/* Auto Voicemail Drop — toggle */}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-700">Auto Voicemail Drop</p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {leadVoicemailEnabled
+                        ? 'Automatically leaves a message when the lead doesn\'t answer'
+                        : 'Agent speaks personally to voicemail during the call'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLeadVoicemailEnabled(v => !v)}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none ${
+                      leadVoicemailEnabled ? 'bg-blue-600' : 'bg-gray-200'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                        leadVoicemailEnabled ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+
                 {leadVoicemailEnabled && (
-                  <div className="space-y-3">
-                    {/* Voicemail delivery mode */}
-                    <div className="flex gap-3">
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <input
-                          type="radio"
-                          name="agentVoicemailMode"
-                          value="TTS"
-                          checked={agentVoicemailMode === 'TTS'}
-                          onChange={() => setAgentVoicemailMode('TTS')}
-                        />
-                        <span className="font-medium">TTS template</span>
-                        <span className="text-xs text-gray-400">— play the message below automatically</span>
+                  <div className="mt-3 space-y-3">
+                    {/* Pre-recorded audio (optional, takes priority over TTS) */}
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Pre-recorded audio URL
+                        <span className="text-gray-400 font-normal"> — takes priority over TTS (optional)</span>
                       </label>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <input
-                          type="radio"
-                          name="agentVoicemailMode"
-                          value="SPEAK"
-                          checked={agentVoicemailMode === 'SPEAK'}
-                          onChange={() => setAgentVoicemailMode('SPEAK')}
-                        />
-                        <span className="font-medium">Agent speaks</span>
-                        <span className="text-xs text-gray-400">— bridge agent to voicemail to record personally</span>
-                      </label>
-                    </div>
-                    {agentVoicemailMode === 'TTS' && (
-                      <textarea
-                        rows={3}
-                        value={leadVoicemailMessage}
-                        onChange={e => setLeadVoicemailMessage(e.target.value)}
-                        placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
-                        className="input w-full resize-none text-sm"
+                      <input
+                        type="text"
+                        value={leadVoicemailRecordingUrl}
+                        onChange={e => setLeadVoicemailRecordingUrl(e.target.value)}
+                        placeholder="https://... (MP3 or WAV, publicly accessible)"
+                        className="input w-full text-sm"
                       />
-                    )}
-                    {agentVoicemailMode === 'SPEAK' && (
-                      <p className="text-xs text-gray-500 bg-blue-50 border border-blue-200 rounded px-3 py-2">
-                        When the lead doesn't answer, the agent is kept on the line and bridged to the lead's voicemail after the beep. The agent speaks the message personally then hangs up.
-                      </p>
+                    </div>
+                    {/* TTS message (used when no recording URL is set) */}
+                    {!leadVoicemailRecordingUrl && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">TTS message</label>
+                        <textarea
+                          rows={3}
+                          value={leadVoicemailMessage}
+                          onChange={e => setLeadVoicemailMessage(e.target.value)}
+                          placeholder="Hi, we tried to reach you about your inquiry. Please call us back at your earliest convenience."
+                          className="input w-full resize-none text-sm"
+                        />
+                      </div>
                     )}
                   </div>
                 )}
