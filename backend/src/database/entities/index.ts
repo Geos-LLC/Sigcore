@@ -13,3 +13,5 @@ export * from './tenant-phone-number.entity';
 export * from './phone-number-order.entity';
 export * from './phone-number-pricing.entity';
 export * from './api-key.entity';
+export * from './call-connect-settings.entity';
+export * from './call-connect-session.entity';

@@ -220,6 +220,13 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.CALL_STARTED]: 'Triggered when a call starts',
       [WebhookEventType.CALL_COMPLETED]: 'Triggered when a call completes',
       [WebhookEventType.CALL_MISSED]: 'Triggered when a call is missed',
+      [WebhookEventType.CALL_CONNECT_SESSION_CREATED]: 'Call Connect: session created for a new lead',
+      [WebhookEventType.CALL_CONNECT_AGENT_RINGING]: 'Call Connect: agent phone is ringing',
+      [WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED]: 'Call Connect: agent accepted the call',
+      [WebhookEventType.CALL_CONNECT_LEAD_RINGING]: 'Call Connect: lead phone is ringing',
+      [WebhookEventType.CALL_CONNECT_BRIDGED]: 'Call Connect: agent and lead are bridged',
+      [WebhookEventType.CALL_CONNECT_ENDED]: 'Call Connect: session ended successfully',
+      [WebhookEventType.CALL_CONNECT_FAILED]: 'Call Connect: session failed',
     };
     return descriptions[event] || 'No description available';
   }

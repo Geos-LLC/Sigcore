@@ -10,6 +10,8 @@ import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookRateLimitGuard } from './webhook-rate-limit.guard';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
+import { CallConnectService } from './call-connect.service';
+import { CallConnectController } from './call-connect.controller';
 import {
   CommunicationIntegration,
   CommunicationConversation,
@@ -21,6 +23,8 @@ import {
   ApiKey,
   Tenant,
   ContactIdentity,
+  CallConnectSettings,
+  CallConnectSession,
 } from '../../database/entities';
 
 @Module({
@@ -36,9 +40,16 @@ import {
       ApiKey,
       Tenant,
       ContactIdentity,
+      CallConnectSettings,
+      CallConnectSession,
     ]),
   ],
-  controllers: [WebhooksController, WebhookSubscriptionsController, WebhookSubscriptionsV1Controller],
+  controllers: [
+    WebhooksController,
+    WebhookSubscriptionsController,
+    WebhookSubscriptionsV1Controller,
+    CallConnectController,
+  ],
   providers: [
     WebhooksService,
     TwilioWebhooksService,
@@ -48,6 +59,7 @@ import {
     WebhookRateLimitGuard,
     EncryptionService,
     OpenPhoneProvider,
+    CallConnectService,
   ],
   exports: [TwilioWebhooksService, TenantWebhooksService, IdempotencyService, OutboundWebhooksService],
 })

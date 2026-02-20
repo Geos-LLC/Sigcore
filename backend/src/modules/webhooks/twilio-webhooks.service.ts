@@ -28,6 +28,7 @@ import { IdempotencyService } from './idempotency.service';
 import { TenantWebhooksService } from './tenant-webhooks.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
+import { CallConnectService } from './call-connect.service';
 
 export interface TwilioSmsWebhookPayload {
   MessageSid: string;
@@ -129,6 +130,8 @@ export class TwilioWebhooksService {
     @Optional()
     @Inject(forwardRef(() => OutboundWebhooksService))
     private outboundWebhooksService?: OutboundWebhooksService,
+    @Optional()
+    private callConnectService?: CallConnectService,
   ) {}
 
   async getWorkspaceByWebhookId(webhookId: string): Promise<Workspace | null> {
@@ -589,12 +592,22 @@ export class TwilioWebhooksService {
   async handleCallStatus(payload: TwilioCallStatusPayload): Promise<void> {
     this.logger.log(`Processing Twilio call status: CallSid=${payload.CallSid}, Status=${payload.CallStatus}`);
 
+    // Forward to Call Connect state machine first (handles CC session calls
+    // that are not stored in communication_calls)
+    if (this.callConnectService) {
+      this.callConnectService
+        .handleProviderCallStatus(payload.CallSid, payload.CallStatus, payload.CallDuration)
+        .catch((err) => {
+          this.logger.error(`Call Connect status handler error: ${err.message}`);
+        });
+    }
+
     const call = await this.callRepo.findOne({
       where: { providerCallId: payload.CallSid },
     });
 
     if (!call) {
-      this.logger.warn(`Call ${payload.CallSid} not found for status update`);
+      this.logger.warn(`Call ${payload.CallSid} not found in communication_calls — may be a Call Connect leg`);
       return;
     }
 

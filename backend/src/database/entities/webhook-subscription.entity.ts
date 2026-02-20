@@ -15,6 +15,14 @@ export enum WebhookEventType {
   CALL_STARTED = 'call.started',
   CALL_COMPLETED = 'call.completed',
   CALL_MISSED = 'call.missed',
+  // Call Connect events (Instant Call Bridge for LeadBridge)
+  CALL_CONNECT_SESSION_CREATED = 'call_connect.session.created',
+  CALL_CONNECT_AGENT_RINGING = 'call_connect.agent.ringing',
+  CALL_CONNECT_AGENT_ACCEPTED = 'call_connect.agent.accepted',
+  CALL_CONNECT_LEAD_RINGING = 'call_connect.lead.ringing',
+  CALL_CONNECT_BRIDGED = 'call_connect.bridged',
+  CALL_CONNECT_ENDED = 'call_connect.ended',
+  CALL_CONNECT_FAILED = 'call_connect.failed',
 }
 
 export enum WebhookSubscriptionStatus {

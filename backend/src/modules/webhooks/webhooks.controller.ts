@@ -3,6 +3,7 @@ import {
   Post,
   Body,
   Param,
+  Query,
   Headers,
   RawBodyRequest,
   Req,
@@ -25,6 +26,7 @@ import {
   TwilioRecordingPayload,
 } from './twilio-webhooks.service';
 import { WebhookRateLimitGuard } from './webhook-rate-limit.guard';
+import { CallConnectService } from './call-connect.service';
 
 @Controller('webhooks')
 @UseGuards(WebhookRateLimitGuard)
@@ -34,6 +36,7 @@ export class WebhooksController {
   constructor(
     private readonly webhooksService: WebhooksService,
     private readonly twilioWebhooksService: TwilioWebhooksService,
+    private readonly callConnectService: CallConnectService,
   ) {}
 
   @Post('openphone/:webhookId')
@@ -139,6 +142,65 @@ export class WebhooksController {
     this.logger.log(`Twilio call status webhook: ${payload.CallSid} -> ${payload.CallStatus}`);
     await this.twilioWebhooksService.handleCallStatus(payload);
     return '';
+  }
+
+  // ==================== CALL CONNECT TwiML WEBHOOKS ====================
+  // These must be defined BEFORE twilio/voice/:webhookId to avoid route conflicts.
+
+  /**
+   * TwiML endpoint for the agent leg of a Call Connect session.
+   * Twilio calls this when the agent's phone rings.
+   * Returns a whisper + Gather (AGENT_FIRST) or direct conference join (PARALLEL).
+   *
+   * POST /webhooks/twilio/voice/agent?sessionId=<uuid>
+   */
+  @Post('twilio/voice/agent')
+  async handleCallConnectAgentTwiml(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect agent TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleAgentTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
+   * TwiML endpoint for the lead leg of a Call Connect session.
+   * Twilio calls this when the lead answers.
+   * Returns TwiML to join the conference.
+   *
+   * POST /webhooks/twilio/voice/lead?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead')
+  async handleCallConnectLeadTwiml(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect lead TwiML: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadTwiml(sessionId);
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
+  }
+
+  /**
+   * Gather action callback — called when the agent presses a digit.
+   * Advances the session state machine and returns conference TwiML (accepted)
+   * or hangup TwiML (declined).
+   *
+   * POST /webhooks/twilio/voice/agent/gather?sessionId=<uuid>
+   * Body: Digits=<digit> (Twilio form-encoded)
+   */
+  @Post('twilio/voice/agent/gather')
+  async handleCallConnectAgentGather(
+    @Query('sessionId') sessionId: string,
+    @Body('Digits') digits: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Call Connect gather: sessionId=${sessionId}, digits=${digits}`);
+    const twiml = await this.callConnectService.handleAgentGatherAction(sessionId, digits || '');
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
   }
 
   /**
