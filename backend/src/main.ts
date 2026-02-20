@@ -14,6 +14,7 @@ async function bootstrap() {
   // Enable CORS FIRST — must run before any other middleware
   // so preflight OPTIONS requests get CORS headers immediately.
   const callioBackendUrl = configService.get('CALLIO_BACKEND_URL') || 'http://localhost:3001';
+  const frontendUrl = configService.get('FRONTEND_URL'); // optional custom domain e.g. https://www.sigcore.org
   app.enableCors({
     origin: [
       'http://localhost:3001',
@@ -21,6 +22,8 @@ async function bootstrap() {
       callioBackendUrl,
       /\.railway\.app$/,
       /\.vercel\.app$/,
+      /sigcore\.org$/,
+      ...(frontendUrl ? [frontendUrl] : []),
     ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     credentials: true,
