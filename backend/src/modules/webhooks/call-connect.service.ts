@@ -548,6 +548,11 @@ export class CallConnectService {
             `Session ${session.id}: agent call completed without accepting (status was ${session.status})`,
           );
           await this.tryNextAgentOrFail(session, settings, 'Agent did not accept (gather timeout or hangup)');
+        } else if (isAgentLeg && session.status === SessionStatus.CALLING_LEAD) {
+          // AGENT_FIRST: agent accepted and joined conference, but then dropped while lead was ringing
+          this.logger.log(`Session ${session.id}: agent dropped while lead was ringing`);
+          await this.hangUpLeadCall(session);
+          await this.failSession(session, 'Agent disconnected while calling lead');
         } else if (isLeadLeg) {
           await this.failSession(session, 'Lead call ended before bridging');
         }
@@ -557,8 +562,24 @@ export class CallConnectService {
       case 'busy':
       case 'failed':
       case 'canceled':
-        if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
-          await this.tryNextAgentOrFail(session, settings, `Agent ${callStatus}`);
+        if (isAgentLeg) {
+          if (
+            session.status === SessionStatus.CALLING_AGENT ||
+            session.status === SessionStatus.AGENT_ANSWERED
+          ) {
+            // Standard: agent didn't pick up before lead was called
+            await this.tryNextAgentOrFail(session, settings, `Agent ${callStatus}`);
+          } else if (
+            session.status === SessionStatus.LEAD_ANSWERED ||
+            session.status === SessionStatus.BRIDGED
+          ) {
+            // PARALLEL: lead is already waiting in the conference but agent failed to join
+            this.logger.log(
+              `Session ${session.id}: agent ${callStatus} while lead was waiting in conference`,
+            );
+            await this.hangUpLeadCall(session);
+            await this.failSession(session, `Agent ${callStatus} — lead was left waiting`);
+          }
         } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
           // Lead didn't answer — attempt voicemail drop if configured, else fail
           if (
@@ -571,7 +592,7 @@ export class CallConnectService {
             await this.failSession(session, `Lead ${callStatus}`);
           }
         }
-        // If lead no-answer but session already BRIDGED, ignore (agent is still in conference)
+        // If lead no-answer but session already BRIDGED, ignore (conference handles its own end)
         break;
     }
   }
@@ -722,6 +743,21 @@ export class CallConnectService {
 
     this.logger.log(`Lead call initiated: ${leadCall.sid}`);
     await this.emitEvent(session, WebhookEventType.CALL_CONNECT_LEAD_RINGING);
+  }
+
+  /**
+   * Hangs up the active lead call via Twilio REST.
+   * Used when the agent drops/fails and the lead would otherwise be left waiting.
+   */
+  private async hangUpLeadCall(session: CallConnectSession): Promise<void> {
+    if (!session.leadCallSid) return;
+    try {
+      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      await client.calls(session.leadCallSid).update({ status: 'completed' }).catch(() => {});
+      this.logger.log(`Hung up lead call ${session.leadCallSid} for session ${session.id}`);
+    } catch (err: any) {
+      this.logger.warn(`Could not hang up lead call for session ${session.id}: ${err.message}`);
+    }
   }
 
   /**
