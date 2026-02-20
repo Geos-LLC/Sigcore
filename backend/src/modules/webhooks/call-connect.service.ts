@@ -256,6 +256,8 @@ export class CallConnectService {
       const whisper = template
         .replace(/\{summary\}/g, summary)
         .replace(/\{digit\}/g, digit);
+      // Brief pause so the agent has a moment to orient before the script starts.
+      response.pause({ length: 2 });
       // Play the whisper BEFORE the gather so the agent hears the full message
       // and has the complete gather window to press a digit.
       response.say(whisper);
@@ -357,6 +359,16 @@ export class CallConnectService {
         response.say(message);
         response.hangup();
 
+        // Emit event and notify agent as soon as the voicemail drop starts —
+        // don't wait for the message to finish playing.
+        this.updateSession(session, { status: SessionStatus.ENDED })
+          .then(() =>
+            this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+              reason: 'voicemail_drop',
+            }),
+          )
+          .catch(() => {});
+
         // Notify the agent and hang up their call — they would otherwise be stranded
         // in an empty conference since the lead never fully joined.
         if (session.agentCallSid) {
@@ -375,15 +387,6 @@ export class CallConnectService {
               ),
             );
         }
-
-        // Persist session end + emit event asynchronously (don't block TwiML response)
-        this.updateSession(session, { status: SessionStatus.ENDED })
-          .then(() =>
-            this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
-              reason: 'voicemail_drop',
-            }),
-          )
-          .catch(() => {});
 
         return response.toString();
       }
