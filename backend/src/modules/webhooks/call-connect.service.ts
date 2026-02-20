@@ -734,6 +734,10 @@ export class CallConnectService {
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
     );
 
+    // No machineDetection here: asyncAmdStatusCallback was never invoked by Twilio,
+    // meaning it ran synchronously and blocked TwiML execution for ~6 seconds (audible
+    // silence after the agent picks up). Voicemail detection is handled instead by
+    // fast-answer heuristic in handleProviderCallStatus (< 5s answer → voicemail).
     const call = await client.calls.create({
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
@@ -742,9 +746,6 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings.ringTimeoutSeconds,
-      machineDetection: 'Enable',
-      asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
-      asyncAmdStatusCallbackMethod: 'POST',
     });
 
     await this.updateSession(session, {
