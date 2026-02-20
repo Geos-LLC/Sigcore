@@ -623,19 +623,11 @@ export class CallConnectService {
           );
           await this.tryNextAgentOrFail(session, settings, 'Agent did not accept (gather timeout or hangup)');
         } else if (isAgentLeg && session.status === SessionStatus.CALLING_LEAD) {
-          // AGENT_FIRST: agent accepted, but dropped while lead was ringing.
-          // Cancel the ringing lead call, then attempt voicemail drop if configured —
-          // the lead didn't answer so we should still try to leave a message.
-          this.logger.log(`Session ${session.id}: agent completed while lead was ringing`);
+          // AGENT_FIRST: agent accepted but dropped while lead was ringing.
+          // Cancel the lead call and fail — the agent issue is the root cause.
+          this.logger.log(`Session ${session.id}: agent dropped while lead was ringing`);
           await this.hangUpLeadCall(session);
-          const canDropVoicemail =
-            settings?.leadVoicemailEnabled && settings?.leadVoicemailMessage;
-          if (canDropVoicemail) {
-            this.logger.log(`Session ${session.id}: agent dropped, attempting voicemail drop`);
-            await this.dropVoicemailToLead(session, settings!);
-          } else {
-            await this.failSession(session, 'Agent disconnected while calling lead');
-          }
+          await this.failSession(session, 'Agent disconnected while calling lead');
         } else if (isLeadLeg) {
           await this.failSession(session, 'Lead call ended before bridging');
         }
