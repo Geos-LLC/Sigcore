@@ -341,6 +341,42 @@ export class CallConnectService {
   }
 
   /**
+   * Handles the async Answering Machine Detection (AMD) callback from Twilio.
+   * If voicemail is detected, we cancel the agent call and retry/fail.
+   */
+  async handleAgentAmd(sessionId: string, callSid: string, answeredBy: string): Promise<void> {
+    const isMachine =
+      answeredBy === 'machine_start' ||
+      answeredBy === 'machine_end_beep' ||
+      answeredBy === 'machine_end_silence' ||
+      answeredBy === 'machine_end_other' ||
+      answeredBy === 'fax';
+
+    this.logger.log(
+      `AMD result for session ${sessionId}: answeredBy=${answeredBy}, isMachine=${isMachine}`,
+    );
+
+    if (!isMachine) return; // Human picked up — let normal flow continue
+
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session || TERMINAL_STATUSES.has(session.status)) return;
+
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+
+    // Hang up the voicemail call
+    try {
+      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
+    } catch (err: any) {
+      this.logger.warn(`Could not hang up machine call ${callSid}: ${err.message}`);
+    }
+
+    await this.tryNextAgentOrFail(session, settings, `Voicemail detected (${answeredBy})`);
+  }
+
+  /**
    * Called by TwilioWebhooksService.handleCallStatus() for every Twilio status callback.
    * Checks if the CallSid belongs to a call-connect session and advances the state machine.
    */
@@ -413,6 +449,18 @@ export class CallConnectService {
           }
           await this.updateSession(session, updates);
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED);
+        } else if (
+          isAgentLeg &&
+          (session.status === SessionStatus.CALLING_AGENT ||
+            session.status === SessionStatus.AGENT_ANSWERED)
+        ) {
+          // Agent hung up / gather timed out without pressing accept digit
+          this.logger.log(
+            `Session ${session.id}: agent call completed without accepting (status was ${session.status})`,
+          );
+          await this.tryNextAgentOrFail(session, settings, 'Agent did not accept (gather timeout or hangup)');
+        } else if (isLeadLeg) {
+          await this.failSession(session, 'Lead call ended before bridging');
         }
         break;
 
@@ -481,6 +529,9 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings.ringTimeoutSeconds,
+      machineDetection: 'Enable',
+      asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
+      asyncAmdStatusCallbackMethod: 'POST',
     });
 
     await this.updateSession(session, {

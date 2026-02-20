@@ -204,6 +204,26 @@ export class WebhooksController {
   }
 
   /**
+   * Async Answering Machine Detection callback from Twilio.
+   * Called when AMD determines if an agent call was answered by a human or voicemail.
+   *
+   * POST /webhooks/twilio/voice/amd?sessionId=<uuid>
+   * Body: CallSid=<sid>&AnsweredBy=<human|machine_start|machine_end_beep|...>
+   */
+  @Post('twilio/voice/amd')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async handleCallConnectAmd(
+    @Query('sessionId') sessionId: string,
+    @Body('CallSid') callSid: string,
+    @Body('AnsweredBy') answeredBy: string,
+  ) {
+    this.logger.log(`Call Connect AMD: sessionId=${sessionId}, callSid=${callSid}, answeredBy=${answeredBy}`);
+    if (sessionId && callSid) {
+      await this.callConnectService.handleAgentAmd(sessionId, callSid, answeredBy);
+    }
+  }
+
+  /**
    * Handle incoming voice calls from Twilio.
    * Must return TwiML XML response.
    */
