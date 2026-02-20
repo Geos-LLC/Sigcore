@@ -357,6 +357,25 @@ export class CallConnectService {
         response.say(message);
         response.hangup();
 
+        // Notify the agent and hang up their call — they would otherwise be stranded
+        // in an empty conference since the lead never fully joined.
+        if (session.agentCallSid) {
+          const agentNotify = new twilio.twiml.VoiceResponse();
+          agentNotify.say('We are sending a voicemail to the customer. Goodbye.');
+          agentNotify.hangup();
+          this.getTwilioClient(session.businessId, session.tenantId)
+            .then((client) =>
+              client.calls(session.agentCallSid!).update({
+                twiml: agentNotify.toString(),
+              }),
+            )
+            .catch((err) =>
+              this.logger.error(
+                `Failed to notify agent of voicemail drop for session ${sessionId}: ${err.message}`,
+              ),
+            );
+        }
+
         // Persist session end + emit event asynchronously (don't block TwiML response)
         this.updateSession(session, { status: SessionStatus.ENDED })
           .then(() =>
