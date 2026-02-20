@@ -656,22 +656,12 @@ export class CallConnectService {
             await this.failSession(session, `Agent ${callStatus} — lead was left waiting`);
           }
         } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
-          if (
-            callStatus === 'busy' &&
-            settings?.leadVoicemailEnabled &&
-            settings?.leadVoicemailMessage
-          ) {
-            // Lead actively declined the call (pressed red button).
-            // The first call is dead so AMD cannot handle it, but on most carriers
-            // voicemail still accepts a follow-up call after a decline.
-            // Place a second dedicated call with DetectMessageEnd.
-            this.logger.log(`Session ${session.id}: lead declined — attempting voicemail drop`);
-            await this.dropVoicemailToLead(session, settings!);
-          } else {
-            // no-answer after 60s: the carrier had 60s to forward to voicemail.
-            // AMD would have caught it if voicemail engaged. Voicemail not set up — fail.
-            await this.failSession(session, `Lead ${callStatus} — no voicemail engaged`);
-          }
+          // Lead didn't answer (no-answer) or declined (busy).
+          // If the carrier forwards to voicemail after decline, voicemail picks up the
+          // FIRST call and AMD handles it via handleLeadAmd(). Getting 'busy' here means
+          // the carrier did NOT forward to voicemail — a second call won't reach it either.
+          // no-answer after 60s similarly means voicemail never engaged. Just fail.
+          await this.failSession(session, `Lead ${callStatus} — no voicemail engaged`);
         }
         // If lead no-answer but session already BRIDGED, ignore (conference handles its own end)
         break;
