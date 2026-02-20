@@ -72,6 +72,15 @@ export class UpsertCallConnectSettingsDto {
   leadVoicemailMessage?: string;
 
   /**
+   * URL of a pre-recorded audio file (MP3/WAV) to play on lead voicemail.
+   * When set, takes priority over leadVoicemailMessage (TTS).
+   * Must be a publicly accessible HTTPS URL.
+   */
+  @IsOptional()
+  @IsString()
+  leadVoicemailRecordingUrl?: string;
+
+  /**
    * How the voicemail is delivered.
    * TTS (default): agent released, configured text is read by TTS.
    * SPEAK: agent is bridged into the voicemail call to leave a personal message.

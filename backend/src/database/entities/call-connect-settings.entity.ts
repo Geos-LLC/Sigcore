@@ -109,10 +109,18 @@ export class CallConnectSettings {
 
   /**
    * TTS message to leave on lead voicemail if they don't answer.
-   * Only used when leadVoicemailEnabled is true.
+   * Only used when leadVoicemailEnabled is true and leadVoicemailRecordingUrl is not set.
    */
   @Column({ name: 'lead_voicemail_message', type: 'text', nullable: true })
   leadVoicemailMessage: string;
+
+  /**
+   * URL of a pre-recorded audio file (MP3/WAV) to play on the lead voicemail.
+   * When set, takes priority over leadVoicemailMessage (TTS).
+   * Must be a publicly accessible HTTPS URL.
+   */
+  @Column({ name: 'lead_voicemail_recording_url', type: 'text', nullable: true })
+  leadVoicemailRecordingUrl: string;
 
   /**
    * How the voicemail message is delivered when leadVoicemailEnabled is true.

@@ -350,13 +350,17 @@ export class CallConnectService {
         }
         return this.handleLeadVoicemailAgentTwiml(sessionId);
       } else {
-        // TTS mode: beep already happened — say the message immediately and hang up.
-        const message =
-          settings.leadVoicemailMessage ||
-          'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
-
+        // TTS / recording mode: beep already happened — play the message immediately and hang up.
         const response = new twilio.twiml.VoiceResponse();
-        response.say(message);
+        if (settings.leadVoicemailRecordingUrl) {
+          // Pre-recorded audio takes priority over TTS
+          response.play({}, settings.leadVoicemailRecordingUrl);
+        } else {
+          const message =
+            settings.leadVoicemailMessage ||
+            'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
+          response.say(message);
+        }
         response.hangup();
 
         // Emit event and notify agent as soon as the voicemail drop starts —
@@ -447,16 +451,16 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    const message =
-      settings?.leadVoicemailMessage ||
-      'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
-
     const response = new twilio.twiml.VoiceResponse();
-    // Brief pause so the message lands after the voicemail beep.
-    // AMD fires at 'machine_start' (before the beep) when redirecting on the first call;
-    // the second (DetectMessageEnd) call already waits for the beep so the pause is a no-op.
     response.pause({ length: 2 });
-    response.say(message);
+    if (settings?.leadVoicemailRecordingUrl) {
+      response.play({}, settings.leadVoicemailRecordingUrl);
+    } else {
+      const message =
+        settings?.leadVoicemailMessage ||
+        'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
+      response.say(message);
+    }
     response.hangup();
 
     await this.updateSession(session, { status: SessionStatus.ENDED });
@@ -614,7 +618,7 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    if (!settings?.leadVoicemailEnabled || !settings.leadVoicemailMessage) {
+    if (!settings?.leadVoicemailEnabled || (!settings.leadVoicemailMessage && !settings.leadVoicemailRecordingUrl)) {
       // Voicemail drop not configured — just hang up and fail
       try {
         const client = await this.getTwilioClient(session.businessId, session.tenantId);
