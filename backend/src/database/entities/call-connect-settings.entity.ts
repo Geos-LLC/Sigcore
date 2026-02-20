@@ -45,7 +45,7 @@ export class CallConnectSettings {
   })
   mode: CallConnectMode;
 
-  @Column({ name: 'ring_timeout_seconds', type: 'int', default: 20 })
+  @Column({ name: 'ring_timeout_seconds', type: 'int', default: 60 })
   ringTimeoutSeconds: number;
 
   @Column({ name: 'agent_accept_digits', default: '1' })

@@ -21,6 +21,7 @@ export enum WebhookEventType {
   CALL_CONNECT_AGENT_ACCEPTED = 'call_connect.agent.accepted',
   CALL_CONNECT_LEAD_RINGING = 'call_connect.lead.ringing',
   CALL_CONNECT_BRIDGED = 'call_connect.bridged',
+  CALL_CONNECT_VOICEMAIL_DROP = 'call_connect.voicemail_drop',
   CALL_CONNECT_ENDED = 'call_connect.ended',
   CALL_CONNECT_FAILED = 'call_connect.failed',
 }

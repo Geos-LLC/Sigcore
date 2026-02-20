@@ -363,15 +363,13 @@ export class CallConnectService {
         }
         response.hangup();
 
-        // Emit event and notify agent as soon as the voicemail drop starts —
-        // don't wait for the message to finish playing.
-        this.updateSession(session, { status: SessionStatus.ENDED })
-          .then(() =>
-            this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
-              reason: 'voicemail_drop',
-            }),
-          )
-          .catch(() => {});
+        // Emit voicemail_drop event immediately so LeadBridge knows the drop has started.
+        // Do NOT set ENDED here — let the completed status callback (fired when the voicemail
+        // message finishes and the call hangs up) set ENDED. This means ENDED appears in the
+        // timeline AFTER the agent has already heard the notification, not before.
+        this.emitEvent(session, WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP, {
+          mode: 'tts',
+        }).catch(() => {});
 
         // Notify the agent and hang up their call — they would otherwise be stranded
         // in an empty conference since the lead never fully joined.
