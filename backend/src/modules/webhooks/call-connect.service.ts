@@ -679,23 +679,6 @@ export class CallConnectService {
 
       case 'in-progress':
         if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
-          if (session.mode === CallConnectMode.AGENT_FIRST) {
-            // Voicemail answers in 0-4s. Humans almost never pick up in < 5s.
-            // Detect fast answer and immediately retry instead of waiting for gather timeout.
-            // This handles "Silence Unknown Callers" (iOS) and similar carrier voicemail routing.
-            const msSinceCalling = Date.now() - session.updatedAt.getTime();
-            if (msSinceCalling < 5000) {
-              this.logger.log(
-                `Session ${session.id}: agent answered in ${msSinceCalling}ms — voicemail (fast answer), retrying`,
-              );
-              try {
-                const client = await this.getTwilioClient(session.businessId, session.tenantId);
-                await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
-              } catch { /* ignore — call may have already ended */ }
-              await this.tryNextAgentOrFail(session, settings, `Voicemail (answered in ${msSinceCalling}ms)`);
-              return;
-            }
-          }
           await this.updateSession(session, { status: SessionStatus.AGENT_ANSWERED });
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_RINGING);
           // PARALLEL: wait for lead to also answer before marking BRIDGED
@@ -818,10 +801,8 @@ export class CallConnectService {
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
     );
 
-    // No machineDetection here: asyncAmdStatusCallback was never invoked by Twilio,
-    // meaning it ran synchronously and blocked TwiML execution for ~6 seconds (audible
-    // silence after the agent picks up). Voicemail detection is handled instead by
-    // fast-answer heuristic in handleProviderCallStatus (< 5s answer → voicemail).
+    // No machineDetection: it caused ~6s silence on pickup (sync AMD delayed TwiML).
+    // Agent voicemail is handled naturally: carrier voicemail → no-answer → tryNextAgentOrFail.
     const call = await client.calls.create({
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
