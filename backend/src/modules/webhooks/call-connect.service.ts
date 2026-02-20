@@ -365,6 +365,10 @@ export class CallConnectService {
       'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
 
     const response = new twilio.twiml.VoiceResponse();
+    // Brief pause so the message lands after the voicemail beep.
+    // AMD fires at 'machine_start' (before the beep) when redirecting on the first call;
+    // the second (DetectMessageEnd) call already waits for the beep so the pause is a no-op.
+    response.pause({ length: 2 });
     response.say(message);
     response.hangup();
 
