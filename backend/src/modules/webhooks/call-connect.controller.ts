@@ -9,7 +9,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { CallConnectService } from './call-connect.service';
 import { StartCallConnectDto } from './dto/start-call-connect.dto';
 import { CancelCallConnectDto } from './dto/cancel-call-connect.dto';
@@ -70,9 +70,10 @@ export class CallConnectController {
   @HttpCode(HttpStatus.OK)
   async start(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | undefined,
     @Body() dto: StartCallConnectDto,
   ) {
-    return this.callConnectService.startSession(workspaceId, dto);
+    return this.callConnectService.startSession(workspaceId, dto, tenantId);
   }
 
   /**

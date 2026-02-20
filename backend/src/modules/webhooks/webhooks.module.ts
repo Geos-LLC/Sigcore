@@ -23,6 +23,7 @@ import {
   ApiKey,
   Tenant,
   ContactIdentity,
+  TenantIntegration,
   CallConnectSettings,
   CallConnectSession,
 } from '../../database/entities';
@@ -40,6 +41,7 @@ import {
       ApiKey,
       Tenant,
       ContactIdentity,
+      TenantIntegration,
       CallConnectSettings,
       CallConnectSession,
     ]),

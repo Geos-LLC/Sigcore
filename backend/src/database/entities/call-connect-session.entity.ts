@@ -35,6 +35,10 @@ export class CallConnectSession {
   @Index()
   businessId: string;
 
+  /** Tenant UUID — populated when auth is via a tenant-scoped API key */
+  @Column({ name: 'tenant_id', nullable: true })
+  tenantId: string;
+
   @Column({ name: 'lead_id' })
   leadId: string;
 

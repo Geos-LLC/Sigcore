@@ -21,6 +21,7 @@ import {
   CommunicationIntegration,
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
@@ -45,6 +46,8 @@ export class CallConnectService {
     private sessionRepo: Repository<CallConnectSession>,
     @InjectRepository(CommunicationIntegration)
     private integrationRepo: Repository<CommunicationIntegration>,
+    @InjectRepository(TenantIntegration)
+    private tenantIntegrationRepo: Repository<TenantIntegration>,
     private encryptionService: EncryptionService,
     private outboundWebhooks: OutboundWebhooksService,
     private config: ConfigService,
@@ -86,6 +89,7 @@ export class CallConnectService {
   async startSession(
     workspaceId: string,
     dto: StartCallConnectDto,
+    tenantId?: string,
   ): Promise<{ sessionId: string; status: SessionStatus }> {
     // 1. Load & validate settings
     const settings = await this.settingsRepo.findOne({
@@ -138,6 +142,7 @@ export class CallConnectService {
     // 5. Create session row
     const session = this.sessionRepo.create({
       businessId: workspaceId,
+      tenantId: tenantId || undefined,
       leadId: dto.leadId,
       leadPhoneE164: dto.leadPhoneE164,
       leadSummary: dto.leadSummary,
@@ -189,7 +194,7 @@ export class CallConnectService {
     }
 
     try {
-      const client = await this.getTwilioClient(workspaceId);
+      const client = await this.getTwilioClient(workspaceId, session.tenantId);
       if (session.agentCallSid) {
         await client.calls(session.agentCallSid).update({ status: 'canceled' }).catch(() => {});
       }
@@ -449,7 +454,7 @@ export class CallConnectService {
     session: CallConnectSession,
     settings: CallConnectSettings,
   ): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId);
+    const client = await this.getTwilioClient(session.businessId, session.tenantId);
     const baseUrl = this.config.get<string>('BASE_URL');
 
     this.logger.log(
@@ -478,7 +483,7 @@ export class CallConnectService {
     session: CallConnectSession,
     settings: CallConnectSettings,
   ): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId);
+    const client = await this.getTwilioClient(session.businessId, session.tenantId);
     const baseUrl = this.config.get<string>('BASE_URL');
 
     this.logger.log(
@@ -518,7 +523,7 @@ export class CallConnectService {
   }
 
   private async initiateLeadCall(session: CallConnectSession): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId);
+    const client = await this.getTwilioClient(session.businessId, session.tenantId);
     const baseUrl = this.config.get<string>('BASE_URL');
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
@@ -635,13 +640,32 @@ export class CallConnectService {
     }
   }
 
-  private async getTwilioClient(workspaceId: string): Promise<twilio.Twilio> {
+  private async getTwilioClient(
+    workspaceId: string,
+    tenantId?: string,
+  ): Promise<twilio.Twilio> {
+    // 1. Try tenant-level integration first (tenant-provisioned Twilio account)
+    if (tenantId) {
+      const tenantIntegration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.TWILIO },
+      });
+      if (tenantIntegration?.credentialsEncrypted) {
+        const credentials = JSON.parse(
+          this.encryptionService.decrypt(tenantIntegration.credentialsEncrypted),
+        );
+        return twilio(credentials.accountSid, credentials.authToken);
+      }
+    }
+
+    // 2. Fall back to workspace-level integration
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.TWILIO },
     });
 
     if (!integration?.credentialsEncrypted) {
-      throw new Error(`No Twilio integration found for workspace ${workspaceId}`);
+      throw new Error(
+        `No Twilio integration found for workspace ${workspaceId}${tenantId ? ` / tenant ${tenantId}` : ''}`,
+      );
     }
 
     const credentials = JSON.parse(
