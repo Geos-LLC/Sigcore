@@ -39,6 +39,18 @@ const TERMINAL_STATUSES = new Set<SessionStatus>([
 export class CallConnectService {
   private readonly logger = new Logger(CallConnectService.name);
 
+  /** Resolve the public base URL for Twilio callbacks, with Railway fallback */
+  private getBaseUrl(): string {
+    const configured = this.config.get<string>('BASE_URL');
+    if (configured) return configured.replace(/\/$/, '');
+
+    // Railway auto-sets RAILWAY_PUBLIC_DOMAIN (no protocol prefix)
+    const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+    if (railwayDomain) return `https://${railwayDomain}`;
+
+    return 'http://localhost:3002';
+  }
+
   constructor(
     @InjectRepository(CallConnectSettings)
     private settingsRepo: Repository<CallConnectSettings>,
@@ -231,7 +243,7 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    const baseUrl = this.config.get<string>('BASE_URL');
+    const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
@@ -455,7 +467,7 @@ export class CallConnectService {
     settings: CallConnectSettings,
   ): Promise<void> {
     const client = await this.getTwilioClient(session.businessId, session.tenantId);
-    const baseUrl = this.config.get<string>('BASE_URL');
+    const baseUrl = this.getBaseUrl();
 
     this.logger.log(
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
@@ -484,7 +496,7 @@ export class CallConnectService {
     settings: CallConnectSettings,
   ): Promise<void> {
     const client = await this.getTwilioClient(session.businessId, session.tenantId);
-    const baseUrl = this.config.get<string>('BASE_URL');
+    const baseUrl = this.getBaseUrl();
 
     this.logger.log(
       `PARALLEL: calling agent ${session.agentPhoneE164} and lead ${session.leadPhoneE164} for session ${session.id}`,
@@ -524,7 +536,7 @@ export class CallConnectService {
 
   private async initiateLeadCall(session: CallConnectSession): Promise<void> {
     const client = await this.getTwilioClient(session.businessId, session.tenantId);
-    const baseUrl = this.config.get<string>('BASE_URL');
+    const baseUrl = this.getBaseUrl();
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
     });
