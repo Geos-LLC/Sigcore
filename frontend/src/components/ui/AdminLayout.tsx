@@ -1,5 +1,5 @@
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Radio, LayoutDashboard, Users, DollarSign, ClipboardList, Key, LogOut, TestTube, Book } from 'lucide-react';
+import { Radio, LayoutDashboard, Users, DollarSign, ClipboardList, Key, LogOut, TestTube, Book, PhoneCall } from 'lucide-react';
 import { useAdminAuthStore } from '../../store/adminAuthStore';
 
 export default function AdminLayout() {
@@ -73,6 +73,10 @@ export default function AdminLayout() {
               <Link to="/admin/test-integrations" className={navLinkClass('/admin/test-integrations')}>
                 <TestTube className="h-4 w-4" />
                 Test Integrations
+              </Link>
+              <Link to="/admin/call-connect" className={navLinkClass('/admin/call-connect')}>
+                <PhoneCall className="h-4 w-4" />
+                Call Connect
               </Link>
               <Link to="/admin/api-docs" className={navLinkClass('/admin/api-docs')}>
                 <Book className="h-4 w-4" />

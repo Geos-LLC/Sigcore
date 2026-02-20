@@ -11,6 +11,7 @@ import AdminOrdersPage from './pages/admin/AdminOrdersPage';
 import AdminApiKeysPage from './pages/admin/AdminApiKeysPage';
 import AdminIntegrationTestPage from './pages/admin/AdminIntegrationTestPage';
 import AdminApiDocsPage from './pages/admin/AdminApiDocsPage';
+import AdminCallConnectTestPage from './pages/admin/AdminCallConnectTestPage';
 
 // Portal
 import TenantPortalLoginPage from './pages/portal/TenantPortalLoginPage';
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="orders" element={<AdminOrdersPage />} />
         <Route path="api-keys" element={<AdminApiKeysPage />} />
         <Route path="test-integrations" element={<AdminIntegrationTestPage />} />
+        <Route path="call-connect" element={<AdminCallConnectTestPage />} />
         <Route path="api-docs" element={<AdminApiDocsPage />} />
       </Route>
 
