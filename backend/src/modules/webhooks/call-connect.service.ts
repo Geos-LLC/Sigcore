@@ -256,12 +256,12 @@ export class CallConnectService {
       const whisper = template
         .replace(/\{summary\}/g, summary)
         .replace(/\{digit\}/g, digit);
-      response.say(whisper);
-
       // Gather timeout is separate from ringTimeoutSeconds (which controls how long the phone rings).
-      // After the agent hears the whisper they only need a few seconds to press a digit.
-      // 10s is plenty for a human; it also limits how long we stay on voicemail when AMD
-      // fails to detect it and terminate the call.
+      // 10s is plenty for a human to press a digit after hearing the whisper.
+      // Whisper is placed INSIDE the gather so Twilio starts the timeout immediately —
+      // this limits wasted time on voicemail (which can't press digits) even when AMD
+      // fails to detect it. The agent can press the digit at any point while the whisper
+      // is playing; it will interrupt and accept immediately.
       const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 10);
       const gather = response.gather({
         numDigits: 1,
@@ -269,7 +269,7 @@ export class CallConnectService {
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.say('');
+      gather.say(whisper);
 
       response.say('No input received. Goodbye.');
       response.hangup();
@@ -936,12 +936,14 @@ export class CallConnectService {
       });
 
       if (settings) {
+        // 2s delay: short enough to reach the agent quickly on retry,
+        // long enough for the carrier to clear the previous call state.
         setTimeout(() => {
           this.startAgentFirstMode(session, settings).catch((err) => {
             this.logger.error(`Retry failed for session ${session.id}: ${err.message}`);
             this.failSession(session, `Retry failed: ${err.message}`).catch(() => {});
           });
-        }, 5000);
+        }, 2000);
       }
     } else {
       await this.failSession(session, `Max agent attempts reached: ${reason}`);
