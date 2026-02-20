@@ -258,11 +258,16 @@ export class CallConnectService {
         .replace(/\{digit\}/g, digit);
       response.say(whisper);
 
+      // Gather timeout is separate from ringTimeoutSeconds (which controls how long the phone rings).
+      // After the agent hears the whisper they only need a few seconds to press a digit.
+      // 10s is plenty for a human; it also limits how long we stay on voicemail when AMD
+      // fails to detect it and terminate the call.
+      const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 10);
       const gather = response.gather({
         numDigits: 1,
         action: `${baseUrl}/api/webhooks/twilio/voice/agent/gather?sessionId=${sessionId}`,
         method: 'POST',
-        timeout: settings?.ringTimeoutSeconds || 20,
+        timeout: gatherTimeout,
       });
       gather.say('');
 
@@ -474,10 +479,14 @@ export class CallConnectService {
       answeredBy === 'fax';
 
     this.logger.log(
-      `AMD result for session ${sessionId}: answeredBy=${answeredBy}, isMachine=${isMachine}`,
+      `[AMD] Agent AMD fired for session ${sessionId}: answeredBy=${answeredBy}, isMachine=${isMachine}`,
     );
 
-    if (!isMachine) return; // Human picked up — let normal flow continue
+    if (!isMachine) {
+      // Human picked up — let normal whisper+gather flow continue
+      this.logger.log(`[AMD] Human detected for session ${sessionId}, gather flow continuing`);
+      return;
+    }
 
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session || TERMINAL_STATUSES.has(session.status)) return;
