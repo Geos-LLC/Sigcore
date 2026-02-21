@@ -4,6 +4,7 @@ import { formatPhoneE164, isValidE164 } from '../../utils/phone';
 import {
   MessageSquare, Send, Plus, Trash2, CheckCircle, XCircle,
   Loader2, RefreshCw, AlertCircle, Phone, ArrowDownLeft, ArrowUpRight,
+  Eye, EyeOff, Copy,
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -49,8 +50,10 @@ function makeClient(apiKey: string) {
 
 export default function AdminSmsTestPage() {
   const apiKeyRef = useRef<HTMLInputElement>(null);
+  const loadBtnRef = useRef<HTMLButtonElement>(null);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('sms_api_key') || '');
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem('sms_workspace_id') || '');
+  const [showKey, setShowKey] = useState(false);
 
   // Phone number assignments
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -101,6 +104,15 @@ export default function AdminSmsTestPage() {
   };
 
   useEffect(() => { loadData(); }, []);
+
+  // Raw DOM listener to confirm button click fires at all (debug)
+  useEffect(() => {
+    const btn = loadBtnRef.current;
+    if (!btn) return;
+    const handler = () => console.log('[SMS] Load Data button native click fired, apiKey state=', apiKey ? `${apiKey.slice(0,8)}...` : 'EMPTY', 'domVal=', apiKeyRef.current?.value?.slice(0,8) || 'EMPTY');
+    btn.addEventListener('click', handler);
+    return () => btn.removeEventListener('click', handler);
+  }, [apiKey]);
 
   const handleAddNumber = async () => {
     console.log('[SMS] handleAddNumber called', { newNumber, apiKey: apiKey ? `${apiKey.slice(0,10)}...` : 'EMPTY', newType });
@@ -188,15 +200,23 @@ export default function AdminSmsTestPage() {
         <div className="p-5 space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Tenant API Key</label>
-            <input
-              ref={apiKeyRef}
-              type="password"
-              value={apiKey}
-              onChange={e => { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}
-              onBlur={e => { if (e.target.value && !apiKey) { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}}
-              placeholder="sc_tenant_..."
-              className="input w-full font-mono text-xs"
-            />
+            <div className="flex gap-2">
+              <input
+                ref={apiKeyRef}
+                type={showKey ? 'text' : 'password'}
+                value={apiKey}
+                onChange={e => { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}
+                onBlur={e => { if (e.target.value && !apiKey) { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}}
+                placeholder="sc_tenant_..."
+                className="input flex-1 font-mono text-xs"
+              />
+              <button type="button" onClick={() => setShowKey(v => !v)} className="btn-secondary px-2" title={showKey ? 'Hide' : 'Show'}>
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+              <button type="button" onClick={() => { const v = apiKeyRef.current?.value || apiKey; if (v) navigator.clipboard.writeText(v); }} className="btn-secondary px-2" title="Copy">
+                <Copy className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Workspace ID (businessId)</label>
@@ -208,7 +228,7 @@ export default function AdminSmsTestPage() {
               className="input w-full font-mono text-xs"
             />
           </div>
-          <button onClick={() => { saveCredentials(); loadData(); }} className="btn-secondary flex items-center gap-2 text-sm">
+          <button ref={loadBtnRef} onClick={() => { console.log('[SMS] Load Data onClick fired'); saveCredentials(); loadData(); }} className="btn-secondary flex items-center gap-2 text-sm">
             <RefreshCw className="h-4 w-4" /> Load Data
           </button>
           {loadError && (
