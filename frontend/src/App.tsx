@@ -63,6 +63,9 @@ export default function App() {
         <Route path="billing" element={<TenantBillingPage />} />
       </Route>
 
+      {/* Public */}
+      <Route path="/api-docs" element={<AdminApiDocsPage />} />
+
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/admin/login" replace />} />
     </Routes>
