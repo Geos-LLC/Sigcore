@@ -72,7 +72,7 @@ async function bootstrap() {
 
   // API prefix - exclude health check endpoints
   app.setGlobalPrefix('api', {
-    exclude: ['/', 'health'],
+    exclude: ['/', 'health', 'docs', 'docs/(.*)'],
   });
 
   const port = configService.get('PORT') || 3002;
