@@ -392,6 +392,7 @@ export class TenantsController {
       data: keys.map((k) => ({
         id: k.id,
         name: k.name,
+        key: k.key,
         keyPreview: `${k.key.substring(0, 16)}...${k.key.substring(k.key.length - 8)}`,
         active: k.active,
         lastUsedAt: k.lastUsedAt,

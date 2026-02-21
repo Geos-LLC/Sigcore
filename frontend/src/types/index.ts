@@ -114,6 +114,7 @@ export interface TenantApiKeyResponse {
 export interface TenantApiKeyInfo {
   id: string;
   name: string;
+  key?: string;
   keyPreview: string;
   active: boolean;
   lastUsedAt: string | null;

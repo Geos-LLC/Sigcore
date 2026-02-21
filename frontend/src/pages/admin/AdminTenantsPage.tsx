@@ -92,8 +92,12 @@ export default function AdminTenantsPage() {
       const keysMap: Record<string, TenantApiKeyInfo[]> = {};
       for (const r of keyResults) {
         keysMap[r.tenantId] = r.keys;
+        for (const k of r.keys) {
+          if (k.key) saveStoredKey(k.id, k.key);
+        }
       }
       setTenantApiKeys(keysMap);
+      setFullKeys(loadStoredKeys());
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to load data');
     } finally {
@@ -135,7 +139,11 @@ export default function AdminTenantsPage() {
   const loadTenantApiKeys = async (tenantId: string) => {
     try {
       const keys = await adminApi.getTenantApiKeys(tenantId);
+      for (const k of keys) {
+        if (k.key) saveStoredKey(k.id, k.key);
+      }
       setTenantApiKeys((prev) => ({ ...prev, [tenantId]: keys }));
+      setFullKeys(loadStoredKeys());
     } catch {
       // Silently fail
     }
