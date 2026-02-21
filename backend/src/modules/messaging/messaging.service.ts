@@ -158,6 +158,58 @@ export class MessagingService {
   }
 
   // ──────────────────────────────────────────────────────────────
+  // Phone number assignments
+  // ──────────────────────────────────────────────────────────────
+
+  async listAssignments(workspaceId: string) {
+    return this.assignmentRepo.find({
+      where: { businessId: workspaceId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async upsertAssignment(
+    workspaceId: string,
+    dto: { numberE164: string; type: PhoneNumberType | 'BOT' | 'DEDICATED'; region?: string },
+  ) {
+    const existing = await this.assignmentRepo.findOne({
+      where: { businessId: workspaceId, numberE164: dto.numberE164 },
+    });
+    if (existing) {
+      await this.assignmentRepo.update(existing.id, {
+        type: dto.type as PhoneNumberType,
+        region: dto.region,
+        active: true,
+      });
+      return this.assignmentRepo.findOne({ where: { id: existing.id } });
+    }
+    return this.assignmentRepo.save({
+      businessId: workspaceId,
+      numberE164: dto.numberE164,
+      type: dto.type as PhoneNumberType,
+      region: dto.region,
+      active: true,
+    });
+  }
+
+  async removeAssignment(workspaceId: string, id: string) {
+    await this.assignmentRepo.delete({ id, businessId: workspaceId });
+    return { deleted: true };
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Message history
+  // ──────────────────────────────────────────────────────────────
+
+  async listMessages(workspaceId: string) {
+    return this.messageRepo.find({
+      where: { businessId: workspaceId },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
   // Helpers
   // ──────────────────────────────────────────────────────────────
 
