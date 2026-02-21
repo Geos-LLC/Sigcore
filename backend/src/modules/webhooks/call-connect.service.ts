@@ -249,7 +249,7 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
-      const acceptDigits = settings?.agentAcceptDigits || '1';
+      const acceptDigits = settings?.agentAcceptDigits || '0123456789';
       // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
       const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
       const template =
@@ -522,7 +522,7 @@ export class CallConnectService {
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
     });
-    const acceptDigits = settings?.agentAcceptDigits || '1';
+    const acceptDigits = settings?.agentAcceptDigits || '0123456789';
 
     if (acceptDigits.includes(digits)) {
       // Agent accepted — update session and initiate lead call
