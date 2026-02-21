@@ -10,7 +10,7 @@ import AdminPricingPage from './pages/admin/AdminPricingPage';
 import AdminOrdersPage from './pages/admin/AdminOrdersPage';
 import AdminApiKeysPage from './pages/admin/AdminApiKeysPage';
 import AdminIntegrationTestPage from './pages/admin/AdminIntegrationTestPage';
-import AdminApiDocsPage from './pages/admin/AdminApiDocsPage';
+import ApiDocsPage from './pages/ApiDocsPage';
 import AdminCallConnectTestPage from './pages/admin/AdminCallConnectTestPage';
 
 // Portal
@@ -43,7 +43,6 @@ export default function App() {
         <Route path="api-keys" element={<AdminApiKeysPage />} />
         <Route path="test-integrations" element={<AdminIntegrationTestPage />} />
         <Route path="call-connect" element={<AdminCallConnectTestPage />} />
-        <Route path="api-docs" element={<AdminApiDocsPage />} />
       </Route>
 
       {/* Portal */}
@@ -64,7 +63,7 @@ export default function App() {
       </Route>
 
       {/* Public */}
-      <Route path="/api-docs" element={<AdminApiDocsPage />} />
+      <Route path="/api-docs" element={<ApiDocsPage />} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/admin/login" replace />} />

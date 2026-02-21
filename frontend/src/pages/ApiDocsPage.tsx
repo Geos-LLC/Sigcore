@@ -11,7 +11,7 @@ interface Endpoint {
   response?: any;
 }
 
-export default function AdminApiDocsPage() {
+export default function ApiDocsPage() {
   const [copiedEndpoint, setCopiedEndpoint] = useState<string | null>(null);
 
   const baseUrl = import.meta.env.VITE_API_URL || 'https://your-api-domain.com/api';
