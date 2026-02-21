@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import { formatPhoneE164, isValidE164 } from '../../utils/phone';
 import {
   MessageSquare, Send, Plus, Trash2, CheckCircle, XCircle,
   Loader2, RefreshCw, AlertCircle, Phone, ArrowDownLeft, ArrowUpRight,
@@ -241,8 +242,9 @@ export default function AdminSmsTestPage() {
                 type="text"
                 value={newNumber}
                 onChange={e => setNewNumber(e.target.value)}
+                onBlur={e => setNewNumber(formatPhoneE164(e.target.value))}
                 placeholder="+19045778584"
-                className="input flex-1 font-mono"
+                className={`input flex-1 font-mono ${newNumber && !isValidE164(newNumber) ? 'border-orange-400' : ''}`}
               />
               <select
                 value={newType}
@@ -268,6 +270,9 @@ export default function AdminSmsTestPage() {
                 Add
               </button>
             </div>
+            {newNumber && !isValidE164(newNumber) && (
+              <p className="text-xs text-orange-600">Format should be E.164, e.g. +19045778584</p>
+            )}
             {addNumberResult && (
               <div className={`flex items-center gap-2 text-sm ${addNumberResult.ok ? 'text-green-700' : 'text-red-700'}`}>
                 {addNumberResult.ok ? <CheckCircle className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
@@ -297,9 +302,13 @@ export default function AdminSmsTestPage() {
                 type="text"
                 value={toPhone}
                 onChange={e => setToPhone(e.target.value)}
+                onBlur={e => setToPhone(formatPhoneE164(e.target.value))}
                 placeholder="+1XXXXXXXXXX"
-                className="input w-full"
+                className={`input w-full ${toPhone && !isValidE164(toPhone) ? 'border-orange-400 focus:border-orange-500' : ''}`}
               />
+              {toPhone && !isValidE164(toPhone) && (
+                <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +12125551234</p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Lead ID (optional)</label>

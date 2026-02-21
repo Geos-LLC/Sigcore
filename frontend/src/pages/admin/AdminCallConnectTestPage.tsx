@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import { formatPhoneE164, isValidE164 } from '../../utils/phone';
 import {
   Phone, PhoneOff, PhoneCall, PhoneIncoming, CheckCircle, XCircle,
   Loader2, RefreshCw, Settings, Play, Square, Clock, AlertCircle,
@@ -272,9 +273,13 @@ export default function AdminCallConnectTestPage() {
                   type="text"
                   value={botNumber}
                   onChange={e => setBotNumber(e.target.value)}
+                  onBlur={e => setBotNumber(formatPhoneE164(e.target.value))}
                   placeholder="+19045778584"
-                  className="input w-full"
+                  className={`input w-full ${botNumber && !isValidE164(botNumber) ? 'border-orange-400 focus:border-orange-500' : ''}`}
                 />
+                {botNumber && !isValidE164(botNumber) && (
+                  <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +19045778584</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -285,9 +290,13 @@ export default function AdminCallConnectTestPage() {
                   type="text"
                   value={agentPhone}
                   onChange={e => setAgentPhone(e.target.value)}
+                  onBlur={e => setAgentPhone(formatPhoneE164(e.target.value))}
                   placeholder="+1XXXXXXXXXX"
-                  className="input w-full"
+                  className={`input w-full ${agentPhone && !isValidE164(agentPhone) ? 'border-orange-400 focus:border-orange-500' : ''}`}
                 />
+                {agentPhone && !isValidE164(agentPhone) && (
+                  <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +12125551234</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Mode</label>
@@ -437,9 +446,13 @@ export default function AdminCallConnectTestPage() {
               type="text"
               value={leadPhone}
               onChange={e => setLeadPhone(e.target.value)}
+              onBlur={e => setLeadPhone(formatPhoneE164(e.target.value))}
               placeholder="+1XXXXXXXXXX"
-              className="input w-full"
+              className={`input w-full ${leadPhone && !isValidE164(leadPhone) ? 'border-orange-400 focus:border-orange-500' : ''}`}
             />
+            {leadPhone && !isValidE164(leadPhone) && (
+              <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +12125551234</p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Lead Summary (optional)</label>
