@@ -68,7 +68,6 @@ export default function AdminCallConnectTestPage() {
   const [botNumber, setBotNumber] = useState(() => localStorage.getItem('cc_bot_number') || '+19045778584');
   const [agentPhone, setAgentPhone] = useState(() => localStorage.getItem('cc_agent_phone') || '');
   const [mode, setMode] = useState<'AGENT_FIRST' | 'PARALLEL'>('AGENT_FIRST');
-  const [ringTimeout, setRingTimeout] = useState(60);
   const [agentWhisperMessage, setAgentWhisperMessage] = useState('');
   const [leadGreetingMessage, setLeadGreetingMessage] = useState('');
   const [leadVoicemailEnabled, setLeadVoicemailEnabled] = useState(true);
@@ -98,7 +97,6 @@ export default function AdminCallConnectTestPage() {
           if (s.botNumberE164) setBotNumber(s.botNumberE164);
           if (s.agentPhoneE164) setAgentPhone(s.agentPhoneE164);
           if (s.mode) setMode(s.mode);
-          if (s.ringTimeoutSeconds) setRingTimeout(s.ringTimeoutSeconds);
           if (s.agentWhisperMessage) setAgentWhisperMessage(s.agentWhisperMessage);
           if (s.leadGreetingMessage) setLeadGreetingMessage(s.leadGreetingMessage);
           setLeadVoicemailEnabled(!!s.leadVoicemailEnabled);
@@ -145,7 +143,7 @@ export default function AdminCallConnectTestPage() {
         mode,
         botNumberE164: botNumber,
         agentPhoneE164: agentPhone,
-        ringTimeoutSeconds: ringTimeout,
+        ringTimeoutSeconds: 60,
         maxAgentAttempts: 2,
         ...(agentWhisperMessage ? { agentWhisperMessage } : {}),
         ...(leadGreetingMessage ? { leadGreetingMessage } : {}),
@@ -301,17 +299,6 @@ export default function AdminCallConnectTestPage() {
                   <option value="AGENT_FIRST">AGENT_FIRST — agent answers first, press 1 to bridge</option>
                   <option value="PARALLEL">PARALLEL — both ring simultaneously</option>
                 </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Ring Timeout (seconds)</label>
-                <input
-                  type="number"
-                  min={5}
-                  max={120}
-                  value={ringTimeout}
-                  onChange={e => setRingTimeout(Number(e.target.value))}
-                  className="input w-full"
-                />
               </div>
             </div>
 
