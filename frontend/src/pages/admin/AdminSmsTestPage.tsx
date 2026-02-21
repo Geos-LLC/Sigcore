@@ -104,11 +104,15 @@ export default function AdminSmsTestPage() {
     setAddNumberResult(null);
     saveCredentials();
     try {
-      await makeClient(apiKey).post('/internal/messages/assignments', {
+      const res = await makeClient(apiKey).post('/internal/messages/assignments', {
         numberE164: newNumber,
         type: newType,
         ...(newRegion ? { region: newRegion } : {}),
       });
+      // Immediately show the new record in the list
+      if (res.data) {
+        setAssignments(prev => [res.data, ...prev.filter(a => a.id !== res.data.id)]);
+      }
       setAddNumberResult({ ok: true, msg: `Number ${newNumber} registered as ${newType}.` });
       setNewNumber('');
       await loadData();
