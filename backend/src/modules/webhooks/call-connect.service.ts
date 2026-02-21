@@ -164,6 +164,7 @@ export class CallConnectService {
       status: SessionStatus.CREATED,
       provider: CallConnectProvider.TWILIO,
       fromNumberE164: fromNumber,
+      sigcoreConversationId: dto.sigcoreConversationId || undefined,
       timeline: [],
     });
 
@@ -1116,6 +1117,7 @@ export class CallConnectService {
         sessionId: session.id,
         leadId: session.leadId,
         businessId: session.businessId,
+        sigcoreConversationId: session.sigcoreConversationId ?? null,
         status: session.status,
         mode: session.mode,
         agentPhone: session.agentPhoneE164,

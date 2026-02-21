@@ -26,4 +26,9 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsIn(['AGENT_FIRST', 'PARALLEL'])
   requestedMode?: 'AGENT_FIRST' | 'PARALLEL';
+
+  /** Optional link to an existing Sigcore conversation thread */
+  @IsOptional()
+  @IsString()
+  sigcoreConversationId?: string;
 }

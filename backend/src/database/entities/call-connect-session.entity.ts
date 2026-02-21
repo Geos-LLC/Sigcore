@@ -96,6 +96,10 @@ export class CallConnectSession {
   @Column({ name: 'recording_url', nullable: true })
   recordingUrl: string;
 
+  /** Linked Sigcore conversation thread (nullable — not all sessions have one) */
+  @Column({ name: 'sigcore_conversation_id', type: 'uuid', nullable: true })
+  sigcoreConversationId: string;
+
   /** Append-only audit trail of state transitions */
   @Column({ type: 'jsonb', default: [] })
   timeline: Array<Record<string, unknown>>;
