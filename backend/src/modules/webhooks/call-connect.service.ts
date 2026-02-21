@@ -876,12 +876,16 @@ export class CallConnectService {
         // Whether voicemail is ON (AMD drop) or OFF (agent speaks personally), 60s
         // ensures the carrier has time to route the call before we time out.
         timeout: 60,
-        // Enable (sync AMD): fires TwiML URL ~3-5s after voicemail answers (machine_start),
-        // long before the greeting finishes. Agent is notified immediately. A pause in the
-        // TwiML covers the voicemail greeting + beep before the message plays.
-        // For human leads, 'human' is detected quickly and TwiML fires without delay.
+        // Async AMD: TwiML URL fires immediately on answer (no ~6s queue delay from sync AMD).
+        // AMD result arrives asynchronously at /lead/amd — handleLeadAmd() redirects the call
+        // to the voicemail drop TwiML if a machine is detected.
         ...(settings.leadVoicemailEnabled
-          ? { machineDetection: 'Enable' }
+          ? {
+              machineDetection: 'Enable',
+              asyncAmd: true,
+              asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
+              asyncAmdStatusCallbackMethod: 'POST',
+            }
           : {}),
       }),
     ]);
@@ -919,11 +923,16 @@ export class CallConnectService {
       // If voicemail is OFF, the carrier may still forward to the lead's voicemail so the
       // agent can speak personally — we need 60s to allow that forwarding to happen.
       timeout: 60,
-      // Enable (sync AMD): fires TwiML URL ~3-5s after voicemail answers (machine_start),
-      // long before the greeting finishes. This lets us notify the agent immediately.
-      // A pause in the TwiML then covers the voicemail greeting + beep before the message plays.
+      // Async AMD: TwiML URL fires immediately on answer (no ~6s queue delay from sync AMD).
+      // AMD result arrives asynchronously at /lead/amd — handleLeadAmd() redirects the call
+      // to the voicemail drop TwiML if a machine is detected.
       ...(settings?.leadVoicemailEnabled
-        ? { machineDetection: 'Enable' }
+        ? {
+            machineDetection: 'Enable',
+            asyncAmd: true,
+            asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
+            asyncAmdStatusCallbackMethod: 'POST',
+          }
         : {}),
     });
 
