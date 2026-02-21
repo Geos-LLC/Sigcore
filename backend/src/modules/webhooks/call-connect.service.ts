@@ -256,22 +256,20 @@ export class CallConnectService {
         settings?.agentWhisperMessage ||
         'You have a new lead: {summary}. Press {digit} to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
-      // Brief pause so the agent has a moment to orient before the script starts.
-      response.pause({ length: 2 });
-      // Play the whisper BEFORE the gather so the agent hears the full message
-      // and has the complete gather window to press a digit.
-      response.say(whisper);
 
       // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
       // already short-circuits voicemail calls before this TwiML runs.
       const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 15);
+      // Pause and whisper are INSIDE the gather so DTMF digits pressed at any
+      // point during the message are captured (not lost before gather starts).
       const gather = response.gather({
         numDigits: 1,
         action: `${baseUrl}/api/webhooks/twilio/voice/agent/gather?sessionId=${sessionId}`,
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.say('');
+      gather.pause({ length: 2 });
+      gather.say(whisper);
 
       response.say('No input received. Goodbye.');
       response.hangup();
