@@ -249,14 +249,13 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
-      const digit = settings?.agentAcceptDigits || '1';
-      const summary = session.leadSummary || 'a new lead';
+      const acceptDigits = settings?.agentAcceptDigits || '1';
+      // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
+      const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
       const template =
         settings?.agentWhisperMessage ||
         'You have a new lead: {summary}. Press {digit} to connect.';
-      const whisper = template
-        .replace(/\{summary\}/g, summary)
-        .replace(/\{digit\}/g, digit);
+      const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
       // Brief pause so the agent has a moment to orient before the script starts.
       response.pause({ length: 2 });
       // Play the whisper BEFORE the gather so the agent hears the full message
@@ -278,14 +277,10 @@ export class CallConnectService {
       response.hangup();
     } else {
       // PARALLEL: agent joins conference immediately
-      const digit = settings?.agentAcceptDigits || '1';
-      const summary = session.leadSummary || 'a new lead';
       const template =
         settings?.agentWhisperMessage ||
         'Connecting you to a new lead: {summary}.';
-      const whisper = template
-        .replace(/\{summary\}/g, summary)
-        .replace(/\{digit\}/g, digit);
+      const whisper = this.substituteTemplateVars(template, session);
       response.say(whisper);
       const dial = response.dial();
       dial.conference(
@@ -364,10 +359,10 @@ export class CallConnectService {
           // Pre-recorded audio takes priority over TTS
           response.play({}, settings.leadVoicemailRecordingUrl);
         } else {
-          const message =
+          const vmTemplate =
             settings.leadVoicemailMessage ||
             'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
-          response.say(message);
+          response.say(this.substituteTemplateVars(vmTemplate, session));
         }
         response.hangup();
 
@@ -430,7 +425,8 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    const greeting = settings?.leadGreetingMessage || 'Please hold while we connect you.';
+    const greetingTemplate = settings?.leadGreetingMessage || 'Please hold while we connect you.';
+    const greeting = this.substituteTemplateVars(greetingTemplate, session);
     const baseUrl = this.getBaseUrl();
 
     const response = new twilio.twiml.VoiceResponse();
