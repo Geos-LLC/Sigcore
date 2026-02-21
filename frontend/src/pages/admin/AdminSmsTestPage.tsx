@@ -70,6 +70,7 @@ export default function AdminSmsTestPage() {
   // Message history
   const [messages, setMessages] = useState<SmsMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const saveCredentials = () => {
     localStorage.setItem('sms_api_key', apiKey);
@@ -77,9 +78,11 @@ export default function AdminSmsTestPage() {
     localStorage.setItem('sms_to_phone', toPhone);
   };
 
-  const loadData = async () => {
-    if (!apiKey) return;
-    const client = makeClient(apiKey);
+  const loadData = async (currentApiKey?: string) => {
+    const key = currentApiKey ?? apiKey;
+    if (!key) return;
+    setLoadError(null);
+    const client = makeClient(key);
     const bust = `_=${Date.now()}`;
     try {
       const [assignRes, msgRes] = await Promise.all([
@@ -88,7 +91,9 @@ export default function AdminSmsTestPage() {
       ]);
       setAssignments(assignRes.data);
       setMessages(msgRes.data);
-    } catch {}
+    } catch (err: any) {
+      setLoadError(err.response?.data?.message || err.message || 'Failed to load data');
+    }
   };
 
   useEffect(() => { loadData(); }, []);
@@ -173,7 +178,7 @@ export default function AdminSmsTestPage() {
             <input
               type="password"
               value={apiKey}
-              onChange={e => setApiKey(e.target.value)}
+              onChange={e => { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}
               placeholder="sc_tenant_..."
               className="input w-full font-mono text-xs"
             />
@@ -183,14 +188,17 @@ export default function AdminSmsTestPage() {
             <input
               type="text"
               value={workspaceId}
-              onChange={e => setWorkspaceId(e.target.value)}
+              onChange={e => { setWorkspaceId(e.target.value); localStorage.setItem('sms_workspace_id', e.target.value); }}
               placeholder="uuid"
               className="input w-full font-mono text-xs"
             />
           </div>
-          <button onClick={loadData} className="btn-secondary flex items-center gap-2 text-sm">
+          <button onClick={() => { saveCredentials(); loadData(); }} className="btn-secondary flex items-center gap-2 text-sm">
             <RefreshCw className="h-4 w-4" /> Load Data
           </button>
+          {loadError && (
+            <p className="text-xs text-red-600 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{loadError}</p>
+          )}
         </div>
       </div>
 
