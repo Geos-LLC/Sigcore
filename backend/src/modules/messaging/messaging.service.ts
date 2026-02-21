@@ -166,7 +166,19 @@ export class MessagingService {
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
     });
-    const integrationPhone = integration?.metadata?.phoneNumber as string | undefined;
+
+    // Resolve phone number: prefer metadata, fall back to encrypted credentials
+    let integrationPhone: string | undefined = integration?.metadata?.phoneNumber as string | undefined;
+    if (!integrationPhone && integration?.credentialsEncrypted) {
+      try {
+        const creds = JSON.parse(this.encryptionService.decrypt(integration.credentialsEncrypted));
+        integrationPhone = creds.phoneNumber as string | undefined;
+      } catch (_e) {
+        // ignore decryption errors
+      }
+    }
+    this.logger.log(`listAssignments: workspaceId=${workspaceId} integrationId=${integration?.id ?? 'none'} phone=${integrationPhone ?? 'none'}`);
+
     if (integrationPhone) {
       const existing = await this.assignmentRepo.findOne({
         where: { businessId: workspaceId, numberE164: integrationPhone },
