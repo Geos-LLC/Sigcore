@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { formatPhoneE164, isValidE164 } from '../../utils/phone';
 import {
-  MessageSquare, Send, Plus, Trash2, CheckCircle, XCircle,
+  MessageSquare, Send, CheckCircle,
   Loader2, RefreshCw, AlertCircle, Phone, ArrowDownLeft, ArrowUpRight,
   Eye, EyeOff, Copy,
 } from 'lucide-react';
@@ -57,17 +57,11 @@ export default function AdminSmsTestPage() {
 
   // Phone number assignments
   const [assignments, setAssignments] = useState<Assignment[]>([]);
-  const [newNumber, setNewNumber] = useState('');
-  const [newType, setNewType] = useState<'BOT' | 'DEDICATED'>('BOT');
-  const [newRegion, setNewRegion] = useState('');
-  const [addingNumber, setAddingNumber] = useState(false);
-  const [addNumberResult, setAddNumberResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [selectedPhone, setSelectedPhone] = useState('');
 
   // Send SMS
   const [toPhone, setToPhone] = useState(() => localStorage.getItem('sms_to_phone') || '');
   const [messageBody, setMessageBody] = useState('');
-  const [leadId, setLeadId] = useState('');
-  const [source, setSource] = useState('admin-ui');
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<{ ok: boolean; msg: string; data?: any } | null>(null);
 
@@ -97,6 +91,10 @@ export default function AdminSmsTestPage() {
         client.get(`/internal/messages?${bust}`),
       ]);
       setAssignments(assignRes.data);
+      // Auto-select the first phone number if none is selected
+      if (assignRes.data.length > 0) {
+        setSelectedPhone(prev => prev || assignRes.data[0].numberE164);
+      }
       setMessages(msgRes.data);
     } catch (err: any) {
       setLoadError(err.response?.data?.message || err.message || 'Failed to load data');
@@ -114,45 +112,6 @@ export default function AdminSmsTestPage() {
     return () => btn.removeEventListener('click', handler);
   }, [apiKey]);
 
-  const handleAddNumber = async () => {
-    console.log('[SMS] handleAddNumber called', { newNumber, apiKey: apiKey ? `${apiKey.slice(0,10)}...` : 'EMPTY', newType });
-    if (!newNumber) { console.warn('[SMS] newNumber is empty — returning'); return; }
-    if (!apiKey) { console.warn('[SMS] apiKey is empty — returning'); return; }
-    setAddingNumber(true);
-    setAddNumberResult(null);
-    saveCredentials();
-    try {
-      console.log('[SMS] POST /internal/messages/assignments', { numberE164: newNumber, type: newType });
-      const res = await makeClient(apiKey).post('/internal/messages/assignments', {
-        numberE164: newNumber,
-        type: newType,
-        ...(newRegion ? { region: newRegion } : {}),
-      });
-      console.log('[SMS] POST response:', res.data);
-      // Immediately show the new record in the list
-      if (res.data) {
-        setAssignments(prev => [res.data, ...prev.filter(a => a.id !== res.data.id)]);
-      }
-      setAddNumberResult({ ok: true, msg: `Number ${newNumber} registered as ${newType}.` });
-      setNewNumber('');
-      await loadData();
-    } catch (err: any) {
-      console.error('[SMS] POST error:', err.response?.data || err.message);
-      setAddNumberResult({ ok: false, msg: err.response?.data?.message || err.message });
-    } finally {
-      setAddingNumber(false);
-    }
-  };
-
-  const handleRemoveNumber = async (id: string, number: string) => {
-    if (!confirm(`Remove ${number}?`)) return;
-    try {
-      await makeClient(apiKey).delete(`/internal/messages/assignments/${id}`);
-      await loadData();
-    } catch (err: any) {
-      alert(err.response?.data?.message || err.message);
-    }
-  };
 
   const handleSend = async () => {
     if (!toPhone || !messageBody) return;
@@ -164,8 +123,7 @@ export default function AdminSmsTestPage() {
         businessId: workspaceId,
         toPhone,
         body: messageBody,
-        ...(leadId ? { leadId } : {}),
-        source,
+        source: 'admin-ui',
       });
       setSendResult({ ok: true, msg: `Sent! Message ID: ${res.data.messageId}`, data: res.data });
       setMessageBody('');
@@ -188,7 +146,7 @@ export default function AdminSmsTestPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">SMS Tester</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Test two-way SMS for LeadBridge. Register bot numbers, send outbound messages, and view incoming replies.
+          Test two-way SMS for LeadBridge. Load your Twilio number, send outbound messages, and view incoming replies.
         </p>
       </div>
 
@@ -237,97 +195,33 @@ export default function AdminSmsTestPage() {
         </div>
       </div>
 
-      {/* Phone Number Assignments */}
+      {/* Phone Number */}
       <div className="card">
         <div className="p-5 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <Phone className="h-4 w-4 text-gray-500" />
-            <h2 className="text-base font-semibold text-gray-900">Phone Number Assignments</h2>
+            <h2 className="text-base font-semibold text-gray-900">From Phone Number</h2>
           </div>
           <p className="text-xs text-gray-500 mt-1">
-            Register Twilio numbers for this workspace. Inbound SMS to these numbers will be routed to the workspace.
+            Auto-registered from your Twilio integration. Click <strong>Load Data</strong> above to fetch.
           </p>
         </div>
-        <div className="p-5 space-y-4">
-          {/* Existing assignments */}
+        <div className="p-5">
           {assignments.length > 0 ? (
-            <div className="space-y-2">
+            <select
+              value={selectedPhone}
+              onChange={e => setSelectedPhone(e.target.value)}
+              className="input w-full font-mono"
+            >
               {assignments.map(a => (
-                <div key={a.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
-                  <div className="flex items-center gap-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${a.type === 'BOT' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
-                      {a.type}
-                    </span>
-                    <span className="font-mono text-sm">{a.numberE164}</span>
-                    {a.region && <span className="text-xs text-gray-400">{a.region}</span>}
-                    <span className={`text-xs ${a.active ? 'text-green-600' : 'text-gray-400'}`}>
-                      {a.active ? '● active' : '○ inactive'}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => handleRemoveNumber(a.id, a.numberE164)}
-                    className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-600"
-                    title="Remove"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                <option key={a.id} value={a.numberE164}>
+                  {a.numberE164} ({a.type}{a.region ? ` · ${a.region}` : ''})
+                </option>
               ))}
-            </div>
+            </select>
           ) : (
-            <p className="text-sm text-gray-400 italic">No numbers registered yet.</p>
+            <p className="text-sm text-gray-400 italic">No numbers registered yet. Click Load Data to auto-register from your Twilio integration.</p>
           )}
-
-          {/* Add new number */}
-          <div className="border-t border-gray-100 pt-4 space-y-3">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Register Number</p>
-            <div className="flex gap-3">
-              <input
-                type="text"
-                value={newNumber}
-                onChange={e => setNewNumber(e.target.value)}
-                onBlur={e => setNewNumber(formatPhoneE164(e.target.value))}
-                placeholder="+19045778584"
-                className={`input flex-1 font-mono ${newNumber && !isValidE164(newNumber) ? 'border-orange-400' : ''}`}
-              />
-              <select
-                value={newType}
-                onChange={e => setNewType(e.target.value as 'BOT' | 'DEDICATED')}
-                className="input w-32"
-              >
-                <option value="BOT">BOT</option>
-                <option value="DEDICATED">DEDICATED</option>
-              </select>
-              <input
-                type="text"
-                value={newRegion}
-                onChange={e => setNewRegion(e.target.value)}
-                placeholder="US"
-                className="input w-16"
-              />
-              <button
-                onClick={handleAddNumber}
-                disabled={addingNumber || !newNumber || !apiKey}
-                title={!apiKey ? 'Enter API key in Credentials above first' : !newNumber ? 'Enter a phone number' : ''}
-                className="btn-primary flex items-center gap-2"
-              >
-                {addingNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                Add
-              </button>
-            </div>
-            {!apiKey && (
-              <p className="text-xs text-red-600 flex items-center gap-1"><AlertCircle className="h-3 w-3" />Enter your API key in the Credentials section above to enable Add.</p>
-            )}
-            {newNumber && !isValidE164(newNumber) && (
-              <p className="text-xs text-orange-600">Format should be E.164, e.g. +19045778584</p>
-            )}
-            {addNumberResult && (
-              <div className={`flex items-center gap-2 text-sm ${addNumberResult.ok ? 'text-green-700' : 'text-red-700'}`}>
-                {addNumberResult.ok ? <CheckCircle className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                {addNumberResult.msg}
-              </div>
-            )}
-          </div>
         </div>
       </div>
 
@@ -343,31 +237,19 @@ export default function AdminSmsTestPage() {
           </p>
         </div>
         <div className="p-5 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">To Phone</label>
-              <input
-                type="text"
-                value={toPhone}
-                onChange={e => setToPhone(e.target.value)}
-                onBlur={e => setToPhone(formatPhoneE164(e.target.value))}
-                placeholder="+1XXXXXXXXXX"
-                className={`input w-full ${toPhone && !isValidE164(toPhone) ? 'border-orange-400 focus:border-orange-500' : ''}`}
-              />
-              {toPhone && !isValidE164(toPhone) && (
-                <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +12125551234</p>
-              )}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Lead ID (optional)</label>
-              <input
-                type="text"
-                value={leadId}
-                onChange={e => setLeadId(e.target.value)}
-                placeholder="lb_lead_abc123"
-                className="input w-full"
-              />
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">To Phone</label>
+            <input
+              type="text"
+              value={toPhone}
+              onChange={e => setToPhone(e.target.value)}
+              onBlur={e => setToPhone(formatPhoneE164(e.target.value))}
+              placeholder="+1XXXXXXXXXX"
+              className={`input w-full ${toPhone && !isValidE164(toPhone) ? 'border-orange-400 focus:border-orange-500' : ''}`}
+            />
+            {toPhone && !isValidE164(toPhone) && (
+              <p className="text-xs text-orange-600 mt-1">Format should be E.164, e.g. +12125551234</p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
@@ -377,16 +259,6 @@ export default function AdminSmsTestPage() {
               onChange={e => setMessageBody(e.target.value)}
               placeholder="Hi John, thanks for your inquiry! We'll be in touch shortly."
               className="input w-full resize-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Source (optional)</label>
-            <input
-              type="text"
-              value={source}
-              onChange={e => setSource(e.target.value)}
-              placeholder="admin-ui"
-              className="input w-48"
             />
           </div>
 
@@ -404,7 +276,7 @@ export default function AdminSmsTestPage() {
 
           {assignments.length === 0 && (
             <p className="text-xs text-center text-orange-600">
-              Register a BOT number above before sending.
+              Click Load Data above to auto-register your Twilio number before sending.
             </p>
           )}
 
@@ -485,7 +357,7 @@ export default function AdminSmsTestPage() {
       <div className="card p-5 bg-gray-50">
         <h3 className="text-sm font-semibold text-gray-900 mb-3">How it works</h3>
         <ol className="space-y-2 text-sm text-gray-600 list-decimal list-inside">
-          <li>Register a <strong>BOT number</strong> — this is your shared Twilio number. All SMS sent from this workspace use it as the sender.</li>
+          <li>Click <strong>Load Data</strong> — your Twilio number is auto-registered as the BOT number used for sending.</li>
           <li>Point that Twilio number's <strong>incoming SMS webhook</strong> to <code className="text-xs bg-gray-200 px-1 rounded">POST /api/webhooks/twilio/sms</code>.</li>
           <li>Send an outbound SMS using the <strong>Send SMS</strong> form above. The message will appear in the log with status <em>queued</em>.</li>
           <li>Twilio updates delivery status via <code className="text-xs bg-gray-200 px-1 rounded">POST /api/webhooks/twilio/sms-status</code> — status changes to <em>sent → delivered</em>.</li>
