@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { formatPhoneE164, isValidE164 } from '../../utils/phone';
 import {
@@ -48,6 +48,7 @@ function makeClient(apiKey: string) {
 }
 
 export default function AdminSmsTestPage() {
+  const apiKeyRef = useRef<HTMLInputElement>(null);
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('sms_api_key') || '');
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem('sms_workspace_id') || '');
 
@@ -79,8 +80,11 @@ export default function AdminSmsTestPage() {
   };
 
   const loadData = async (currentApiKey?: string) => {
-    const key = currentApiKey ?? apiKey;
-    if (!key) return;
+    // Fall back to DOM value in case password manager autofilled without triggering onChange
+    const domKey = apiKeyRef.current?.value || '';
+    const key = currentApiKey ?? apiKey || domKey;
+    if (domKey && !apiKey) { setApiKey(domKey); localStorage.setItem('sms_api_key', domKey); }
+    if (!key) { setLoadError('Enter your API key above first.'); return; }
     setLoadError(null);
     const client = makeClient(key);
     const bust = `_=${Date.now()}`;
@@ -185,9 +189,11 @@ export default function AdminSmsTestPage() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Tenant API Key</label>
             <input
+              ref={apiKeyRef}
               type="password"
               value={apiKey}
               onChange={e => { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}
+              onBlur={e => { if (e.target.value && !apiKey) { setApiKey(e.target.value); localStorage.setItem('sms_api_key', e.target.value); }}}
               placeholder="sc_tenant_..."
               className="input w-full font-mono text-xs"
             />
