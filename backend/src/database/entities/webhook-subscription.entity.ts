@@ -24,6 +24,10 @@ export enum WebhookEventType {
   CALL_CONNECT_VOICEMAIL_DROP = 'call_connect.voicemail_drop',
   CALL_CONNECT_ENDED = 'call_connect.ended',
   CALL_CONNECT_FAILED = 'call_connect.failed',
+  // SMS messaging events (LeadBridge two-way SMS)
+  SMS_MESSAGE_RECEIVED = 'sms.message.received',
+  SMS_MESSAGE_DELIVERED = 'sms.message.delivered',
+  SMS_MESSAGE_FAILED = 'sms.message.failed',
 }
 
 export enum WebhookSubscriptionStatus {

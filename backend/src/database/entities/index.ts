@@ -15,3 +15,5 @@ export * from './phone-number-pricing.entity';
 export * from './api-key.entity';
 export * from './call-connect-settings.entity';
 export * from './call-connect-session.entity';
+export * from './sms-message.entity';
+export * from './phone-number-assignment.entity';

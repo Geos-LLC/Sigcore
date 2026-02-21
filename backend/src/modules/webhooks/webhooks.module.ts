@@ -12,6 +12,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
+import { MessagingModule } from '../messaging/messaging.module';
 import {
   CommunicationIntegration,
   CommunicationConversation,
@@ -30,6 +31,7 @@ import {
 
 @Module({
   imports: [
+    MessagingModule,
     TypeOrmModule.forFeature([
       CommunicationIntegration,
       CommunicationConversation,

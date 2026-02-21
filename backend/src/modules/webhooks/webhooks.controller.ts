@@ -27,6 +27,7 @@ import {
 } from './twilio-webhooks.service';
 import { WebhookRateLimitGuard } from './webhook-rate-limit.guard';
 import { CallConnectService } from './call-connect.service';
+import { MessagingService } from '../messaging/messaging.service';
 
 @Controller('webhooks')
 @UseGuards(WebhookRateLimitGuard)
@@ -37,6 +38,7 @@ export class WebhooksController {
     private readonly webhooksService: WebhooksService,
     private readonly twilioWebhooksService: TwilioWebhooksService,
     private readonly callConnectService: CallConnectService,
+    private readonly messagingService: MessagingService,
   ) {}
 
   @Post('openphone/:webhookId')
@@ -75,6 +77,46 @@ export class WebhooksController {
   }
 
   // ==================== TWILIO WEBHOOKS ====================
+
+  // ==================== LeadBridge SMS WEBHOOKS ====================
+
+  /**
+   * Incoming SMS for LeadBridge bot numbers.
+   * Business is identified by the To number via phone_number_assignments.
+   * IMPORTANT: Defined BEFORE twilio/sms/:webhookId to avoid route conflicts.
+   *
+   * POST /webhooks/twilio/sms
+   */
+  @Post('twilio/sms')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioSmsInbound(
+    @Body('From') from: string,
+    @Body('To') to: string,
+    @Body('Body') body: string,
+    @Body('MessageSid') messageSid: string,
+  ) {
+    this.logger.log(`Inbound SMS from ${from} to ${to} (${messageSid})`);
+    await this.messagingService.handleIncomingSms(to, from, body, messageSid);
+    return '';
+  }
+
+  /**
+   * Delivery status callbacks for LeadBridge outbound SMS.
+   * Updates sms_messages status and emits webhook events.
+   *
+   * POST /webhooks/twilio/sms-status
+   */
+  @Post('twilio/sms-status')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioSmsStatusLeadBridge(
+    @Body('MessageSid') messageSid: string,
+    @Body('MessageStatus') messageStatus: string,
+    @Body('ErrorCode') errorCode: string,
+  ) {
+    this.logger.log(`SMS status: ${messageSid} → ${messageStatus}`);
+    await this.messagingService.handleSmsStatus(messageSid, messageStatus, errorCode || undefined);
+    return '';
+  }
 
   /**
    * Handle SMS status callbacks from Twilio.

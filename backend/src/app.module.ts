@@ -6,6 +6,7 @@ import { SigcoreAuthModule } from './modules/auth/sigcore-auth.module';
 import { CommunicationModule } from './modules/communication/communication.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
 import { EventsModule } from './modules/events/events.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { ApiModule } from './modules/api/api.module';
@@ -45,6 +46,7 @@ import { DocsController } from './docs.controller';
     CommunicationModule,
     IntegrationsModule,
     WebhooksModule,
+    MessagingModule,
     EventsModule,
     TenantsModule,
     ApiModule,
