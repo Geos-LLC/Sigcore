@@ -142,7 +142,7 @@ class AdminApiService {
   }
 
   async getTenantApiKeys(tenantId: string): Promise<TenantApiKeyInfo[]> {
-    const response = await this.client.get<ApiResponse<TenantApiKeyInfo[]>>(`/tenants/${tenantId}/api-keys`);
+    const response = await this.client.get<ApiResponse<TenantApiKeyInfo[]>>(`/tenants/${tenantId}/api-keys?_=${Date.now()}`);
     return response.data.data;
   }
 
