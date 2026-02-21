@@ -167,14 +167,37 @@ export class MessagingService {
       where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
     });
 
-    // Resolve phone number: prefer metadata, fall back to encrypted credentials
+    // Resolve phone number: prefer metadata, fall back to encrypted credentials, then query Twilio API
     let integrationPhone: string | undefined = integration?.metadata?.phoneNumber as string | undefined;
+    let creds: any;
     if (!integrationPhone && integration?.credentialsEncrypted) {
       try {
-        const creds = JSON.parse(this.encryptionService.decrypt(integration.credentialsEncrypted));
+        creds = JSON.parse(this.encryptionService.decrypt(integration.credentialsEncrypted));
         integrationPhone = creds.phoneNumber as string | undefined;
       } catch (_e) {
         // ignore decryption errors
+      }
+    }
+    // Final fallback: query Twilio API for incoming phone numbers
+    if (!integrationPhone && integration?.credentialsEncrypted) {
+      try {
+        if (!creds) {
+          creds = JSON.parse(this.encryptionService.decrypt(integration.credentialsEncrypted));
+        }
+        if (creds.accountSid && creds.authToken) {
+          const client = twilio(creds.accountSid, creds.authToken);
+          const numbers = await client.incomingPhoneNumbers.list({ limit: 1 });
+          if (numbers.length > 0) {
+            integrationPhone = numbers[0].phoneNumber;
+            this.logger.log(`listAssignments: resolved phone from Twilio API: ${integrationPhone}`);
+            // Persist to metadata so we don't need to query Twilio again
+            const metadata = (integration.metadata as Record<string, unknown>) || {};
+            metadata.phoneNumber = integrationPhone;
+            await this.integrationRepo.update(integration.id, { metadata: metadata as any });
+          }
+        }
+      } catch (e: any) {
+        this.logger.warn(`listAssignments: failed to query Twilio API for phone numbers: ${e.message}`);
       }
     }
     this.logger.log(`listAssignments: workspaceId=${workspaceId} integrationId=${integration?.id ?? 'none'} phone=${integrationPhone ?? 'none'}`);
