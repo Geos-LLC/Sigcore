@@ -85,7 +85,7 @@ export default function AdminSmsTestPage() {
   const loadData = async (currentApiKey?: string) => {
     // Fall back to DOM value in case password manager autofilled without triggering onChange
     const domKey = apiKeyRef.current?.value || '';
-    const key = currentApiKey ?? apiKey || domKey;
+    const key = currentApiKey ?? (apiKey || domKey);
     if (domKey && !apiKey) { setApiKey(domKey); localStorage.setItem('sms_api_key', domKey); }
     if (!key) { setLoadError('Enter your API key above first.'); return; }
     setLoadError(null);
