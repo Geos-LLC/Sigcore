@@ -126,7 +126,8 @@ Content-Type: application/json
   "leadId": "lb_lead_abc123",
   "leadPhoneE164": "+15559876543",
   "leadSummary": "John Smith — Plumbing repair — Brooklyn, NY",
-  "source": "thumbtack"
+  "source": "thumbtack",
+  "sigcoreConversationId": "uuid"   // optional — links this session to an existing conversation thread
 }
 ```
 
@@ -134,6 +135,19 @@ Content-Type: application/json
 ```json
 { "sessionId": "uuid", "status": "CREATED" }
 ```
+
+**All fields:**
+
+| Field | Required | Notes |
+|---|---|---|
+| `businessId` | yes | Sigcore workspace ID |
+| `leadId` | yes | Your internal lead ID (idempotency key) |
+| `leadPhoneE164` | yes | Lead's phone in E.164 format |
+| `leadSummary` | no | Short text read in agent whisper, e.g. `"John Smith — Plumbing — Brooklyn NY"` |
+| `agentHint` | no | Override agent phone for this session |
+| `source` | no | Origin tag, e.g. `"thumbtack"` |
+| `requestedMode` | no | `AGENT_FIRST` or `PARALLEL` — overrides business settings for this call |
+| `sigcoreConversationId` | no | UUID of an existing Sigcore conversation thread to link to this session |
 
 **Idempotent:** calling `/start` again with the same `businessId + leadId` returns the
 existing session rather than creating a new one.
@@ -206,6 +220,7 @@ if (expected !== req.headers['x-callio-signature']) {
     "sessionId": "uuid",
     "leadId": "lb_lead_abc123",
     "businessId": "workspace_id",
+    "sigcoreConversationId": "uuid-or-null",
     "status": "BRIDGED",
     "mode": "AGENT_FIRST",
     "agentPhone": "+12483462681",
@@ -216,6 +231,8 @@ if (expected !== req.headers['x-callio-signature']) {
 }
 ```
 
+`sigcoreConversationId` is `null` when not provided on `/start`.
+
 For `call_connect.failed`, the `data` object additionally includes:
 ```json
 { "reason": "Max agent attempts reached: Agent no-answer" }
@@ -224,6 +241,11 @@ For `call_connect.failed`, the `data` object additionally includes:
 For `call_connect.voicemail_drop`:
 ```json
 { "mode": "tts" }
+```
+
+For `call_connect.ended` when lead didn't answer (voicemail OFF):
+```json
+{ "reason": "lead_no-answer" }
 ```
 
 ### Event Sequence (happy path)
@@ -274,6 +296,7 @@ session.created → agent.ringing → agent.accepted → lead.ringing → ended 
 | `lead_id` | varchar | FK to leads |
 | `business_id` | varchar | |
 | `sigcore_session_id` | uuid | returned by `/start` |
+| `sigcore_conversation_id` | uuid | nullable — from `/start` request or event payload |
 | `status` | varchar | mirrors Sigcore status |
 | `attempt` | int | |
 | `failure_reason` | varchar | null |
@@ -345,8 +368,11 @@ async function maybeStartCallConnect(lead, business) {
       businessId: business.sigcore_workspace_id,
       leadId: lead.id,
       leadPhoneE164: lead.phone_e164,
-      leadSummary: buildSummary(lead),   // "John Smith — Plumbing — Brooklyn NY"
-      source: lead.source,               // "thumbtack"
+      leadSummary: buildSummary(lead),          // "John Smith — Plumbing — Brooklyn NY"
+      source: lead.source,                       // "thumbtack"
+      ...(lead.sigcore_conversation_id
+        ? { sigcoreConversationId: lead.sigcore_conversation_id }
+        : {}),
     }, {
       headers: { 'X-API-Key': settings.sigcore_api_key }
     });
