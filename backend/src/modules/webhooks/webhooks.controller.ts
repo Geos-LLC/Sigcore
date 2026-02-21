@@ -203,8 +203,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect agent TwiML: sessionId=${sessionId}`);
     const twiml = await this.callConnectService.handleAgentTwiml(sessionId);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -222,8 +221,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect lead TwiML: sessionId=${sessionId}, answeredBy=${answeredBy || 'none'}`);
     const twiml = await this.callConnectService.handleLeadTwiml(sessionId, answeredBy);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -240,8 +238,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect lead wait TwiML: sessionId=${sessionId}`);
     const twiml = await this.callConnectService.handleLeadWaitTwiml(sessionId);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -275,8 +272,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Lead voicemail drop TwiML: sessionId=${sessionId}`);
     const twiml = await this.callConnectService.handleLeadVoicemailTwiml(sessionId);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -293,8 +289,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect agent voicemail hold TwiML: sessionId=${sessionId}`);
     const twiml = await this.callConnectService.handleAgentVoicemailHoldTwiml(sessionId);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -312,8 +307,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect lead voicemail-agent TwiML: sessionId=${sessionId}`);
     const twiml = await this.callConnectService.handleLeadVoicemailAgentTwiml(sessionId);
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -332,8 +326,7 @@ export class WebhooksController {
   ) {
     this.logger.log(`Call Connect gather: sessionId=${sessionId}, digits=${digits}`);
     const twiml = await this.callConnectService.handleAgentGatherAction(sessionId, digits || '');
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**
@@ -433,8 +426,7 @@ export class WebhooksController {
     this.logger.log(`========== TWILIO VOICE WEBHOOK END ==========`);
 
     // Return TwiML response
-    res.set('Content-Type', 'text/xml');
-    res.send(twiml);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
   /**

@@ -237,6 +237,78 @@ export class WebhookSubscriptionsController {
 }
 
 /**
+ * Alias controller at /api/webhooks/subscriptions
+ * This matches the path documented in the LeadBridge integration guide.
+ */
+@Controller('webhooks/subscriptions')
+@UseGuards(SigcoreAuthGuard)
+export class WebhookSubscriptionsAliasController {
+  constructor(
+    private readonly outboundWebhooksService: OutboundWebhooksService,
+    @InjectRepository(Tenant)
+    private readonly tenantRepo: Repository<Tenant>,
+  ) {}
+
+  @Get()
+  async listSubscriptions(@WorkspaceId() workspaceId: string) {
+    const subscriptions = await this.outboundWebhooksService.getSubscriptions(workspaceId);
+    return { data: subscriptions };
+  }
+
+  @Get(':id')
+  async getSubscription(@WorkspaceId() workspaceId: string, @Param('id') id: string) {
+    const subscription = await this.outboundWebhooksService.getSubscription(workspaceId, id);
+    if (!subscription) throw new NotFoundException('Webhook subscription not found');
+    return { data: subscription };
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async createSubscription(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | undefined,
+    @Body() dto: CreateWebhookSubscriptionDto,
+  ) {
+    if (!dto.secret && tenantId) {
+      const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+      if (tenant?.webhookSecret) dto.secret = tenant.webhookSecret;
+    }
+    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto);
+    return { data: subscription };
+  }
+
+  @Patch(':id')
+  async updateSubscription(
+    @WorkspaceId() workspaceId: string,
+    @Param('id') id: string,
+    @Body() dto: UpdateWebhookSubscriptionDto,
+  ) {
+    const subscription = await this.outboundWebhooksService.updateSubscription(workspaceId, id, dto);
+    if (!subscription) throw new NotFoundException('Webhook subscription not found');
+    return { data: subscription };
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteSubscription(@WorkspaceId() workspaceId: string, @Param('id') id: string) {
+    await this.outboundWebhooksService.deleteSubscription(workspaceId, id);
+  }
+
+  @Post(':id/test')
+  async testSubscription(@WorkspaceId() workspaceId: string, @Param('id') id: string) {
+    const result = await this.outboundWebhooksService.testSubscription(workspaceId, id);
+    return { data: result };
+  }
+
+  @Get('events/types')
+  getEventTypes() {
+    return {
+      data: Object.values(WebhookEventType).map((event) => ({ event })),
+    };
+  }
+}
+
+/**
  * Webhook Subscriptions API for external systems (API Key auth)
  */
 @Controller('v1/webhook-subscriptions')
