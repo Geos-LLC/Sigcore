@@ -458,10 +458,10 @@ export class CallConnectService {
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
     } else {
-      const message =
+      const vmTemplate =
         settings?.leadVoicemailMessage ||
         'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
-      response.say(message);
+      response.say(this.substituteTemplateVars(vmTemplate, session));
     }
     response.hangup();
 
