@@ -11,6 +11,7 @@ import { TenantsModule } from './modules/tenants/tenants.module';
 import { ApiModule } from './modules/api/api.module';
 import { EmailModule } from './modules/email/email.module';
 import { HealthController } from './health.controller';
+import { DocsController } from './docs.controller';
 
 @Module({
   imports: [
@@ -49,6 +50,6 @@ import { HealthController } from './health.controller';
     ApiModule,
     EmailModule,
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, DocsController],
 })
 export class AppModule {}
