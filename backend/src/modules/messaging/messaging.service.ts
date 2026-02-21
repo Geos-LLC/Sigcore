@@ -5,7 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import * as twilio from 'twilio';
 import { SmsMessage, SmsDirection, SmsStatus } from '../../database/entities/sms-message.entity';
 import { PhoneNumberAssignment, PhoneNumberType } from '../../database/entities/phone-number-assignment.entity';
-import { CommunicationIntegration, ProviderType } from '../../database/entities/communication-integration.entity';
+import { CommunicationIntegration, ProviderType, IntegrationStatus } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
@@ -162,6 +162,26 @@ export class MessagingService {
   // ──────────────────────────────────────────────────────────────
 
   async listAssignments(workspaceId: string) {
+    // Auto-register phone numbers from active Twilio integrations so no manual setup is needed
+    const integration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+    });
+    const integrationPhone = integration?.metadata?.phoneNumber as string | undefined;
+    if (integrationPhone) {
+      const existing = await this.assignmentRepo.findOne({
+        where: { businessId: workspaceId, numberE164: integrationPhone },
+      });
+      if (!existing) {
+        await this.assignmentRepo.save({
+          businessId: workspaceId,
+          numberE164: integrationPhone,
+          type: PhoneNumberType.BOT,
+          active: true,
+        });
+        this.logger.log(`Auto-registered Twilio number ${integrationPhone} for workspace ${workspaceId}`);
+      }
+    }
+
     const results = await this.assignmentRepo.find({
       where: { businessId: workspaceId },
       order: { createdAt: 'DESC' },
