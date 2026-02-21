@@ -228,6 +228,9 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP]: 'Call Connect: voicemail drop started on lead voicemail',
       [WebhookEventType.CALL_CONNECT_ENDED]: 'Call Connect: session ended successfully',
       [WebhookEventType.CALL_CONNECT_FAILED]: 'Call Connect: session failed',
+      [WebhookEventType.SMS_MESSAGE_RECEIVED]: 'Triggered when an inbound SMS is received',
+      [WebhookEventType.SMS_MESSAGE_DELIVERED]: 'Triggered when an outbound SMS is delivered',
+      [WebhookEventType.SMS_MESSAGE_FAILED]: 'Triggered when an outbound SMS fails to deliver',
     };
     return descriptions[event] || 'No description available';
   }

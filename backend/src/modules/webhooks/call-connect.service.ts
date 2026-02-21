@@ -878,7 +878,7 @@ export class CallConnectService {
         ...(settings.leadVoicemailEnabled
           ? {
               machineDetection: 'Enable',
-              asyncAmd: true,
+              asyncAmd: 'true',
               asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
               asyncAmdStatusCallbackMethod: 'POST',
             }
@@ -925,7 +925,7 @@ export class CallConnectService {
       ...(settings?.leadVoicemailEnabled
         ? {
             machineDetection: 'Enable',
-            asyncAmd: true,
+            asyncAmd: 'true',
             asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/lead/amd?sessionId=${session.id}`,
             asyncAmdStatusCallbackMethod: 'POST',
           }
