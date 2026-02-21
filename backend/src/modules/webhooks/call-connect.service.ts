@@ -528,9 +528,9 @@ export class CallConnectService {
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
     });
-    const acceptDigit = settings?.agentAcceptDigits || '1';
+    const acceptDigits = settings?.agentAcceptDigits || '1';
 
-    if (digits === acceptDigit) {
+    if (acceptDigits.includes(digits)) {
       // Agent accepted — update session and initiate lead call
       await this.updateSession(session, { status: SessionStatus.AGENT_ACCEPTED });
       await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED);
@@ -552,7 +552,7 @@ export class CallConnectService {
       return response.toString();
     } else {
       // Agent declined
-      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits})`);
+      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits}, acceptDigits=${acceptDigits})`);
       await this.tryNextAgentOrFail(session, settings, 'Agent declined');
       return this.hangupTwiml();
     }
@@ -1206,5 +1206,30 @@ export class CallConnectService {
     const r = new twilio.twiml.VoiceResponse();
     r.hangup();
     return r.toString();
+  }
+
+  /**
+   * Substitutes template variables in a message string.
+   * Supported: {summary}, {customerName}, {category}, {location}, {digit}
+   * Parses leadSummary using the "Name — Category — Location" format.
+   */
+  private substituteTemplateVars(
+    template: string,
+    session: CallConnectSession,
+    extra?: { digit?: string },
+  ): string {
+    const summary = session.leadSummary || '';
+    const parts = summary.split(/\s*—\s*/);
+    const customerName = parts[0]?.trim() || summary;
+    const category = parts[1]?.trim() || '';
+    const location = parts[2]?.trim() || '';
+    const digitHint = extra?.digit ?? '';
+
+    return template
+      .replace(/\{summary\}/g, summary)
+      .replace(/\{customerName\}/g, customerName)
+      .replace(/\{category\}/g, category)
+      .replace(/\{location\}/g, location)
+      .replace(/\{digit\}/g, digitHint);
   }
 }
