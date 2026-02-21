@@ -80,10 +80,11 @@ export default function AdminSmsTestPage() {
   const loadData = async () => {
     if (!apiKey) return;
     const client = makeClient(apiKey);
+    const bust = `_=${Date.now()}`;
     try {
       const [assignRes, msgRes] = await Promise.all([
-        client.get('/internal/messages/assignments'),
-        client.get('/internal/messages'),
+        client.get(`/internal/messages/assignments?${bust}`),
+        client.get(`/internal/messages?${bust}`),
       ]);
       setAssignments(assignRes.data);
       setMessages(msgRes.data);
