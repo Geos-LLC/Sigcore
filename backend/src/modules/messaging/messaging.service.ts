@@ -162,16 +162,19 @@ export class MessagingService {
   // ──────────────────────────────────────────────────────────────
 
   async listAssignments(workspaceId: string) {
-    return this.assignmentRepo.find({
+    const results = await this.assignmentRepo.find({
       where: { businessId: workspaceId },
       order: { createdAt: 'DESC' },
     });
+    this.logger.log(`listAssignments: workspaceId=${workspaceId} found=${results.length}`);
+    return results;
   }
 
   async upsertAssignment(
     workspaceId: string,
     dto: { numberE164: string; type: PhoneNumberType | 'BOT' | 'DEDICATED'; region?: string },
   ) {
+    this.logger.log(`upsertAssignment: workspaceId=${workspaceId} number=${dto.numberE164} type=${dto.type}`);
     const existing = await this.assignmentRepo.findOne({
       where: { businessId: workspaceId, numberE164: dto.numberE164 },
     });
@@ -183,13 +186,15 @@ export class MessagingService {
       });
       return this.assignmentRepo.findOne({ where: { id: existing.id } });
     }
-    return this.assignmentRepo.save({
+    const saved = await this.assignmentRepo.save({
       businessId: workspaceId,
       numberE164: dto.numberE164,
       type: dto.type as PhoneNumberType,
       region: dto.region,
       active: true,
     });
+    this.logger.log(`upsertAssignment: saved id=${saved.id}`);
+    return saved;
   }
 
   async removeAssignment(workspaceId: string, id: string) {
