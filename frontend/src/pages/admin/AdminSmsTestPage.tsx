@@ -99,16 +99,20 @@ export default function AdminSmsTestPage() {
   useEffect(() => { loadData(); }, []);
 
   const handleAddNumber = async () => {
-    if (!newNumber) return;
+    console.log('[SMS] handleAddNumber called', { newNumber, apiKey: apiKey ? `${apiKey.slice(0,10)}...` : 'EMPTY', newType });
+    if (!newNumber) { console.warn('[SMS] newNumber is empty — returning'); return; }
+    if (!apiKey) { console.warn('[SMS] apiKey is empty — returning'); return; }
     setAddingNumber(true);
     setAddNumberResult(null);
     saveCredentials();
     try {
+      console.log('[SMS] POST /internal/messages/assignments', { numberE164: newNumber, type: newType });
       const res = await makeClient(apiKey).post('/internal/messages/assignments', {
         numberE164: newNumber,
         type: newType,
         ...(newRegion ? { region: newRegion } : {}),
       });
+      console.log('[SMS] POST response:', res.data);
       // Immediately show the new record in the list
       if (res.data) {
         setAssignments(prev => [res.data, ...prev.filter(a => a.id !== res.data.id)]);
@@ -117,6 +121,7 @@ export default function AdminSmsTestPage() {
       setNewNumber('');
       await loadData();
     } catch (err: any) {
+      console.error('[SMS] POST error:', err.response?.data || err.message);
       setAddNumberResult({ ok: false, msg: err.response?.data?.message || err.message });
     } finally {
       setAddingNumber(false);
@@ -277,12 +282,16 @@ export default function AdminSmsTestPage() {
               <button
                 onClick={handleAddNumber}
                 disabled={addingNumber || !newNumber || !apiKey}
+                title={!apiKey ? 'Enter API key in Credentials above first' : !newNumber ? 'Enter a phone number' : ''}
                 className="btn-primary flex items-center gap-2"
               >
                 {addingNumber ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
                 Add
               </button>
             </div>
+            {!apiKey && (
+              <p className="text-xs text-red-600 flex items-center gap-1"><AlertCircle className="h-3 w-3" />Enter your API key in the Credentials section above to enable Add.</p>
+            )}
             {newNumber && !isValidE164(newNumber) && (
               <p className="text-xs text-orange-600">Format should be E.164, e.g. +19045778584</p>
             )}
