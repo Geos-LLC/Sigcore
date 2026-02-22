@@ -312,6 +312,78 @@ export class WebhooksController {
   }
 
   /**
+   * Fired when the lead's conference <Dial> completes (conference ended).
+   * Routes the lead to voicemail-hold if a voicemail choice is in progress,
+   * or hangs up if the session is already terminal.
+   *
+   * POST /webhooks/twilio/voice/lead/after-conference?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/after-conference')
+  @HttpCode(HttpStatus.OK)
+  async handleCallConnectLeadAfterConference(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Lead after-conference: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadAfterConferenceTwiml(sessionId);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
+   * Silent hold loop for the lead during voicemail-choice.
+   * Keeps the lead call alive while the agent decides which mode to use.
+   *
+   * POST /webhooks/twilio/voice/lead/voicemail-hold?sessionId=<uuid>
+   */
+  @Post('twilio/voice/lead/voicemail-hold')
+  @HttpCode(HttpStatus.OK)
+  async handleCallConnectLeadVoicemailHold(
+    @Query('sessionId') sessionId: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Lead voicemail hold: sessionId=${sessionId}`);
+    const twiml = await this.callConnectService.handleLeadVoicemailHoldTwiml(sessionId);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
+   * Voicemail-choice prompt for the agent.
+   * Press 1 → personal message (SPEAK). Any other key → automated drop.
+   *
+   * POST /webhooks/twilio/voice/agent/voicemail-choice?sessionId=<uuid>&answeredBy=<value>
+   */
+  @Post('twilio/voice/agent/voicemail-choice')
+  @HttpCode(HttpStatus.OK)
+  async handleCallConnectAgentVoicemailChoice(
+    @Query('sessionId') sessionId: string,
+    @Query('answeredBy') answeredBy: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Agent voicemail choice: sessionId=${sessionId}, answeredBy=${answeredBy}`);
+    const twiml = await this.callConnectService.handleAgentVoicemailChoiceTwiml(sessionId, answeredBy);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
+   * Gather action for the agent's voicemail choice.
+   * Digit "1" → SPEAK (personal). Anything else or timeout (Digits="") → automated.
+   *
+   * POST /webhooks/twilio/voice/agent/voicemail-choice-action?sessionId=<uuid>&answeredBy=<value>
+   */
+  @Post('twilio/voice/agent/voicemail-choice-action')
+  @HttpCode(HttpStatus.OK)
+  async handleCallConnectAgentVoicemailChoiceAction(
+    @Query('sessionId') sessionId: string,
+    @Query('answeredBy') answeredBy: string,
+    @Body('Digits') digits: string,
+    @Res() res: Response,
+  ) {
+    this.logger.log(`Agent voicemail choice action: sessionId=${sessionId}, digits=${digits}, answeredBy=${answeredBy}`);
+    const twiml = await this.callConnectService.handleAgentVoicemailChoiceAction(sessionId, digits || '', answeredBy);
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
    * Gather action callback — called when the agent presses a digit.
    * Advances the session state machine and returns conference TwiML (accepted)
    * or hangup TwiML (declined).
