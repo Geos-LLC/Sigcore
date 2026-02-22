@@ -749,22 +749,13 @@ export class CallConnectService {
             await this.failSession(session, `Agent ${callStatus} — lead was left waiting`);
           }
         } else if (isLeadLeg && session.status !== SessionStatus.BRIDGED) {
-          // Lead didn't answer (no-answer) or declined (busy).
-          if (settings?.leadVoicemailEnabled) {
-            // Voicemail was ON — AMD should have detected the machine before we got here.
-            // Getting no-answer/busy means the carrier did not forward to voicemail at all.
-            await this.failSession(session, `Lead ${callStatus} — no voicemail engaged`);
-          } else {
-            // Voicemail is OFF — the agent was expected to handle voicemail personally.
-            // A missed call is a normal outcome, not an error. End gracefully.
-            await this.updateSession(session, {
-              status: SessionStatus.ENDED,
-              failureReason: `Lead ${callStatus}`,
-            });
-            await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
-              reason: `lead_${callStatus}`,
-            });
-          }
+          // Lead didn't answer (no-answer) or declined (busy/failed/canceled).
+          // Always disconnect the agent — there is nothing for them to do when the lead
+          // never picked up. failSession hangs up both legs via Twilio REST.
+          const reason = settings?.leadVoicemailEnabled
+            ? `Lead ${callStatus} — no voicemail engaged`
+            : `Lead ${callStatus}`;
+          await this.failSession(session, reason);
         }
         // If lead no-answer but session already BRIDGED, ignore (conference handles its own end)
         break;
