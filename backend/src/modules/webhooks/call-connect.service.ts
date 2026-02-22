@@ -806,9 +806,10 @@ export class CallConnectService {
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
     );
 
-    // Async AMD: TwiML fires immediately on answer (no 6s silence from sync AMD).
-    // AMD result arrives asynchronously at /voice/amd — handleAgentAmd() calls failSession()
-    // if a machine is detected, ending both calls within ~3-5s of pickup.
+    // No machineDetection on agent leg — AMD false positives race with the
+    // gather and kill the session before the agent can press a key.
+    // Agent voicemail is handled by the gather timeout: voicemail can't press
+    // a digit, so after ~15s the call ends via "No input received" → completed → failSession.
     const call = await client.calls.create({
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
@@ -817,10 +818,6 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings.ringTimeoutSeconds,
-      machineDetection: 'Enable',
-      asyncAmd: 'true',
-      asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
-      asyncAmdStatusCallbackMethod: 'POST',
     });
 
     await this.updateSession(session, {
@@ -851,11 +848,7 @@ export class CallConnectService {
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: settings.ringTimeoutSeconds,
-        // Async AMD on agent leg: detects voicemail in ~3-5s without delaying TwiML.
-        machineDetection: 'Enable',
-        asyncAmd: 'true',
-        asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
-        asyncAmdStatusCallbackMethod: 'POST',
+        // No AMD on agent leg — see startAgentFirstMode comment.
       }),
       client.calls.create({
         to: session.leadPhoneE164,
