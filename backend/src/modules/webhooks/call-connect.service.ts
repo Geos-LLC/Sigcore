@@ -545,9 +545,9 @@ export class CallConnectService {
       );
       return response.toString();
     } else {
-      // Agent declined
+      // Agent explicitly declined — fail immediately, no retries
       this.logger.log(`Agent declined call for session ${session.id} (digit=${digits}, acceptDigits=${acceptDigits})`);
-      await this.tryNextAgentOrFail(session, settings, 'Agent declined');
+      await this.failSession(session, 'Agent declined');
       return this.hangupTwiml();
     }
   }
@@ -742,8 +742,8 @@ export class CallConnectService {
             session.status === SessionStatus.CALLING_AGENT ||
             session.status === SessionStatus.AGENT_ANSWERED
           ) {
-            // Standard: agent didn't pick up before lead was called
-            await this.tryNextAgentOrFail(session, settings, `Agent ${callStatus}`);
+            // Agent didn't pick up or declined — fail immediately, no retries
+            await this.failSession(session, `Agent ${callStatus}`);
           } else if (
             session.status === SessionStatus.LEAD_ANSWERED ||
             session.status === SessionStatus.BRIDGED
