@@ -165,8 +165,6 @@ export class CallConnectService {
       provider: CallConnectProvider.TWILIO,
       fromNumberE164: fromNumber,
       sigcoreConversationId: dto.sigcoreConversationId || undefined,
-      agentWhisperMessage: dto.agentWhisperMessage || undefined,
-      leadGreetingMessage: dto.leadGreetingMessage || undefined,
       timeline: [],
     });
 
@@ -251,23 +249,26 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
-      // Per-session message from /start takes priority, then settings, then default
+      const acceptDigits = settings?.agentAcceptDigits || '0123456789';
+      // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
+      const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
       const template =
-        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
-        'You have a new lead: {summary}. Press any key to connect.';
-      const whisper = this.substituteTemplateVars(template, session, { digit: 'any key' });
+        'You have a new lead: {summary}. Press {digit} to connect.';
+      const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
 
+      // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
+      // already short-circuits voicemail calls before this TwiML runs.
       const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 15);
-      // Pause and whisper are INSIDE the gather so the agent can press a key
-      // at any point during the message — no need to wait for it to finish.
+      // Pause and whisper are INSIDE the gather so DTMF digits pressed at any
+      // point during the message are captured (not lost before gather starts).
       const gather = response.gather({
         numDigits: 1,
         action: `${baseUrl}/api/webhooks/twilio/voice/agent/gather?sessionId=${sessionId}`,
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.pause({ length: 1 });
+      gather.pause({ length: 2 });
       gather.say(whisper);
 
       response.say('No input received. Goodbye.');
@@ -275,7 +276,6 @@ export class CallConnectService {
     } else {
       // PARALLEL: agent joins conference immediately
       const template =
-        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'Connecting you to a new lead: {summary}.';
       const whisper = this.substituteTemplateVars(template, session);
@@ -423,11 +423,7 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    // Per-session message from /start takes priority, then settings, then default
-    const greetingTemplate =
-      session.leadGreetingMessage ||
-      settings?.leadGreetingMessage ||
-      'Please hold while we connect you.';
+    const greetingTemplate = settings?.leadGreetingMessage || 'Please hold while we connect you.';
     const greeting = this.substituteTemplateVars(greetingTemplate, session);
     const baseUrl = this.getBaseUrl();
 
@@ -523,8 +519,12 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
-    // Any single digit (0-9) accepts the call — always.
-    if ('0123456789'.includes(digits)) {
+    const settings = await this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+    const acceptDigits = settings?.agentAcceptDigits || '0123456789';
+
+    if (acceptDigits.includes(digits)) {
       // Agent accepted — update session and initiate lead call
       await this.updateSession(session, { status: SessionStatus.AGENT_ACCEPTED });
       await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED);
@@ -546,7 +546,7 @@ export class CallConnectService {
       return response.toString();
     } else {
       // Agent explicitly declined — fail immediately, no retries
-      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits})`);
+      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits}, acceptDigits=${acceptDigits})`);
       await this.failSession(session, 'Agent declined');
       return this.hangupTwiml();
     }
@@ -806,10 +806,8 @@ export class CallConnectService {
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
     );
 
-    // No machineDetection on agent leg — AMD false positives race with the
-    // gather and kill the session before the agent can press a key.
-    // Agent voicemail is handled by the gather timeout: voicemail can't press
-    // a digit, so after ~15s the call ends via "No input received" → completed → failSession.
+    // No machineDetection: it caused ~6s silence on pickup (sync AMD delayed TwiML).
+    // Agent voicemail is handled naturally: carrier voicemail → no-answer → tryNextAgentOrFail.
     const call = await client.calls.create({
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
@@ -848,7 +846,6 @@ export class CallConnectService {
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: settings.ringTimeoutSeconds,
-        // No AMD on agent leg — see startAgentFirstMode comment.
       }),
       client.calls.create({
         to: session.leadPhoneE164,
@@ -1015,6 +1012,39 @@ export class CallConnectService {
         `Voicemail drop call failed for session ${session.id}: ${err.message}`,
       );
       await this.failSession(session, `Lead did not answer; voicemail drop failed: ${err.message}`);
+    }
+  }
+
+  private async tryNextAgentOrFail(
+    session: CallConnectSession,
+    settings: CallConnectSettings | null,
+    reason: string,
+  ): Promise<void> {
+    const maxAttempts = settings?.maxAgentAttempts ?? 2;
+    if (session.attempt < maxAttempts) {
+      // Future: pick next agent via ROUND_ROBIN / ON_DUTY strategy
+      // For now: re-try the same agent after 5 seconds
+      this.logger.log(
+        `Session ${session.id}: agent attempt ${session.attempt}/${maxAttempts} failed (${reason}). Retrying...`,
+      );
+      await this.updateSession(session, {
+        status: SessionStatus.CREATED,
+        attempt: session.attempt + 1,
+        agentCallSid: null as any,
+      });
+
+      if (settings) {
+        // 2s delay: short enough to reach the agent quickly on retry,
+        // long enough for the carrier to clear the previous call state.
+        setTimeout(() => {
+          this.startAgentFirstMode(session, settings).catch((err) => {
+            this.logger.error(`Retry failed for session ${session.id}: ${err.message}`);
+            this.failSession(session, `Retry failed: ${err.message}`).catch(() => {});
+          });
+        }, 2000);
+      }
+    } else {
+      await this.failSession(session, `Max agent attempts reached: ${reason}`);
     }
   }
 

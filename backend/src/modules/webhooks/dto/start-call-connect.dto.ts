@@ -31,14 +31,4 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsString()
   sigcoreConversationId?: string;
-
-  /** Whisper message read to the agent. Supports {summary} placeholder. */
-  @IsOptional()
-  @IsString()
-  agentWhisperMessage?: string;
-
-  /** Greeting message read to the lead while waiting for the agent. */
-  @IsOptional()
-  @IsString()
-  leadGreetingMessage?: string;
 }
