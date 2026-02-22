@@ -554,7 +554,7 @@ export class CallConnectService {
 
   /**
    * Handles the async Answering Machine Detection (AMD) callback from Twilio.
-   * If voicemail is detected, we cancel the agent call and retry/fail.
+   * If voicemail is detected on the agent's phone, fail immediately and hang up both calls.
    */
   async handleAgentAmd(sessionId: string, callSid: string, answeredBy: string): Promise<void> {
     const isMachine =
@@ -577,19 +577,8 @@ export class CallConnectService {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session || TERMINAL_STATUSES.has(session.status)) return;
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
-
-    // Hang up the voicemail call
-    try {
-      const client = await this.getTwilioClient(session.businessId, session.tenantId);
-      await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
-    } catch (err: any) {
-      this.logger.warn(`Could not hang up machine call ${callSid}: ${err.message}`);
-    }
-
-    await this.tryNextAgentOrFail(session, settings, `Voicemail detected (${answeredBy})`);
+    // Fail immediately — failSession hangs up both agent and lead calls
+    await this.failSession(session, `Agent voicemail detected (${answeredBy})`);
   }
 
   /**
@@ -708,11 +697,10 @@ export class CallConnectService {
           await this.updateSession(session, updates);
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED);
         } else if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
-          // Call ended before the agent answered.
-          // Fast-answer detection already handles voicemail (hangs up + retries there).
-          // This path catches cases where the call was terminated for other reasons.
+          // Call ended before the agent answered (voicemail, hung up, etc.)
+          // Fail immediately — no retries. failSession hangs up the lead call too.
           this.logger.log(`Session ${session.id}: agent call completed before answering`);
-          await this.tryNextAgentOrFail(session, settings, 'Agent call ended before answer');
+          await this.failSession(session, 'Agent call ended before answer');
         } else if (isAgentLeg && session.status === SessionStatus.AGENT_ANSWERED) {
           // Agent answered and then hung up without pressing the accept digit.
           // With fast-answer detection in place, this is always a real human who chose
