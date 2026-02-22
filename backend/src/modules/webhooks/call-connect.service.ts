@@ -249,26 +249,21 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
-      const acceptDigits = settings?.agentAcceptDigits || '0123456789';
-      // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
-      const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
       const template =
         settings?.agentWhisperMessage ||
-        'You have a new lead: {summary}. Press {digit} to connect.';
-      const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
+        'You have a new lead: {summary}. Press any key to connect.';
+      const whisper = this.substituteTemplateVars(template, session, { digit: 'any key' });
 
-      // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
-      // already short-circuits voicemail calls before this TwiML runs.
       const gatherTimeout = Math.min(settings?.ringTimeoutSeconds ?? 20, 15);
-      // Pause and whisper are INSIDE the gather so DTMF digits pressed at any
-      // point during the message are captured (not lost before gather starts).
+      // Pause and whisper are INSIDE the gather so the agent can press a key
+      // at any point during the message — no need to wait for it to finish.
       const gather = response.gather({
         numDigits: 1,
         action: `${baseUrl}/api/webhooks/twilio/voice/agent/gather?sessionId=${sessionId}`,
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.pause({ length: 2 });
+      gather.pause({ length: 1 });
       gather.say(whisper);
 
       response.say('No input received. Goodbye.');
@@ -519,12 +514,8 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
-    const acceptDigits = settings?.agentAcceptDigits || '0123456789';
-
-    if (acceptDigits.includes(digits)) {
+    // Any single digit (0-9) accepts the call — always.
+    if ('0123456789'.includes(digits)) {
       // Agent accepted — update session and initiate lead call
       await this.updateSession(session, { status: SessionStatus.AGENT_ACCEPTED });
       await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED);
@@ -546,7 +537,7 @@ export class CallConnectService {
       return response.toString();
     } else {
       // Agent explicitly declined — fail immediately, no retries
-      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits}, acceptDigits=${acceptDigits})`);
+      this.logger.log(`Agent declined call for session ${session.id} (digit=${digits})`);
       await this.failSession(session, 'Agent declined');
       return this.hangupTwiml();
     }
