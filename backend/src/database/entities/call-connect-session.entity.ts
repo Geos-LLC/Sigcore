@@ -100,6 +100,14 @@ export class CallConnectSession {
   @Column({ name: 'sigcore_conversation_id', type: 'uuid', nullable: true })
   sigcoreConversationId: string;
 
+  /** Whisper message for the agent (from /start payload) */
+  @Column({ name: 'agent_whisper_message', type: 'text', nullable: true })
+  agentWhisperMessage: string;
+
+  /** Greeting message for the lead (from /start payload) */
+  @Column({ name: 'lead_greeting_message', type: 'text', nullable: true })
+  leadGreetingMessage: string;
+
   /** Append-only audit trail of state transitions */
   @Column({ type: 'jsonb', default: [] })
   timeline: Array<Record<string, unknown>>;

@@ -165,6 +165,8 @@ export class CallConnectService {
       provider: CallConnectProvider.TWILIO,
       fromNumberE164: fromNumber,
       sigcoreConversationId: dto.sigcoreConversationId || undefined,
+      agentWhisperMessage: dto.agentWhisperMessage || undefined,
+      leadGreetingMessage: dto.leadGreetingMessage || undefined,
       timeline: [],
     });
 
@@ -249,7 +251,9 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (session.mode === CallConnectMode.AGENT_FIRST) {
+      // Per-session message from /start takes priority, then settings, then default
       const template =
+        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'You have a new lead: {summary}. Press any key to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: 'any key' });
@@ -271,6 +275,7 @@ export class CallConnectService {
     } else {
       // PARALLEL: agent joins conference immediately
       const template =
+        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'Connecting you to a new lead: {summary}.';
       const whisper = this.substituteTemplateVars(template, session);
@@ -418,7 +423,11 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    const greetingTemplate = settings?.leadGreetingMessage || 'Please hold while we connect you.';
+    // Per-session message from /start takes priority, then settings, then default
+    const greetingTemplate =
+      session.leadGreetingMessage ||
+      settings?.leadGreetingMessage ||
+      'Please hold while we connect you.';
     const greeting = this.substituteTemplateVars(greetingTemplate, session);
     const baseUrl = this.getBaseUrl();
 
