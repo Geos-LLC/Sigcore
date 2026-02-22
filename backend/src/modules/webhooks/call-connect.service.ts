@@ -806,8 +806,9 @@ export class CallConnectService {
       `AGENT_FIRST: calling agent ${session.agentPhoneE164} for session ${session.id}`,
     );
 
-    // No machineDetection: it caused ~6s silence on pickup (sync AMD delayed TwiML).
-    // Agent voicemail is handled naturally: carrier voicemail → no-answer → tryNextAgentOrFail.
+    // Async AMD: TwiML fires immediately on answer (no 6s silence from sync AMD).
+    // AMD result arrives asynchronously at /voice/amd — handleAgentAmd() calls failSession()
+    // if a machine is detected, ending both calls within ~3-5s of pickup.
     const call = await client.calls.create({
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
@@ -816,6 +817,10 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings.ringTimeoutSeconds,
+      machineDetection: 'Enable',
+      asyncAmd: 'true',
+      asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
+      asyncAmdStatusCallbackMethod: 'POST',
     });
 
     await this.updateSession(session, {
@@ -846,6 +851,11 @@ export class CallConnectService {
         statusCallbackMethod: 'POST',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: settings.ringTimeoutSeconds,
+        // Async AMD on agent leg: detects voicemail in ~3-5s without delaying TwiML.
+        machineDetection: 'Enable',
+        asyncAmd: 'true',
+        asyncAmdStatusCallback: `${baseUrl}/api/webhooks/twilio/voice/amd?sessionId=${session.id}`,
+        asyncAmdStatusCallbackMethod: 'POST',
       }),
       client.calls.create({
         to: session.leadPhoneE164,
@@ -1012,39 +1022,6 @@ export class CallConnectService {
         `Voicemail drop call failed for session ${session.id}: ${err.message}`,
       );
       await this.failSession(session, `Lead did not answer; voicemail drop failed: ${err.message}`);
-    }
-  }
-
-  private async tryNextAgentOrFail(
-    session: CallConnectSession,
-    settings: CallConnectSettings | null,
-    reason: string,
-  ): Promise<void> {
-    const maxAttempts = settings?.maxAgentAttempts ?? 2;
-    if (session.attempt < maxAttempts) {
-      // Future: pick next agent via ROUND_ROBIN / ON_DUTY strategy
-      // For now: re-try the same agent after 5 seconds
-      this.logger.log(
-        `Session ${session.id}: agent attempt ${session.attempt}/${maxAttempts} failed (${reason}). Retrying...`,
-      );
-      await this.updateSession(session, {
-        status: SessionStatus.CREATED,
-        attempt: session.attempt + 1,
-        agentCallSid: null as any,
-      });
-
-      if (settings) {
-        // 2s delay: short enough to reach the agent quickly on retry,
-        // long enough for the carrier to clear the previous call state.
-        setTimeout(() => {
-          this.startAgentFirstMode(session, settings).catch((err) => {
-            this.logger.error(`Retry failed for session ${session.id}: ${err.message}`);
-            this.failSession(session, `Retry failed: ${err.message}`).catch(() => {});
-          });
-        }, 2000);
-      }
-    } else {
-      await this.failSession(session, `Max agent attempts reached: ${reason}`);
     }
   }
 
