@@ -448,7 +448,7 @@ export class CallConnectService {
    * Returns TwiML that plays the configured voicemail drop message.
    * Called by Twilio when we redirect a lead call that hit voicemail.
    */
-  async handleLeadVoicemailTwiml(sessionId: string): Promise<string> {
+  async handleLeadVoicemailTwiml(sessionId: string, answeredBy?: string): Promise<string> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return this.hangupTwiml();
 
@@ -457,7 +457,11 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    response.pause({ length: 2 });
+    // machine_end_beep: beep already sounded — play message immediately (1 s safety margin).
+    // All other machine_* types: AMD fired while greeting was still playing — wait ~10 s
+    // for the greeting to finish and the beep to sound before we start recording.
+    const pauseSeconds = answeredBy === 'machine_end_beep' ? 1 : 10;
+    response.pause({ length: pauseSeconds });
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
     } else {
@@ -612,25 +616,39 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    if (!settings?.leadVoicemailEnabled || (!settings.leadVoicemailMessage && !settings.leadVoicemailRecordingUrl)) {
-      // Voicemail drop not configured — just hang up and fail
+    if (!settings?.leadVoicemailEnabled) {
+      // Voicemail drop disabled — hang up lead and fail session
       try {
         const client = await this.getTwilioClient(session.businessId, session.tenantId);
         await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
       } catch {}
-      await this.failSession(session, `Lead did not answer (${answeredBy})`);
+      await this.failSession(session, `Lead voicemail detected but drop disabled (${answeredBy})`);
       return;
     }
 
-    // Redirect call to voicemail drop TwiML
     const baseUrl = this.getBaseUrl();
+    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+
+    // Notify the agent that voicemail was reached, then disconnect them.
+    if (session.agentCallSid) {
+      const agentNotify = new twilio.twiml.VoiceResponse();
+      agentNotify.say("The customer's voicemail was reached. An automated message will be sent. Goodbye.");
+      agentNotify.hangup();
+      client.calls(session.agentCallSid).update({ twiml: agentNotify.toString() }).catch((err: any) => {
+        this.logger.warn(`Could not notify agent of voicemail drop for session ${sessionId}: ${err.message}`);
+      });
+    }
+
+    // Redirect lead call to voicemail drop TwiML.
+    // Pass answeredBy so the TwiML uses the right pause:
+    //   machine_end_beep  → beep already sounded, play immediately (1 s pause)
+    //   machine_start etc → greeting still in progress, wait ~10 s for greeting + beep
     try {
-      const client = await this.getTwilioClient(session.businessId, session.tenantId);
       await client.calls(callSid).update({
-        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}`,
+        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=${encodeURIComponent(answeredBy)}`,
         method: 'POST',
       });
-      this.logger.log(`Voicemail drop initiated for session ${sessionId}`);
+      this.logger.log(`Voicemail drop initiated for session ${sessionId} (${answeredBy})`);
     } catch (err: any) {
       this.logger.error(`Failed to redirect lead call to voicemail for session ${sessionId}: ${err.message}`);
     }

@@ -268,10 +268,11 @@ export class WebhooksController {
   @Post('twilio/voice/lead/voicemail')
   async handleCallConnectLeadVoicemail(
     @Query('sessionId') sessionId: string,
+    @Query('answeredBy') answeredBy: string,
     @Res() res: Response,
   ) {
-    this.logger.log(`Lead voicemail drop TwiML: sessionId=${sessionId}`);
-    const twiml = await this.callConnectService.handleLeadVoicemailTwiml(sessionId);
+    this.logger.log(`Lead voicemail drop TwiML: sessionId=${sessionId}, answeredBy=${answeredBy || 'unknown'}`);
+    const twiml = await this.callConnectService.handleLeadVoicemailTwiml(sessionId, answeredBy);
     res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
