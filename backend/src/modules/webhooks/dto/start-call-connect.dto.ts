@@ -31,4 +31,14 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsString()
   sigcoreConversationId?: string;
+
+  /** Per-session agent whisper message (pre-built by caller). Overrides settings.agentWhisperMessage. */
+  @IsOptional()
+  @IsString()
+  agentWhisperMessage?: string;
+
+  /** Per-session lead greeting message (pre-built by caller). Overrides settings.leadGreetingMessage. */
+  @IsOptional()
+  @IsString()
+  leadGreetingMessage?: string;
 }

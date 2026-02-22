@@ -96,6 +96,14 @@ export class CallConnectSession {
   @Column({ name: 'recording_url', nullable: true })
   recordingUrl: string;
 
+  /** Per-session agent whisper (pre-built by caller). Overrides settings.agentWhisperMessage when set. */
+  @Column({ name: 'agent_whisper_message', type: 'text', nullable: true })
+  agentWhisperMessage: string;
+
+  /** Per-session lead greeting (pre-built by caller). Overrides settings.leadGreetingMessage when set. */
+  @Column({ name: 'lead_greeting_message', type: 'text', nullable: true })
+  leadGreetingMessage: string;
+
   /** Linked Sigcore conversation thread (nullable — not all sessions have one) */
   @Column({ name: 'sigcore_conversation_id', type: 'uuid', nullable: true })
   sigcoreConversationId: string;

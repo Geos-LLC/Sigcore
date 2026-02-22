@@ -160,6 +160,8 @@ export class CallConnectService {
       leadPhoneE164: dto.leadPhoneE164,
       leadSummary: dto.leadSummary,
       agentPhoneE164: agentPhone,
+      agentWhisperMessage: dto.agentWhisperMessage || undefined,
+      leadGreetingMessage: dto.leadGreetingMessage || undefined,
       mode,
       status: SessionStatus.CREATED,
       provider: CallConnectProvider.TWILIO,
@@ -252,7 +254,9 @@ export class CallConnectService {
       const acceptDigits = settings?.agentAcceptDigits || '0123456789';
       // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
       const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
+      // Per-session whisper (pre-built by caller) takes priority over settings template
       const template =
+        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'You have a new lead: {summary}. Press {digit} to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
@@ -276,6 +280,7 @@ export class CallConnectService {
     } else {
       // PARALLEL: agent joins conference immediately
       const template =
+        session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'Connecting you to a new lead: {summary}.';
       const whisper = this.substituteTemplateVars(template, session);
@@ -423,7 +428,7 @@ export class CallConnectService {
       where: { businessId: session.businessId },
     });
 
-    const greetingTemplate = settings?.leadGreetingMessage || 'Please hold while we connect you.';
+    const greetingTemplate = session.leadGreetingMessage || settings?.leadGreetingMessage || 'Please hold while we connect you.';
     const greeting = this.substituteTemplateVars(greetingTemplate, session);
     const baseUrl = this.getBaseUrl();
 
