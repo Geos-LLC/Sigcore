@@ -464,11 +464,11 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    // machine_end_beep: beep already sounded — play message immediately (1 s safety margin).
-    // All other machine_* types: AMD fired while greeting was still playing — wait ~10 s
-    // for the greeting to finish and the beep to sound before we start recording.
-    const pauseSeconds = answeredBy === 'machine_end_beep' ? 1 : 10;
-    response.pause({ length: pauseSeconds });
+    // By the time this fires (AMD latency + conference teardown + HTTP round-trips ≈ 4-8 s
+    // since voicemail pickup), the beep has typically already sounded.  A 1 s safety margin
+    // is enough to cover any remaining gap before the recording window opens.
+    response.pause({ length: 1 });
+
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
     } else {
@@ -477,11 +477,15 @@ export class CallConnectService {
         'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
       response.say(this.substituteTemplateVars(vmTemplate, session));
     }
+
+    // Keep the call alive for ~10 s after the message so a SPEAK-mode agent can be
+    // REST-redirected here (interrupting this pause) to append a personal message.
+    // For automated mode this pause is transparent: the voicemail system will end the
+    // recording naturally once it detects silence, and if not, <Hangup/> cleans up.
+    response.pause({ length: 10 });
     response.hangup();
 
-    // Return TwiML immediately. Session ENDED is set by handleProviderCallStatus
-    // when the agent call completes — not here — so the agent's voicemail-choice
-    // action can still run if it fires during the 10-second pause window.
+    // Session ENDED is set by handleProviderCallStatus when the agent call completes.
     return response.toString();
   }
 
@@ -489,12 +493,13 @@ export class CallConnectService {
    * Called after the lead's conference <Dial> completes (conference ended for any reason).
    *
    * If voicemail is enabled, immediately start the voicemail TwiML on the original lead call
-   * in parallel with the agent's voicemail-choice prompt. The voicemail TwiML has a ~10-second
-   * pause that covers the remaining greeting + beep time, then plays the configured message.
+   * in parallel with the agent's choice prompt.  The TwiML plays a 1 s safety pause, then the
+   * configured message, then a 10 s post-message pause before hanging up.
    *
-   * Running in parallel avoids feeding silence to the voicemail system (which would cause it
-   * to time out and hang up before the message plays). If the agent presses 1 (SPEAK) during
-   * the pause window, a REST-redirect interrupts the pause and bridges them directly instead.
+   * The 10 s post-message window lets a SPEAK-mode agent REST-redirect the lead call (interrupting
+   * the pause) to append a personal message directly into the same voicemail recording.  For
+   * automated mode the voicemail system's own silence detection ends the recording naturally;
+   * the 10 s timeout hangs up if it does not.
    *
    * If voicemail is disabled (or session is already terminal) hang up immediately.
    */
@@ -601,7 +606,7 @@ export class CallConnectService {
           this.logger.warn(`Could not redirect lead to voicemail-agent for session ${sessionId}: ${err.message}`),
         );
       }
-      response.say('Connected. Leave your message after the beep.');
+      response.say('Speak your message now.');
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: false, endConferenceOnExit: true } as any,
