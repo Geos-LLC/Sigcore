@@ -496,26 +496,16 @@ export class CallConnectService {
 
   /**
    * Called after the lead's conference <Dial> completes (conference ended for any reason).
-   * If the session is still active it means the conference ended early — typically because
-   * the agent was redirected to the voicemail-choice prompt. Routes the lead to a silent
-   * hold loop so the call stays alive until the agent makes their choice.
-   * If the session is already terminal (normal call end), just hangs up.
+   *
+   * Always hangs up the original lead call. In the voicemail AMD path the conference ended
+   * because the agent was redirected to the voicemail-choice prompt. The original lead call
+   * is no longer needed — handleAgentVoicemailChoiceAction places a fresh outbound call
+   * with machineDetection='DetectMessageEnd' that fires TwiML at exactly the voicemail beep.
+   * In the normal call-end path the call should simply terminate.
    */
   async handleLeadAfterConferenceTwiml(sessionId: string): Promise<string> {
-    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
-    if (!session || TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
-
-    const settings = await this.settingsRepo.findOne({ where: { businessId: session.businessId } });
-    if (!settings?.leadVoicemailEnabled) return this.hangupTwiml();
-
-    // Voicemail choice in progress — keep the lead connected
-    const baseUrl = this.getBaseUrl();
-    const response = new twilio.twiml.VoiceResponse();
-    response.redirect(
-      { method: 'POST' },
-      `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-hold?sessionId=${sessionId}`,
-    );
-    return response.toString();
+    this.logger.log(`Lead after-conference: session=${sessionId} — hanging up original lead call`);
+    return this.hangupTwiml();
   }
 
   /**
@@ -554,17 +544,19 @@ export class CallConnectService {
       method: 'POST',
       timeout: 8,
     });
-    gather.say(
-      "The customer's voicemail was reached. Press 1 to leave a personal message after the beep, or press any other key to send the automated message.",
-    );
+    gather.say('Voicemail. Press 1 for personal message, any key for automated.');
     // Gather timeout fires the action with Digits="" — handled as automated in choice-action.
     return response.toString();
   }
 
   /**
    * Handles the agent's voicemail choice (digit pressed or Gather timeout).
-   *   digit "1"   → SPEAK mode: bridge agent directly into the lead's voicemail
-   *   anything else (including "" on timeout) → automated drop
+   *   digit "1"   → SPEAK mode: fresh outbound call with DetectMessageEnd bridges agent to voicemail
+   *   anything else (including "" on timeout) → automated drop via fresh outbound call
+   *
+   * The original lead call was already hung up by handleLeadAfterConferenceTwiml when the
+   * conference ended. We dial a new outbound call with machineDetection='DetectMessageEnd'
+   * so Twilio waits for the voicemail beep before firing TwiML — no timing guesswork needed.
    */
   async handleAgentVoicemailChoiceAction(
     sessionId: string,
@@ -579,49 +571,49 @@ export class CallConnectService {
     const response = new twilio.twiml.VoiceResponse();
 
     if (digits === '1') {
-      // SPEAK mode — redirect lead from hold into the ccvm conference so the agent
-      // speaks directly into the voicemail once the beep sounds.
-      // Await the REST update so Twilio interrupts the hold loop BEFORE we return the
-      // agent's conference TwiML.  Fire-and-forget would race against the hold loop
-      // completing and the session transitioning to ENDED, causing the redirect to be
-      // ignored and the lead to be silently hung up.
-      this.logger.log(`Voicemail SPEAK chosen for session ${sessionId}`);
-      if (session.leadCallSid) {
-        await client.calls(session.leadCallSid).update({
-          url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${sessionId}`,
-          method: 'POST',
-        }).catch((err: any) =>
-          this.logger.error(`Could not redirect lead to voicemail bridge for session ${sessionId}: ${err.message}`),
-        );
-      }
-      response.say(
-        "You'll be connected directly to the voicemail. Please leave your message after the beep, then hang up when done.",
+      // SPEAK mode — call the lead again with DetectMessageEnd so Twilio fires TwiML at the beep.
+      // The TwiML joins the ccvm conference; agent also joins and speaks directly into voicemail.
+      this.logger.log(`Voicemail SPEAK chosen for session ${sessionId} — placing fresh DetectMessageEnd call`);
+      client.calls.create({
+        to: session.leadPhoneE164,
+        from: session.fromNumberE164,
+        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${sessionId}`,
+        method: 'POST',
+        machineDetection: 'DetectMessageEnd',
+        timeout: 60,
+        statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
+        statusCallbackMethod: 'POST',
+        statusCallbackEvent: ['completed'],
+      } as any).catch((err: any) =>
+        this.logger.warn(`Could not place SPEAK voicemail call for session ${sessionId}: ${err.message}`),
       );
+      response.say('Connecting to voicemail. Leave your message after the beep, then hang up.');
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: false, endConferenceOnExit: true } as any,
         `ccvm_${sessionId}`,
       );
     } else {
-      // Automated drop — redirect lead from hold to the voicemail TwiML.
-      // Use machine_end_beep so the TwiML applies only a 1s pause: by the time the
-      // agent has heard the choice prompt and pressed a key (~8–15 s after AMD fired),
-      // the voicemail beep has already sounded. Using the original machine_start value
-      // would add an unnecessary 10s of silence, risking a voicemail silence timeout.
-      //
-      // Await the REST update so Twilio interrupts the hold loop BEFORE we return the
-      // agent's hangup TwiML.  Fire-and-forget would race against the hold loop
-      // completing and the session transitioning to ENDED, causing the redirect to be
-      // ignored and the lead to be silently hung up before the voicemail message plays.
-      this.logger.log(`Voicemail automated chosen for session ${sessionId} (digits="${digits}")`);
-      if (session.leadCallSid) {
-        await client.calls(session.leadCallSid).update({
-          url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
-          method: 'POST',
-        }).catch((err: any) =>
-          this.logger.error(`Could not redirect lead to voicemail TwiML for session ${sessionId}: ${err.message}`),
-        );
-      }
+      // Automated drop — call the lead again with DetectMessageEnd; TwiML plays the configured message.
+      this.logger.log(`Voicemail automated chosen for session ${sessionId} (digits="${digits}") — placing fresh DetectMessageEnd call`);
+
+      // Notify LeadBridge immediately that the voicemail drop has been initiated.
+      this.emitEvent(session, WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP, { mode: 'tts' }).catch(() => {});
+
+      client.calls.create({
+        to: session.leadPhoneE164,
+        from: session.fromNumberE164,
+        url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
+        method: 'POST',
+        machineDetection: 'DetectMessageEnd',
+        timeout: 60,
+        statusCallback: `${baseUrl}/api/webhooks/twilio/voice/status`,
+        statusCallbackMethod: 'POST',
+        statusCallbackEvent: ['completed'],
+      } as any).catch((err: any) =>
+        this.logger.warn(`Could not place automated voicemail call for session ${sessionId}: ${err.message}`),
+      );
+
       response.say('Automated message will be sent. Goodbye.');
       response.hangup();
     }
