@@ -842,7 +842,9 @@ export class CallConnectService {
         break;
 
       case 'completed':
-        if (session.status === SessionStatus.BRIDGED) {
+        if (session.status === SessionStatus.BRIDGED && isAgentLeg) {
+          // Agent leg ended (normal call end or voicemail choice goodbye).
+          // This is the authoritative signal that the session is truly over.
           const updates: Partial<CallConnectSession> = { status: SessionStatus.ENDED };
           if (callDuration) {
             updates.timeline = [
@@ -852,6 +854,18 @@ export class CallConnectService {
           }
           await this.updateSession(session, updates);
           await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED);
+        } else if (session.status === SessionStatus.BRIDGED && isLeadLeg) {
+          // Lead leg completed while session is BRIDGED.  Two scenarios reach here:
+          //   A) Normal call end: lead hung up, conference ends; agent will complete
+          //      momentarily via endConferenceOnExit → ENDED will be set then.
+          //   B) Voicemail AMD flow: handleLeadAfterConferenceTwiml hung up the original
+          //      lead call; agent is still alive on the voicemail-choice prompt.
+          // In both cases, defer ENDED to the agent leg completion above.
+          // Do NOT set ENDED here — that would prematurely terminate the session and
+          // cause handleAgentVoicemailChoiceAction to return hangupTwiml() for the agent.
+          this.logger.log(
+            `Session ${session.id}: lead leg completed while BRIDGED — deferring ENDED to agent completion`,
+          );
         } else if (isAgentLeg && session.status === SessionStatus.CALLING_AGENT) {
           // Call ended before the agent answered (voicemail, hung up, etc.)
           // Fail immediately — no retries. failSession hangs up the lead call too.
