@@ -486,12 +486,11 @@ export class CallConnectService {
         settings?.leadVoicemailMessage ||
         'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
       // For machine_end_beep (no pre-pause), voicemail systems often trim the first ~0.5 s of
-      // audio — the TTS engine's ramp-up time.  Prepend a short "Hello." so the recording
-      // system trims that throwaway word and the actual message begins intact.
-      if (answeredBy === 'machine_end_beep') {
-        response.say('Hello.');
-      }
-      response.say(this.substituteTemplateVars(vmTemplate, session));
+      // audio — the TTS engine's ramp-up time.  Prepend "Hello. " inside the SAME <Say> verb
+      // so there is only one TTS engine startup; the engine ramps up during "Hello." and the
+      // real message starts cleanly.  Separate <Say> verbs each have their own startup delay.
+      const messageText = this.substituteTemplateVars(vmTemplate, session);
+      response.say(answeredBy === 'machine_end_beep' ? `Hello. ${messageText}` : messageText);
     }
 
     response.hangup();
@@ -1507,6 +1506,7 @@ export class CallConnectService {
     return template
       .replace(/\{summary\}/g, summary)
       .replace(/\{customerName\}/g, customerName)
+      .replace(/\{accountName\}/g, customerName)  // alias for {customerName}
       .replace(/\{category\}/g, category)
       .replace(/\{location\}/g, location)
       .replace(/\{digit\}/g, digitHint)
