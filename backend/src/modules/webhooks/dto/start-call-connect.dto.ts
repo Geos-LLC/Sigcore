@@ -41,4 +41,9 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsString()
   leadGreetingMessage?: string;
+
+  /** Per-session voicemail message (pre-built by caller, variables already substituted). Overrides settings.leadVoicemailMessage. */
+  @IsOptional()
+  @IsString()
+  leadVoicemailMessage?: string;
 }

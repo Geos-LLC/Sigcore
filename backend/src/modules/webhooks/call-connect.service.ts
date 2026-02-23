@@ -162,6 +162,7 @@ export class CallConnectService {
       agentPhoneE164: agentPhone,
       agentWhisperMessage: dto.agentWhisperMessage || undefined,
       leadGreetingMessage: dto.leadGreetingMessage || undefined,
+      leadVoicemailMessage: dto.leadVoicemailMessage || undefined,
       mode,
       status: SessionStatus.CREATED,
       provider: CallConnectProvider.TWILIO,
@@ -478,9 +479,18 @@ export class CallConnectService {
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
     } else {
+      // Per-session message (pre-built by caller with variables already substituted) takes
+      // priority over the workspace-level template so LeadBridge can send a lead-specific message.
       const vmTemplate =
+        session.leadVoicemailMessage ||
         settings?.leadVoicemailMessage ||
         'Hi, we tried to reach you about an inquiry. Please call us back at your earliest convenience.';
+      // For machine_end_beep (no pre-pause), voicemail systems often trim the first ~0.5 s of
+      // audio — the TTS engine's ramp-up time.  Prepend a short "Hello." so the recording
+      // system trims that throwaway word and the actual message begins intact.
+      if (answeredBy === 'machine_end_beep') {
+        response.say('Hello.');
+      }
       response.say(this.substituteTemplateVars(vmTemplate, session));
     }
 
@@ -531,10 +541,36 @@ export class CallConnectService {
    * Silent hold loop for the lead while the agent decides voicemail mode.
    * Pauses briefly then redirects back to itself until the session is terminal
    * (choice made → lead redirected elsewhere) or until the call is cleaned up.
+   *
+   * If voicemail_triggered is already set in the timeline (the agent's automated-choice
+   * path fired and sent a REST-redirect) but this loop is still running (the REST-redirect
+   * raced with the natural <Pause> expiry and lost), redirect to the voicemail endpoint here
+   * as a fallback so the message is still delivered.
    */
   async handleLeadVoicemailHoldTwiml(sessionId: string): Promise<string> {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
-    if (!session || TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
+    if (!session) return this.hangupTwiml();
+
+    const voicemailTriggered = (session.timeline || []).some(
+      (entry: any) => entry.event === 'voicemail_triggered',
+    );
+
+    if (voicemailTriggered) {
+      // The agent already chose automated drop and the REST-redirect was sent, but the
+      // hold loop's natural <Pause> expiry raced it and won.  Deliver voicemail now.
+      this.logger.log(
+        `Hold loop fallback: voicemail_triggered set for session ${sessionId} — redirecting lead to voicemail`,
+      );
+      const baseUrl = this.getBaseUrl();
+      const response = new twilio.twiml.VoiceResponse();
+      response.redirect(
+        { method: 'POST' },
+        `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
+      );
+      return response.toString();
+    }
+
+    if (TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
 
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
@@ -1460,17 +1496,20 @@ export class CallConnectService {
     extra?: { digit?: string },
   ): string {
     const summary = session.leadSummary || '';
-    const parts = summary.split(/\s*—\s*/);
+    // Accept both em-dash (—) and en-dash (–) as separators; LeadBridge uses en-dash.
+    const parts = summary.split(/\s*[—–]\s*/);
     const customerName = parts[0]?.trim() || summary;
     const category = parts[1]?.trim() || '';
     const location = parts[2]?.trim() || '';
     const digitHint = extra?.digit ?? '';
+    const phone = session.leadPhoneE164 || '';
 
     return template
       .replace(/\{summary\}/g, summary)
       .replace(/\{customerName\}/g, customerName)
       .replace(/\{category\}/g, category)
       .replace(/\{location\}/g, location)
-      .replace(/\{digit\}/g, digitHint);
+      .replace(/\{digit\}/g, digitHint)
+      .replace(/\{phone\}/g, phone);
   }
 }

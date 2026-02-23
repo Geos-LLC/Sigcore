@@ -104,6 +104,10 @@ export class CallConnectSession {
   @Column({ name: 'lead_greeting_message', type: 'text', nullable: true })
   leadGreetingMessage: string;
 
+  /** Per-session voicemail message (pre-built by caller). Overrides settings.leadVoicemailMessage when set. */
+  @Column({ name: 'lead_voicemail_message', type: 'text', nullable: true })
+  leadVoicemailMessage: string;
+
   /** Linked Sigcore conversation thread (nullable — not all sessions have one) */
   @Column({ name: 'sigcore_conversation_id', type: 'uuid', nullable: true })
   sigcoreConversationId: string;
