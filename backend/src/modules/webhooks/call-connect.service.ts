@@ -464,10 +464,12 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    // By the time this fires (AMD latency + conference teardown + HTTP round-trips ≈ 4-8 s
-    // since voicemail pickup), the beep has typically already sounded.  A 1 s safety margin
-    // is enough to cover any remaining gap before the recording window opens.
-    response.pause({ length: 1 });
+    // machine_start fires ~3-5 s after the voicemail picks up (AMD detects early).
+    // By the time this TwiML runs (AMD latency + conference teardown + HTTP round-trips)
+    // there are typically ~5-10 s of greeting still left before the beep, so we pause
+    // 10 s to wait for it.  If machine_end_beep fires (beep already detected), 1 s is enough.
+    const pauseSeconds = answeredBy === 'machine_end_beep' ? 1 : 10;
+    response.pause({ length: pauseSeconds });
 
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
@@ -478,11 +480,6 @@ export class CallConnectService {
       response.say(this.substituteTemplateVars(vmTemplate, session));
     }
 
-    // Keep the call alive for ~10 s after the message so a SPEAK-mode agent can be
-    // REST-redirected here (interrupting this pause) to append a personal message.
-    // For automated mode this pause is transparent: the voicemail system will end the
-    // recording naturally once it detects silence, and if not, <Hangup/> cleans up.
-    response.pause({ length: 10 });
     response.hangup();
 
     // Session ENDED is set by handleProviderCallStatus when the agent call completes.
@@ -515,16 +512,13 @@ export class CallConnectService {
     );
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
-    // Use answeredBy=machine_end_beep (1 s pause) rather than machine_start (10 s pause).
-    // By the time this fires — AMD latency (~2-4 s) + conference teardown + two HTTP
-    // round-trips — roughly 4-8 s have elapsed since the voicemail picked up.  The
-    // greeting + beep typically takes 5-8 s, so the beep has usually already sounded.
-    // A 10 s post-beep silence would exceed most voicemail systems' silence timeout
-    // (3-7 s), causing the recording to end before our message plays.  A 1 s margin is
-    // enough as a safety buffer.
+    // Use answeredBy=machine_start so handleLeadVoicemailTwiml uses a 10 s pre-message pause.
+    // AMD fires early (~3-5 s after voicemail picks up), and by the time this redirect runs
+    // (AMD latency + conference teardown + HTTP round-trips) there are still several seconds
+    // of greeting left before the beep.  10 s covers the remaining greeting + beep time.
     response.redirect(
       { method: 'POST' },
-      `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
+      `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_start`,
     );
     return response.toString();
   }
@@ -606,7 +600,7 @@ export class CallConnectService {
           this.logger.warn(`Could not redirect lead to voicemail-agent for session ${sessionId}: ${err.message}`),
         );
       }
-      response.say('Speak your message now.');
+      response.say('Connected. Leave your message after the beep, then hang up.');
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: false, endConferenceOnExit: true } as any,
