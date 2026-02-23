@@ -479,12 +479,19 @@ export class CallConnectService {
     }
     response.hangup();
 
-    await this.updateSession(session, { status: SessionStatus.ENDED });
-    await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
+    // Capture TwiML string BEFORE any DB operations so a save failure cannot
+    // prevent us from returning valid TwiML (which would cause Twilio to play
+    // "An application error has occurred" on the lead's voicemail).
+    const twiml = response.toString();
+
+    this.updateSession(session, { status: SessionStatus.ENDED }).catch((err: any) =>
+      this.logger.warn(`handleLeadVoicemailTwiml: updateSession failed: ${err.message}`),
+    );
+    this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
       reason: 'voicemail_drop',
     });
 
-    return response.toString();
+    return twiml;
   }
 
   /**
@@ -593,10 +600,14 @@ export class CallConnectService {
       );
     } else {
       // Automated drop — redirect lead from hold to the voicemail TwiML.
+      // Use machine_end_beep so the TwiML applies only a 1s pause: by the time the
+      // agent has heard the choice prompt and pressed a key (~8–15 s after AMD fired),
+      // the voicemail beep has already sounded. Using the original machine_start value
+      // would add an unnecessary 10s of silence, risking a voicemail silence timeout.
       this.logger.log(`Voicemail automated chosen for session ${sessionId} (digits="${digits}")`);
       if (session.leadCallSid) {
         client.calls(session.leadCallSid).update({
-          url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=${encodeURIComponent(answeredBy || 'machine_start')}`,
+          url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
           method: 'POST',
         }).catch((err: any) =>
           this.logger.warn(`Could not redirect lead to voicemail TwiML: ${err.message}`),
