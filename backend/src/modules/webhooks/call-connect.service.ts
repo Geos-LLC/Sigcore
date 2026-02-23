@@ -464,12 +464,16 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    // machine_end_beep: the beep has already fired, but TTS engines need ~0.5-1 s to
-    // begin producing audio after <Say> starts executing. A 1 s pause covers that startup
-    // latency and prevents the first words from being clipped in the voicemail recording.
+    // machine_end_beep: AMD fires at the exact beep. The natural latency from AMD callback
+    // → our server → REST redirect → Twilio fetching this TwiML is already ~500ms–1.5 s,
+    // which is enough of a buffer. Adding an explicit pause on top of that increases total
+    // pre-TTS silence to 2–3 s+, which causes voicemail systems to trim the beginning of
+    // the recording (cutting the first few words). Skip the pause so TTS starts ASAP.
     // For all other answeredBy values (machine_start, etc.): pause 10 s to wait for
     // the remaining greeting and beep before the message plays.
-    response.pause({ length: answeredBy === 'machine_end_beep' ? 1 : 10 });
+    if (answeredBy !== 'machine_end_beep') {
+      response.pause({ length: 10 });
+    }
 
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
