@@ -464,13 +464,12 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    // machine_end_beep: the beep has already fired when this TwiML executes.
-    // The HTTP round-trip (~1-2 s) is sufficient gap — no explicit pause needed.
+    // machine_end_beep: the beep has already fired, but TTS engines need ~0.5-1 s to
+    // begin producing audio after <Say> starts executing. A 1 s pause covers that startup
+    // latency and prevents the first words from being clipped in the voicemail recording.
     // For all other answeredBy values (machine_start, etc.): pause 10 s to wait for
     // the remaining greeting and beep before the message plays.
-    if (answeredBy !== 'machine_end_beep') {
-      response.pause({ length: 10 });
-    }
+    response.pause({ length: answeredBy === 'machine_end_beep' ? 1 : 10 });
 
     if (settings?.leadVoicemailRecordingUrl) {
       response.play({}, settings.leadVoicemailRecordingUrl);
