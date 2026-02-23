@@ -581,13 +581,17 @@ export class CallConnectService {
     if (digits === '1') {
       // SPEAK mode — redirect lead from hold into the ccvm conference so the agent
       // speaks directly into the voicemail once the beep sounds.
+      // Await the REST update so Twilio interrupts the hold loop BEFORE we return the
+      // agent's conference TwiML.  Fire-and-forget would race against the hold loop
+      // completing and the session transitioning to ENDED, causing the redirect to be
+      // ignored and the lead to be silently hung up.
       this.logger.log(`Voicemail SPEAK chosen for session ${sessionId}`);
       if (session.leadCallSid) {
-        client.calls(session.leadCallSid).update({
+        await client.calls(session.leadCallSid).update({
           url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${sessionId}`,
           method: 'POST',
         }).catch((err: any) =>
-          this.logger.warn(`Could not redirect lead to voicemail bridge: ${err.message}`),
+          this.logger.error(`Could not redirect lead to voicemail bridge for session ${sessionId}: ${err.message}`),
         );
       }
       response.say(
@@ -604,13 +608,18 @@ export class CallConnectService {
       // agent has heard the choice prompt and pressed a key (~8–15 s after AMD fired),
       // the voicemail beep has already sounded. Using the original machine_start value
       // would add an unnecessary 10s of silence, risking a voicemail silence timeout.
+      //
+      // Await the REST update so Twilio interrupts the hold loop BEFORE we return the
+      // agent's hangup TwiML.  Fire-and-forget would race against the hold loop
+      // completing and the session transitioning to ENDED, causing the redirect to be
+      // ignored and the lead to be silently hung up before the voicemail message plays.
       this.logger.log(`Voicemail automated chosen for session ${sessionId} (digits="${digits}")`);
       if (session.leadCallSid) {
-        client.calls(session.leadCallSid).update({
+        await client.calls(session.leadCallSid).update({
           url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
           method: 'POST',
         }).catch((err: any) =>
-          this.logger.warn(`Could not redirect lead to voicemail TwiML: ${err.message}`),
+          this.logger.error(`Could not redirect lead to voicemail TwiML for session ${sessionId}: ${err.message}`),
         );
       }
       response.say('Automated message will be sent. Goodbye.');
