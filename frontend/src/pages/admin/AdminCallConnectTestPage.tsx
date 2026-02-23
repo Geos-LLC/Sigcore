@@ -149,7 +149,7 @@ export default function AdminCallConnectTestPage() {
         ...(agentWhisperMessage ? { agentWhisperMessage } : {}),
         ...(leadGreetingMessage ? { leadGreetingMessage } : {}),
         leadVoicemailEnabled,
-        ...(leadVoicemailEnabled && leadVoicemailRecordingUrl ? { leadVoicemailRecordingUrl } : {}),
+        ...(leadVoicemailEnabled ? { leadVoicemailRecordingUrl } : {}),
         ...(leadVoicemailEnabled && leadVoicemailMessage ? { leadVoicemailMessage } : {}),
         ...(leadVoicemailEnabled ? { agentVoicemailMode: 'TTS' } : {}),
       });
@@ -377,13 +377,25 @@ export default function AdminCallConnectTestPage() {
                         Pre-recorded audio URL
                         <span className="text-gray-400 font-normal"> — takes priority over TTS (optional)</span>
                       </label>
-                      <input
-                        type="text"
-                        value={leadVoicemailRecordingUrl}
-                        onChange={e => setLeadVoicemailRecordingUrl(e.target.value)}
-                        placeholder="https://... (MP3 or WAV, publicly accessible)"
-                        className="input w-full text-sm"
-                      />
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={leadVoicemailRecordingUrl}
+                          onChange={e => setLeadVoicemailRecordingUrl(e.target.value)}
+                          placeholder="https://... (MP3 or WAV, publicly accessible)"
+                          className={`input w-full text-sm ${leadVoicemailRecordingUrl ? 'pr-8' : ''}`}
+                        />
+                        {leadVoicemailRecordingUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setLeadVoicemailRecordingUrl('')}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                            title="Clear URL"
+                          >
+                            <XCircle className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {/* TTS message — always editable; used as fallback when no recording URL is set */}
                     <div>
