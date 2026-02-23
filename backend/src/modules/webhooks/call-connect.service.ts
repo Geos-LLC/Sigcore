@@ -479,28 +479,22 @@ export class CallConnectService {
     }
     response.hangup();
 
-    // Capture TwiML string BEFORE any DB operations so a save failure cannot
-    // prevent us from returning valid TwiML (which would cause Twilio to play
-    // "An application error has occurred" on the lead's voicemail).
-    const twiml = response.toString();
-
-    this.updateSession(session, { status: SessionStatus.ENDED }).catch((err: any) =>
-      this.logger.warn(`handleLeadVoicemailTwiml: updateSession failed: ${err.message}`),
-    );
-    this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, {
-      reason: 'voicemail_drop',
-    });
-
-    return twiml;
+    // Return TwiML immediately. Session ENDED is set by handleProviderCallStatus
+    // when the agent call completes — not here — so the agent's voicemail-choice
+    // action can still run if it fires during the 10-second pause window.
+    return response.toString();
   }
 
   /**
    * Called after the lead's conference <Dial> completes (conference ended for any reason).
    *
-   * If voicemail is enabled the conference most likely ended because the agent was redirected
-   * to the voicemail-choice prompt. Keep the original lead call alive in a silent hold loop
-   * so it can be REST-redirected to the voicemail TwiML once the agent makes a choice.
-   * The message is therefore left on the original call — no second outbound call needed.
+   * If voicemail is enabled, immediately start the voicemail TwiML on the original lead call
+   * in parallel with the agent's voicemail-choice prompt. The voicemail TwiML has a ~10-second
+   * pause that covers the remaining greeting + beep time, then plays the configured message.
+   *
+   * Running in parallel avoids feeding silence to the voicemail system (which would cause it
+   * to time out and hang up before the message plays). If the agent presses 1 (SPEAK) during
+   * the pause window, a REST-redirect interrupts the pause and bridges them directly instead.
    *
    * If voicemail is disabled (or session is already terminal) hang up immediately.
    */
@@ -512,13 +506,15 @@ export class CallConnectService {
     if (!settings?.leadVoicemailEnabled) return this.hangupTwiml();
 
     this.logger.log(
-      `After-conference: session=${sessionId} — voicemail enabled, routing lead to hold loop`,
+      `After-conference: session=${sessionId} — voicemail enabled, starting voicemail TwiML in parallel with agent choice`,
     );
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
+    // answeredBy=machine_start → 10 s pause in handleLeadVoicemailTwiml, which covers
+    // the remaining voicemail greeting time so our message starts right after the beep.
     response.redirect(
       { method: 'POST' },
-      `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-hold?sessionId=${sessionId}`,
+      `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_start`,
     );
     return response.toString();
   }
@@ -566,13 +562,12 @@ export class CallConnectService {
 
   /**
    * Handles the agent's voicemail choice (digit pressed or Gather timeout).
-   *   digit "1"   → SPEAK mode: REST-redirect the held lead call to the voicemail-agent TwiML,
-   *                 then bridge the agent into the same ccvm conference to speak personally.
-   *   anything else (including "" on timeout) → automated: REST-redirect the held lead call
-   *                 to the voicemail TwiML so the configured message plays on the original call.
-   *
-   * The lead call is still alive in the silent hold loop started by handleLeadAfterConferenceTwiml.
-   * We redirect it via Twilio REST so the message is left on the original call — no second call.
+   *   digit "1"   → SPEAK mode: REST-redirect the lead call (currently paused in voicemail TwiML)
+   *                 to the voicemail-agent TwiML so the lead joins ccvm_<sessionId>; the agent
+   *                 TwiML below bridges them so the agent speaks personally into the voicemail.
+   *   anything else (including "" on timeout) → automated: the voicemail message is already
+   *                 playing on the lead call (started in parallel by handleLeadAfterConferenceTwiml);
+   *                 no REST-redirect needed — just say goodbye and hang up the agent.
    */
   async handleAgentVoicemailChoiceAction(
     sessionId: string,
@@ -592,6 +587,7 @@ export class CallConnectService {
       // The agent TwiML below also joins the same conference (startConferenceOnEnter=false),
       // bridging them so the agent speaks their personal message directly into the voicemail.
       this.logger.log(`Voicemail SPEAK chosen for session ${sessionId} — redirecting held lead call`);
+      this.emitEvent(session, WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP, { mode: 'speak' }).catch(() => {});
       if (session.leadCallSid) {
         await client.calls(session.leadCallSid).update({
           url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${sessionId}`,
@@ -600,7 +596,7 @@ export class CallConnectService {
           this.logger.warn(`Could not redirect lead to voicemail-agent for session ${sessionId}: ${err.message}`),
         );
       }
-      response.say('Connecting to voicemail. Leave your message after the beep, then hang up.');
+      response.say('Connected. Leave your message after the beep.');
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: false, endConferenceOnExit: true } as any,
@@ -616,14 +612,9 @@ export class CallConnectService {
       // Notify LeadBridge immediately that the voicemail drop has been initiated.
       this.emitEvent(session, WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP, { mode: 'tts' }).catch(() => {});
 
-      if (session.leadCallSid) {
-        await client.calls(session.leadCallSid).update({
-          url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
-          method: 'POST',
-        }).catch((err: any) =>
-          this.logger.warn(`Could not redirect lead to voicemail for session ${sessionId}: ${err.message}`),
-        );
-      }
+      // No REST-redirect needed — the voicemail TwiML is already running on the lead call
+      // (started in parallel by handleLeadAfterConferenceTwiml). The 10-second pause covers
+      // the remaining greeting time and the message plays automatically after.
 
       response.say('Automated message will be sent. Goodbye.');
       response.hangup();
