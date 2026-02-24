@@ -356,9 +356,9 @@ export class CallConnectService {
         // TTS / recording mode.
         // machineDetection: 'Enable' fires here early (machine_start), before the greeting ends.
         // Notify the agent immediately so they hear it well before the message is sent,
-        // then pause ~10s for the voicemail greeting + beep before playing our message.
+        // then pause ~1s for the voicemail greeting + beep before playing our message.
         const response = new twilio.twiml.VoiceResponse();
-        response.pause({ length: 10 });
+        response.pause({ length: 1 });
         if (settings.leadVoicemailRecordingUrl) {
           // Pre-recorded audio takes priority over TTS
           response.play({}, settings.leadVoicemailRecordingUrl);
@@ -472,11 +472,11 @@ export class CallConnectService {
     //   hold_loop_fallback:  2 s — hold loop fires up to 3 s after the REST-redirect would
     //                             have; TTS arrives ~1–2 s before the beep without a pause.
     //                             2 s compensates so TTS starts after the beep.
-    //   anything else:      10 s — machine_start or unknown; beep may be many seconds away.
+    //   anything else:      1 s — machine_start or unknown fallback.
     if (answeredBy === 'hold_loop_fallback') {
       response.pause({ length: 2 });
     } else if (answeredBy !== 'machine_end_beep') {
-      response.pause({ length: 10 });
+      response.pause({ length: 1 });
     }
 
     if (settings?.leadVoicemailRecordingUrl) {
