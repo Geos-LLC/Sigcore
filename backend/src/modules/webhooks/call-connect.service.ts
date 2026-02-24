@@ -561,11 +561,9 @@ export class CallConnectService {
     );
 
     if (voicemailTriggered) {
-      // The agent already chose automated drop and the REST-redirect was sent, but the
-      // hold loop's natural <Pause> expiry raced it and won.  Deliver voicemail now.
-      // Use answeredBy=hold_loop_fallback so handleLeadVoicemailTwiml adds a short
-      // compensating pause: the hold loop fires up to 3 s later than the REST-redirect
-      // would have, so TTS arrives ~1–2 s before the beep without the extra pause.
+      // voicemail_triggered is set (fired by handleLeadAmd or a prior fallback) but the hold
+      // loop's <Pause> raced the REST-redirect.  Deliver voicemail now via hold_loop_fallback
+      // (adds 2 s compensating pause so TTS doesn't arrive before the beep).
       this.logger.log(
         `Hold loop fallback: voicemail_triggered set for session ${sessionId} — redirecting lead to voicemail`,
       );
@@ -576,6 +574,34 @@ export class CallConnectService {
         `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=hold_loop_fallback`,
       );
       return response.toString();
+    }
+
+    // Safety net: agent chose automated (automated_chosen flag) but machine_end_beep hasn't
+    // arrived within 12 s (AMD may have missed the beep).  Fire the fallback so the message
+    // is still delivered rather than the lead hanging up silently.
+    const automatedChosenEntry = (session.timeline || []).find(
+      (entry: any) => entry.event === 'automated_chosen',
+    );
+    if (automatedChosenEntry) {
+      const elapsedMs = Date.now() - new Date((automatedChosenEntry as any).at).getTime();
+      if (elapsedMs > 12000) {
+        this.logger.log(
+          `Hold loop: automated_chosen timeout (${Math.round(elapsedMs / 1000)}s) for session ${sessionId} — firing fallback`,
+        );
+        session.timeline = [
+          ...(session.timeline || []),
+          { event: 'voicemail_triggered', at: new Date().toISOString() },
+        ];
+        await this.sessionRepo.save(session);
+        const baseUrl = this.getBaseUrl();
+        const response = new twilio.twiml.VoiceResponse();
+        response.redirect(
+          { method: 'POST' },
+          `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=hold_loop_fallback`,
+        );
+        return response.toString();
+      }
+      // Still within timeout — keep looping, machine_end_beep is expected soon.
     }
 
     if (TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
@@ -666,7 +692,7 @@ export class CallConnectService {
     } else {
       // Automated drop — the lead is in the silent hold loop waiting for machine_end_beep.
       // machine_end_beep may have already fired and set voicemail_triggered, or it may
-      // fire shortly after. Check to avoid double-redirecting the lead.
+      // fire shortly after.
       this.logger.log(`Voicemail automated chosen for session ${sessionId} (digits="${digits}")`);
 
       const alreadyTriggered = (session.timeline || []).some(
@@ -674,27 +700,22 @@ export class CallConnectService {
       );
 
       if (!alreadyTriggered) {
-        // machine_end_beep hasn't fired yet (or lost the race). Take over: set the flag
-        // and redirect the lead. Use answeredBy=machine_end_beep (no pre-message pause)
-        // because by the time the agent responds, the beep is imminent or has just fired.
+        // machine_end_beep has NOT fired yet.
+        // Do NOT REST-redirect the lead now — the answering machine's greeting may still be
+        // playing, so TTS starting immediately would miss the first words (the machine only
+        // records after the beep).  Instead, mark automated_chosen so that:
+        //   • handleLeadAmd() will redirect the lead when machine_end_beep fires at the
+        //     exact beep moment (0 s pause + "Hello." primer, perfect timing), and
+        //   • the hold-loop safety net below fires a fallback if the beep never arrives.
+        // This mirrors SPEAK mode: the lead stays on hold until the right moment, then
+        // the message plays — agent's voice for SPEAK, TTS for automated.
         session.timeline = [
           ...(session.timeline || []),
-          { event: 'voicemail_triggered', at: new Date().toISOString() },
+          { event: 'automated_chosen', at: new Date().toISOString() },
         ];
         await this.sessionRepo.save(session);
 
-        if (session.leadCallSid) {
-          await client.calls(session.leadCallSid).update({
-            url: `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
-            method: 'POST',
-          }).catch((err: any) =>
-            this.logger.warn(
-              `Could not redirect lead to voicemail TwiML (automated fallback) for session ${sessionId}: ${err.message}`,
-            ),
-          );
-        }
-
-        // Notify LeadBridge that the voicemail drop has been initiated.
+        // Notify LeadBridge that the agent chose automated voicemail.
         this.emitEvent(session, WebhookEventType.CALL_CONNECT_VOICEMAIL_DROP, { mode: 'tts' }).catch(() => {});
       } else {
         this.logger.log(
