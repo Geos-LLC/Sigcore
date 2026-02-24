@@ -465,14 +465,17 @@ export class CallConnectService {
     });
 
     const response = new twilio.twiml.VoiceResponse();
-    // machine_end_beep: AMD fires at the exact beep. The natural latency from AMD callback
-    // → our server → REST redirect → Twilio fetching this TwiML is already ~500ms–1.5 s,
-    // which is enough of a buffer. Adding an explicit pause on top of that increases total
-    // pre-TTS silence to 2–3 s+, which causes voicemail systems to trim the beginning of
-    // the recording (cutting the first few words). Skip the pause so TTS starts ASAP.
-    // For all other answeredBy values (machine_start, etc.): pause 10 s to wait for
-    // the remaining greeting and beep before the message plays.
-    if (answeredBy !== 'machine_end_beep') {
+    // Pause duration depends on how precisely we know when the beep fired:
+    //   machine_end_beep:    0 s — AMD fires exactly at the beep; latency from callback
+    //                             → server → REST-redirect → Twilio fetch is ~0.5–1.5 s,
+    //                             enough buffer. "Hello. " primer absorbs TTS ramp-up.
+    //   hold_loop_fallback:  2 s — hold loop fires up to 3 s after the REST-redirect would
+    //                             have; TTS arrives ~1–2 s before the beep without a pause.
+    //                             2 s compensates so TTS starts after the beep.
+    //   anything else:      10 s — machine_start or unknown; beep may be many seconds away.
+    if (answeredBy === 'hold_loop_fallback') {
+      response.pause({ length: 2 });
+    } else if (answeredBy !== 'machine_end_beep') {
       response.pause({ length: 10 });
     }
 
@@ -490,7 +493,10 @@ export class CallConnectService {
       // so there is only one TTS engine startup; the engine ramps up during "Hello." and the
       // real message starts cleanly.  Separate <Say> verbs each have their own startup delay.
       const messageText = this.substituteTemplateVars(vmTemplate, session);
-      response.say(answeredBy === 'machine_end_beep' ? `Hello. ${messageText}` : messageText);
+      // Use "Hello. " primer for beep-timed paths (machine_end_beep / hold_loop_fallback)
+      // to absorb the ~0.5 s TTS engine ramp-up so the real message starts intact.
+      const usesPrimer = answeredBy === 'machine_end_beep' || answeredBy === 'hold_loop_fallback';
+      response.say(usesPrimer ? `Hello. ${messageText}` : messageText);
     }
 
     response.hangup();
@@ -557,6 +563,9 @@ export class CallConnectService {
     if (voicemailTriggered) {
       // The agent already chose automated drop and the REST-redirect was sent, but the
       // hold loop's natural <Pause> expiry raced it and won.  Deliver voicemail now.
+      // Use answeredBy=hold_loop_fallback so handleLeadVoicemailTwiml adds a short
+      // compensating pause: the hold loop fires up to 3 s later than the REST-redirect
+      // would have, so TTS arrives ~1–2 s before the beep without the extra pause.
       this.logger.log(
         `Hold loop fallback: voicemail_triggered set for session ${sessionId} — redirecting lead to voicemail`,
       );
@@ -564,7 +573,7 @@ export class CallConnectService {
       const response = new twilio.twiml.VoiceResponse();
       response.redirect(
         { method: 'POST' },
-        `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_end_beep`,
+        `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=hold_loop_fallback`,
       );
       return response.toString();
     }
