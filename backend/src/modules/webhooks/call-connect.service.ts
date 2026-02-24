@@ -604,7 +604,9 @@ export class CallConnectService {
       // Still within timeout — keep looping, machine_end_beep is expected soon.
     }
 
-    if (TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
+    // Hang up only when there is no pending automated drop; if automated_chosen is set
+    // the lead must stay on the line so machine_end_beep can trigger the voicemail redirect.
+    if (TERMINAL_STATUSES.has(session.status) && !automatedChosenEntry) return this.hangupTwiml();
 
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
@@ -862,7 +864,20 @@ export class CallConnectService {
     if (!isMachine) return; // Human answered — conference flow proceeds normally
 
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
-    if (!session || TERMINAL_STATUSES.has(session.status)) return;
+    if (!session) return;
+
+    // For machine_end_beep: allow through even if the session is ENDED.
+    // This happens when the agent chose automated voicemail, their call completed (→ ENDED),
+    // and machine_end_beep fires afterward.  We still need to REST-redirect the lead.
+    if (TERMINAL_STATUSES.has(session.status)) {
+      const isEndBeep = answeredBy !== 'machine_start';
+      if (!isEndBeep) return; // machine_start on a terminal session → nothing to do
+      const timeline = session.timeline || [];
+      const automatedChosen = timeline.some((e: any) => e.event === 'automated_chosen');
+      const voicemailTriggered = timeline.some((e: any) => e.event === 'voicemail_triggered');
+      if (!automatedChosen || voicemailTriggered) return; // no pending automated drop → skip
+      // Fall through: automated drop is pending, deliver it despite ENDED status
+    }
 
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
