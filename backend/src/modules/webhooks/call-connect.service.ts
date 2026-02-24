@@ -469,13 +469,9 @@ export class CallConnectService {
     //   machine_end_beep:    0 s — AMD fires exactly at the beep; latency from callback
     //                             → server → REST-redirect → Twilio fetch is ~0.5–1.5 s,
     //                             enough buffer. "Hello. " primer absorbs TTS ramp-up.
-    //   hold_loop_fallback:  2 s — hold loop fires up to 3 s after the REST-redirect would
-    //                             have; TTS arrives ~1–2 s before the beep without a pause.
-    //                             2 s compensates so TTS starts after the beep.
-    //   anything else:      1 s — machine_start or unknown fallback.
-    if (answeredBy === 'hold_loop_fallback') {
-      response.pause({ length: 2 });
-    } else if (answeredBy !== 'machine_end_beep') {
+    //   hold_loop_fallback:  0 s — hold loop fires after ~1 s; beep has long since passed.
+    //   anything else:       1 s — machine_start or unknown fallback.
+    if (answeredBy !== 'machine_end_beep' && answeredBy !== 'hold_loop_fallback') {
       response.pause({ length: 1 });
     }
 
@@ -584,7 +580,7 @@ export class CallConnectService {
     );
     if (automatedChosenEntry) {
       const elapsedMs = Date.now() - new Date((automatedChosenEntry as any).at).getTime();
-      if (elapsedMs > 2000) {
+      if (elapsedMs > 0) {
         this.logger.log(
           `Hold loop: automated_chosen timeout (${Math.round(elapsedMs / 1000)}s) for session ${sessionId} — firing fallback`,
         );
@@ -610,7 +606,7 @@ export class CallConnectService {
 
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
-    response.pause({ length: 3 });
+    response.pause({ length: 1 });
     response.redirect(
       { method: 'POST' },
       `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-hold?sessionId=${sessionId}`,
