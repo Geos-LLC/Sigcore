@@ -584,7 +584,7 @@ export class CallConnectService {
     );
     if (automatedChosenEntry) {
       const elapsedMs = Date.now() - new Date((automatedChosenEntry as any).at).getTime();
-      if (elapsedMs > 12000) {
+      if (elapsedMs > 2000) {
         this.logger.log(
           `Hold loop: automated_chosen timeout (${Math.round(elapsedMs / 1000)}s) for session ${sessionId} — firing fallback`,
         );
