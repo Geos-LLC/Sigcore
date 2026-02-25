@@ -606,7 +606,37 @@ export class CallConnectService {
 
     // Hang up only when there is no pending automated drop; if automated_chosen is set
     // the lead must stay on the line so machine_end_beep can trigger the voicemail redirect.
-    if (TERMINAL_STATUSES.has(session.status) && !automatedChosenEntry) return this.hangupTwiml();
+    if (TERMINAL_STATUSES.has(session.status) && !automatedChosenEntry) {
+      // Fallback: agent hung up before the gather timeout fired (so automated_chosen was
+      // never set), but machine_start is in the timeline — redirect to voicemail now so
+      // the drop still fires despite the early agent hang-up.
+      const timeline = session.timeline || [];
+      const machineDetected = timeline.some((e: any) => e.event === 'machine_start');
+      const speakInitiated = timeline.some((e: any) => e.event === 'speak_mode_initiated');
+
+      if (machineDetected && !voicemailTriggered && !speakInitiated) {
+        this.logger.log(
+          `Hold loop fallback: session ${sessionId} is TERMINAL, agent hung up early — redirecting to voicemail`,
+        );
+        session.timeline = [
+          ...timeline,
+          { event: 'voicemail_triggered', at: new Date().toISOString() },
+        ];
+        await this.sessionRepo.save(session);
+
+        const baseUrl = this.getBaseUrl();
+        const response = new twilio.twiml.VoiceResponse();
+        // Use answeredBy=machine_start so handleLeadVoicemailTwiml applies a 10 s
+        // pause before speaking — the beep may not have fired yet at this point.
+        response.redirect(
+          { method: 'POST' },
+          `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${sessionId}&answeredBy=machine_start`,
+        );
+        return response.toString();
+      }
+
+      return this.hangupTwiml();
+    }
 
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
@@ -905,6 +935,15 @@ export class CallConnectService {
       // Redirecting the agent out of the conference ends the conference; the lead's
       // <Dial action="/lead/after-conference"> then parks the lead in the silent hold loop
       // until machine_end_beep fires below.
+
+      // Record machine detection in timeline so the hold loop can use it as a fallback
+      // signal (e.g. if the agent hangs up early without triggering voicemail).
+      session.timeline = [
+        ...(session.timeline || []),
+        { event: 'machine_start', at: new Date().toISOString() },
+      ];
+      await this.sessionRepo.save(session);
+
       if (session.agentCallSid) {
         await client.calls(session.agentCallSid).update({
           url: `${baseUrl}/api/webhooks/twilio/voice/agent/voicemail-choice?sessionId=${sessionId}&answeredBy=${encodeURIComponent(answeredBy)}`,
