@@ -360,6 +360,18 @@ export class WebhooksService {
     if (existingMessage) {
       existingMessage.status = this.mapMessageStatus(msgData.status);
       await this.messageRepo.save(existingMessage);
+
+      // Fire outbound webhook for status updates (delivered, failed) so LeadBridge
+      // subscribers receive delivery receipts — not just initial message.sent events.
+      const statusEventType = existingMessage.status === MessageStatus.DELIVERED
+        ? WebhookEventType.MESSAGE_DELIVERED
+        : WebhookEventType.MESSAGE_SENT;
+      this.outboundWebhooksService
+        .emitMessageEvent(workspaceId, statusEventType, existingMessage)
+        .catch((err) => {
+          this.logger.error(`Failed to emit status-update webhook for message ${existingMessage.id}: ${err.message}`);
+        });
+
       return;
     }
 
