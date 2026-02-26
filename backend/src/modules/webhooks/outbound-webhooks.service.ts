@@ -169,7 +169,9 @@ export class OutboundWebhooksService {
   // ==================== Subscription Management ====================
 
   /**
-   * Create a webhook subscription
+   * Create a webhook subscription.
+   * Upserts by (workspaceId, webhookUrl) — if a subscription for this URL already
+   * exists in the workspace, it is updated in-place rather than creating a duplicate.
    */
   async createSubscription(
     workspaceId: string,
@@ -181,6 +183,26 @@ export class OutboundWebhooksService {
       metadata?: Record<string, unknown>;
     },
   ): Promise<WebhookSubscription> {
+    const existing = await this.subscriptionRepo.findOne({
+      where: { workspaceId, webhookUrl: data.webhookUrl },
+    });
+
+    if (existing) {
+      // Upsert: update the existing subscription instead of creating a duplicate
+      await this.subscriptionRepo.update(existing.id, {
+        name: data.name,
+        secret: data.secret,
+        events: data.events,
+        metadata: data.metadata,
+        status: WebhookSubscriptionStatus.ACTIVE,
+        failureCount: 0,
+      } as any);
+      this.logger.log(
+        `Upserted existing webhook subscription: ${data.name} (${existing.id}) — no duplicate created`,
+      );
+      return this.subscriptionRepo.findOne({ where: { id: existing.id } }) as Promise<WebhookSubscription>;
+    }
+
     const subscription = this.subscriptionRepo.create({
       workspaceId,
       ...data,
