@@ -585,20 +585,23 @@ export class CommunicationService {
         await this.conversationRepo.save(conversation);
       }
 
-      const result = await provider.sendMessage(credentials, {
+      const result = await provider.sendMessage({
         from: normalizedFrom,
         to: normalizedTo,
         body,
-        conversationId: conversation.externalId,
+        workspaceId: credentials,
+        channel: channel as ChannelType,
       });
 
       const message = this.messageRepo.create({
-        workspaceId,
         conversationId: conversation.id,
-        externalId: result.externalId || `msg_${Date.now()}`,
-        direction: MessageDirection.OUTBOUND,
+        direction: MessageDirection.OUT,
         body,
+        fromNumber: normalizedFrom,
+        toNumber: normalizedTo,
+        providerMessageId: result.providerMessageId,
         status: result.status,
+        channel: channel as any,
       });
 
       return this.messageRepo.save(message);
