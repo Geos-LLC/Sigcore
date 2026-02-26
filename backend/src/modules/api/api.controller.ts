@@ -15,6 +15,8 @@ import { CommunicationService } from '../communication/communication.service';
 
 interface ApiRequest {
   workspaceId: string;
+  tenantId?: string;
+  apiKeyScope?: string;
 }
 
 @Controller('v1')
@@ -152,6 +154,7 @@ export class ApiController {
       dto.toNumber,
       dto.body,
       dto.channel || 'sms',
+      req.tenantId,
     );
 
     return {
@@ -169,6 +172,21 @@ export class ApiController {
     return {
       success: true,
       data: phoneNumbers,
+    };
+  }
+
+  // ==================== DEBUG ====================
+
+  /**
+   * Returns the identity of the calling API key.
+   * GET /api/v1/whoami
+   */
+  @Get('whoami')
+  async whoami(@Request() req: ApiRequest) {
+    return {
+      workspaceId: req.workspaceId,
+      tenantId: req.tenantId || null,
+      apiKeyScope: req.apiKeyScope || 'workspace',
     };
   }
 }

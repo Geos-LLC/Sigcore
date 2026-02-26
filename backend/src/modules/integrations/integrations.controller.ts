@@ -14,7 +14,7 @@ import { IntegrationsService } from './integrations.service';
 import { CommunicationService } from '../communication/communication.service';
 import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { ProviderType } from '../../database/entities/communication-integration.entity';
 
 export interface SyncOptions {
@@ -83,15 +83,22 @@ export class IntegrationsController {
   // ==================== OPENPHONE-SPECIFIC ENDPOINTS ====================
 
   /**
-   * Connect OpenPhone integration
+   * Connect OpenPhone integration.
+   * When called with a tenant API key, stores credentials in TenantIntegration (tenant-scoped).
+   * When called with a workspace API key, stores in CommunicationIntegration (workspace-scoped).
    * POST /integrations/openphone/connect
    */
   @Post('openphone/connect')
   @HttpCode(HttpStatus.OK)
   async connectOpenPhone(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Body() dto: { apiKey: string },
   ) {
+    if (tenantId) {
+      const integration = await this.integrationsService.connectOpenPhoneForTenant(workspaceId, tenantId, dto.apiKey);
+      return { data: integration };
+    }
     const integration = await this.integrationsService.setupIntegration(workspaceId, {
       provider: ProviderType.OPENPHONE,
       apiKey: dto.apiKey,
@@ -100,11 +107,19 @@ export class IntegrationsController {
   }
 
   /**
-   * Get OpenPhone phone numbers
+   * Get OpenPhone phone numbers.
+   * When called with a tenant API key, returns numbers from TenantIntegration.
    * GET /integrations/openphone/numbers
    */
   @Get('openphone/numbers')
-  async getOpenPhoneNumbers(@WorkspaceId() workspaceId: string) {
+  async getOpenPhoneNumbers(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+  ) {
+    if (tenantId) {
+      const phoneNumbers = await this.integrationsService.getOpenPhoneNumbersForTenant(workspaceId, tenantId);
+      return { data: phoneNumbers };
+    }
     const phoneNumbers = await this.integrationsService.getOpenPhoneNumbers(workspaceId);
     return { data: phoneNumbers };
   }
@@ -124,12 +139,20 @@ export class IntegrationsController {
   }
 
   /**
-   * Disconnect OpenPhone integration
+   * Disconnect OpenPhone integration.
+   * When called with a tenant API key, removes the TenantIntegration record.
    * DELETE /integrations/openphone/disconnect
    */
   @Delete('openphone/disconnect')
   @HttpCode(HttpStatus.OK)
-  async disconnectOpenPhone(@WorkspaceId() workspaceId: string) {
+  async disconnectOpenPhone(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+  ) {
+    if (tenantId) {
+      const result = await this.integrationsService.disconnectOpenPhoneForTenant(workspaceId, tenantId);
+      return { data: result };
+    }
     const result = await this.integrationsService.deleteIntegration(workspaceId, ProviderType.OPENPHONE);
     return { data: result };
   }

@@ -8,6 +8,7 @@ import {
   ProviderType,
   IntegrationStatus,
 } from '../../database/entities/communication-integration.entity';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
@@ -51,6 +52,8 @@ export class IntegrationsService {
   constructor(
     @InjectRepository(CommunicationIntegration)
     private integrationRepo: Repository<CommunicationIntegration>,
+    @InjectRepository(TenantIntegration)
+    private tenantIntegrationRepo: Repository<TenantIntegration>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
     private encryptionService: EncryptionService,
@@ -727,6 +730,93 @@ export class IntegrationsService {
       expectedWebhookUrl,
       isConfigured,
     };
+  }
+
+  // ==================== TENANT-SCOPED OPENPHONE METHODS ====================
+
+  /**
+   * Connect (or update) an OpenPhone integration for a specific tenant.
+   * Validates the API key, then upserts a TenantIntegration record.
+   */
+  async connectOpenPhoneForTenant(
+    workspaceId: string,
+    tenantId: string,
+    apiKey: string,
+  ): Promise<TenantIntegration> {
+    const credentials = JSON.stringify({ apiKey });
+    const isValid = await this.openPhoneProvider.validateCredentials(credentials);
+    if (!isValid) {
+      throw new BadRequestException('Invalid OpenPhone API key');
+    }
+
+    const encryptedCredentials = this.encryptionService.encrypt(credentials);
+
+    let integration = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+    });
+
+    if (integration) {
+      integration.credentialsEncrypted = encryptedCredentials;
+      integration.status = IntegrationStatus.ACTIVE;
+    } else {
+      integration = this.tenantIntegrationRepo.create({
+        workspaceId,
+        tenantId,
+        provider: ProviderType.OPENPHONE,
+        credentialsEncrypted: encryptedCredentials,
+        status: IntegrationStatus.ACTIVE,
+      });
+    }
+
+    await this.tenantIntegrationRepo.save(integration);
+    this.logger.log(`Connected OpenPhone for tenant ${tenantId} in workspace ${workspaceId}`);
+    return integration;
+  }
+
+  /**
+   * Get OpenPhone phone numbers for a specific tenant.
+   */
+  async getOpenPhoneNumbersForTenant(
+    workspaceId: string,
+    tenantId: string,
+  ): Promise<Array<{ id: string; number: string; name?: string }>> {
+    const integration = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+    });
+
+    if (!integration) {
+      throw new NotFoundException('OpenPhone integration not found for this tenant');
+    }
+
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+    const phoneNumberMap = await this.openPhoneProvider.getPhoneNumbersFromCredentials(credentials);
+
+    return Array.from(phoneNumberMap.values()).map((pn) => ({
+      id: pn.id,
+      number: pn.number,
+      name: pn.name,
+    }));
+  }
+
+  /**
+   * Disconnect (delete) the OpenPhone integration for a specific tenant.
+   */
+  async disconnectOpenPhoneForTenant(
+    workspaceId: string,
+    tenantId: string,
+  ): Promise<{ success: boolean }> {
+    const integration = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+    });
+
+    if (!integration) {
+      this.logger.log(`No OpenPhone integration found for tenant ${tenantId} — nothing to delete`);
+      return { success: true };
+    }
+
+    await this.tenantIntegrationRepo.remove(integration);
+    this.logger.log(`Disconnected OpenPhone for tenant ${tenantId} in workspace ${workspaceId}`);
+    return { success: true };
   }
 
   async refreshTwilioVoiceWebhook(workspaceId: string): Promise<{
