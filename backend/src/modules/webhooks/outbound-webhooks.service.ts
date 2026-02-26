@@ -36,10 +36,10 @@ export class OutboundWebhooksService {
     data: Record<string, unknown>,
   ): Promise<void> {
     const subscriptions = await this.subscriptionRepo.find({
-      where: {
-        workspaceId,
-        status: WebhookSubscriptionStatus.ACTIVE,
-      },
+      where: [
+        { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
+        { workspaceId, status: WebhookSubscriptionStatus.PAUSED },
+      ],
     });
 
     // Filter to only subscriptions that listen for this event
@@ -121,13 +121,18 @@ export class OutboundWebhooksService {
         timeout: this.WEBHOOK_TIMEOUT,
       });
 
-      // Mark success
+      // Mark success — auto-resume if was paused
+      const waspaused = subscription.status === WebhookSubscriptionStatus.PAUSED;
       await this.subscriptionRepo.update(subscription.id, {
         lastSuccessAt: new Date(),
         failureCount: 0,
         lastError: undefined,
+        status: WebhookSubscriptionStatus.ACTIVE,
       } as any);
 
+      if (waspaused) {
+        this.logger.log(`Auto-resumed webhook subscription ${subscription.name} after successful delivery`);
+      }
       this.logger.log(`Webhook delivered to ${subscription.name}: ${payload.event}`);
     } catch (error: any) {
       const errorMessage = error.message || 'Unknown error';
