@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { IntegrationsController } from './integrations.controller';
 import { IntegrationsService } from './integrations.service';
 import { CommunicationIntegration } from '../../database/entities/communication-integration.entity';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
@@ -14,7 +15,7 @@ import { CommunicationModule } from '../communication/communication.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([CommunicationIntegration, Workspace]),
+    TypeOrmModule.forFeature([CommunicationIntegration, TenantIntegration, Workspace]),
     forwardRef(() => CommunicationModule),
   ],
   controllers: [IntegrationsController, WhatsAppController],

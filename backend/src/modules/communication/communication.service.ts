@@ -6,6 +6,7 @@ import {
   ProviderType,
   IntegrationStatus,
 } from '../../database/entities/communication-integration.entity';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import {
   CommunicationConversation,
 } from '../../database/entities/communication-conversation.entity';
@@ -92,6 +93,8 @@ export class CommunicationService {
   constructor(
     @InjectRepository(CommunicationIntegration)
     private integrationRepo: Repository<CommunicationIntegration>,
+    @InjectRepository(TenantIntegration)
+    private tenantIntegrationRepo: Repository<TenantIntegration>,
     @InjectRepository(CommunicationConversation)
     private conversationRepo: Repository<CommunicationConversation>,
     @InjectRepository(CommunicationMessage)
@@ -533,16 +536,75 @@ export class CommunicationService {
     toNumber: string,
     body: string,
     channel: string = 'sms',
+    tenantId?: string,
   ): Promise<CommunicationMessage> {
     // Normalize phone numbers to E.164 format
     const normalizedFrom = this.normalizePhoneNumber(fromNumber);
     const normalizedTo = this.normalizePhoneNumber(toNumber);
 
-    this.logger.log(`Sending ${channel} message: from=${normalizedFrom}, to=${normalizedTo}`);
+    this.logger.log(`Sending ${channel} message: from=${normalizedFrom}, to=${normalizedTo}${tenantId ? ` (tenant=${tenantId})` : ''}`);
 
     // Handle WhatsApp Web channel separately
     if (channel === 'whatsapp') {
       return this.sendWhatsAppMessage(workspaceId, normalizedFrom, normalizedTo, body);
+    }
+
+    // When called with a tenant key, look up credentials from TenantIntegration table
+    if (tenantId) {
+      const tenantOpenPhoneIntegration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE },
+      });
+
+      if (!tenantOpenPhoneIntegration) {
+        throw new BadRequestException('No active integration found for this tenant. Please connect OpenPhone first.');
+      }
+
+      const credentials = this.encryptionService.decrypt(tenantOpenPhoneIntegration.credentialsEncrypted);
+      const provider: CommunicationProvider = this.openPhoneProvider;
+
+      // Find or create conversation for this phone pair
+      let conversation = await this.conversationRepo.findOne({
+        where: {
+          workspaceId,
+          phoneNumber: normalizedFrom,
+          participantPhoneNumber: normalizedTo,
+          provider: ProviderType.OPENPHONE,
+        },
+      });
+
+      if (!conversation) {
+        conversation = this.conversationRepo.create({
+          workspaceId,
+          contactId: null,
+          externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          provider: ProviderType.OPENPHONE,
+          phoneNumber: normalizedFrom,
+          participantPhoneNumber: normalizedTo,
+          channel: channel as any,
+        });
+        await this.conversationRepo.save(conversation);
+      }
+
+      const result = await provider.sendMessage({
+        from: normalizedFrom,
+        to: normalizedTo,
+        body,
+        workspaceId: credentials,
+        channel: channel as ChannelType,
+      });
+
+      const message = this.messageRepo.create({
+        conversationId: conversation.id,
+        direction: MessageDirection.OUT,
+        body,
+        fromNumber: normalizedFrom,
+        toNumber: normalizedTo,
+        providerMessageId: result.providerMessageId,
+        status: result.status,
+        channel: channel as any,
+      });
+
+      return this.messageRepo.save(message);
     }
 
     // Determine which provider to use based on the fromNumber

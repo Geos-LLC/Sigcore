@@ -26,6 +26,7 @@ import {
   ContactIdentity,
   Workspace,
   ApiKey,
+  TenantIntegration,
 } from '../../database/entities';
 
 @Module({
@@ -39,6 +40,7 @@ import {
       ContactIdentity,
       Workspace,
       ApiKey,
+      TenantIntegration,
     ]),
     forwardRef(() => WebhooksModule),
     forwardRef(() => TenantsModule),

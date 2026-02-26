@@ -12,6 +12,9 @@ import { ApiModule } from './modules/api/api.module';
 import { EmailModule } from './modules/email/email.module';
 import { HealthController } from './health.controller';
 import { DocsController } from './docs.controller';
+import { BootstrapController } from './bootstrap.controller';
+import { Workspace } from './database/entities/workspace.entity';
+import { ApiKey } from './database/entities/api-key.entity';
 
 @Module({
   imports: [
@@ -41,6 +44,7 @@ import { DocsController } from './docs.controller';
       },
       inject: [ConfigService],
     }),
+    TypeOrmModule.forFeature([Workspace, ApiKey]),
     SigcoreAuthModule,
     CommunicationModule,
     IntegrationsModule,
@@ -50,6 +54,6 @@ import { DocsController } from './docs.controller';
     ApiModule,
     EmailModule,
   ],
-  controllers: [HealthController, DocsController],
+  controllers: [HealthController, DocsController, BootstrapController],
 })
 export class AppModule {}

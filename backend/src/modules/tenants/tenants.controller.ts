@@ -10,6 +10,8 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Request,
+  ForbiddenException,
 } from '@nestjs/common';
 import { TenantsService, CreateTenantDto, AllocatePhoneNumberDto, ConnectTenantIntegrationDto } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
@@ -51,6 +53,41 @@ export class TenantsController {
   ) {
     const tenant = await this.tenantsService.createTenant(workspaceId, dto);
     return { data: tenant };
+  }
+
+  /**
+   * Provision a tenant + tenant API key in one call (idempotent by externalTenantId).
+   * Called by LeadBridge using the workspace key to set up per-account isolation.
+   * POST /api/tenants/provision
+   */
+  @Post('provision')
+  @HttpCode(HttpStatus.OK)
+  async provisionTenant(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Body() dto: { externalTenantId: string; displayName?: string },
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot provision tenants');
+    }
+    let tenant = await this.tenantsService.getTenantByExternalId(workspaceId, dto.externalTenantId);
+    let isNew = false;
+    if (!tenant) {
+      tenant = await this.tenantsService.createTenant(workspaceId, {
+        externalId: dto.externalTenantId,
+        name: dto.displayName || dto.externalTenantId,
+      });
+      isNew = true;
+    }
+    const result = await this.apiKeysService.createTenantApiKey(workspaceId, tenant.id, 'LeadBridge Key');
+    return {
+      data: {
+        tenantId: tenant.id,
+        externalTenantId: tenant.externalId,
+        apiKey: result.key,
+        isNew,
+      },
+    };
   }
 
   /**

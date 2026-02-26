@@ -231,6 +231,21 @@ class AdminApiService {
     return response.data.data;
   }
 
+  async getTenantPhoneNumbers(tenantId: string): Promise<any[]> {
+    const response = await this.client.get<ApiResponse<any[]>>(`/tenants/${tenantId}/phone-numbers`);
+    return response.data.data;
+  }
+
+  async purchasePhoneNumber(tenantId: string, phoneNumber: string, friendlyName?: string): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>(`/tenants/${tenantId}/phone-numbers/purchase`, { phoneNumber, friendlyName });
+    return response.data.data;
+  }
+
+  async releasePhoneNumber(tenantId: string, allocationId: string): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>(`/tenants/${tenantId}/phone-numbers/${allocationId}/release`);
+    return response.data.data;
+  }
+
   async searchAvailablePhoneNumbers(country: string = 'US', options?: { areaCode?: string; locality?: string; region?: string }): Promise<any[]> {
     const queryParams = new URLSearchParams({ country });
     if (options?.areaCode) queryParams.append('areaCode', options.areaCode);
