@@ -603,8 +603,65 @@ export class CommunicationService {
 
         return this.messageRepo.save(message);
       } else {
-        // No OpenPhone TenantIntegration — fall back to workspace Twilio
-        // (used for tenants with a provisioned Twilio phone number)
+        // No tenant-level OpenPhone integration found.
+        // Try workspace-level OpenPhone next (handles case where the connect call used a
+        // workspace-scoped key, storing the integration in CommunicationIntegration instead
+        // of TenantIntegration).
+        const workspaceOpenPhoneIntegration = await this.integrationRepo.findOne({
+          where: { workspaceId, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE },
+        });
+
+        if (workspaceOpenPhoneIntegration) {
+          this.logger.log(`[sendMessageToPhoneNumber] Using workspace-level OpenPhone for tenant ${tenantId}`);
+          const credentials = this.encryptionService.decrypt(workspaceOpenPhoneIntegration.credentialsEncrypted);
+          const openPhoneProvider: CommunicationProvider = this.openPhoneProvider;
+
+          let conversation = await this.conversationRepo.findOne({
+            where: {
+              workspaceId,
+              phoneNumber: normalizedFrom,
+              participantPhoneNumber: normalizedTo,
+              provider: ProviderType.OPENPHONE,
+            },
+          });
+
+          if (!conversation) {
+            conversation = this.conversationRepo.create({
+              workspaceId,
+              contactId: null,
+              externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+              provider: ProviderType.OPENPHONE,
+              phoneNumber: normalizedFrom,
+              participantPhoneNumber: normalizedTo,
+              channel: channel as any,
+            });
+            await this.conversationRepo.save(conversation);
+          }
+
+          const result = await openPhoneProvider.sendMessage({
+            from: normalizedFrom,
+            to: normalizedTo,
+            body,
+            workspaceId: credentials,
+            channel: channel as ChannelType,
+          });
+
+          const message = this.messageRepo.create({
+            conversationId: conversation.id,
+            direction: MessageDirection.OUT,
+            body,
+            fromNumber: normalizedFrom,
+            toNumber: normalizedTo,
+            providerMessageId: result.providerMessageId,
+            status: result.status,
+            channel: channel as any,
+          });
+
+          return this.messageRepo.save(message);
+        }
+
+        // No OpenPhone at any level — fall back to workspace Twilio
+        // (used for tenants with a provisioned Twilio phone number, e.g. the LeadBridge pool number)
         const twilioIntegration = await this.integrationRepo.findOne({
           where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
         });
