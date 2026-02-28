@@ -408,7 +408,7 @@ export class IntegrationsService {
   /**
    * Get OpenPhone phone numbers for a workspace.
    */
-  async getOpenPhoneNumbers(workspaceId: string): Promise<Array<{ id: string; number: string; name?: string }>> {
+  async getOpenPhoneNumbers(workspaceId: string): Promise<Array<{ id: string; number: string; name?: string; capabilities?: { sms: boolean; voice: boolean; mms: boolean } }>> {
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.OPENPHONE },
     });
@@ -424,6 +424,7 @@ export class IntegrationsService {
       id: pn.id,
       number: pn.number,
       name: pn.name,
+      capabilities: pn.capabilities,
     }));
   }
 
@@ -779,7 +780,7 @@ export class IntegrationsService {
   async getOpenPhoneNumbersForTenant(
     workspaceId: string,
     tenantId: string,
-  ): Promise<Array<{ id: string; number: string; name?: string }>> {
+  ): Promise<Array<{ id: string; number: string; name?: string; capabilities?: { sms: boolean; voice: boolean; mms: boolean } }>> {
     const integration = await this.tenantIntegrationRepo.findOne({
       where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
     });
@@ -795,6 +796,7 @@ export class IntegrationsService {
       id: pn.id,
       number: pn.number,
       name: pn.name,
+      capabilities: pn.capabilities,
     }));
   }
 

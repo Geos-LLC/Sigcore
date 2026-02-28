@@ -31,6 +31,7 @@ interface PhoneNumberInfo {
   id: string;
   number: string;
   name?: string;
+  capabilities?: { sms: boolean; voice: boolean; mms: boolean };
 }
 
 export interface OpenPhoneContact {
@@ -139,14 +140,21 @@ export class OpenPhoneProvider implements CommunicationProvider {
       const phoneNumbers = response.data.data || [];
       this.logger.log(`Phone numbers API response sample: ${JSON.stringify(phoneNumbers[0] || {})}`);
       for (const pn of phoneNumbers) {
-        // OpenPhone API returns: id, object, name, number, formattedNumber, users, etc.
+        // OpenPhone API returns: id, object, name, number, formattedNumber, users, restrictions, etc.
         const name = pn.name || pn.formattedNumber || pn.number;
+        // Derive SMS/voice capability from the restrictions object returned by OpenPhone.
+        // restrictions.messaging.US / .CA / .Intl = "unrestricted" | "restricted"
+        const messaging = pn.restrictions?.messaging || {};
+        const calling = pn.restrictions?.calling || {};
+        const smsEnabled = messaging.US === 'unrestricted';
+        const voiceEnabled = calling.US !== 'restricted'; // default true if absent
         phoneNumberMap.set(pn.id, {
           id: pn.id,
           number: pn.number || pn.phoneNumber,
           name: name,
+          capabilities: { sms: smsEnabled, voice: voiceEnabled, mms: false },
         });
-        this.logger.log(`Phone number: ${pn.id} -> ${name} (${pn.number})`);
+        this.logger.log(`Phone number: ${pn.id} -> ${name} (${pn.number}) sms=${smsEnabled} voice=${voiceEnabled}`);
       }
       this.logger.log(`Fetched ${phoneNumberMap.size} phone numbers with names`);
     } catch (error) {
