@@ -22,6 +22,8 @@ import {
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { Tenant } from '../../database/entities/tenant.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { EventsGateway } from '../events/events.gateway';
 import { IdempotencyService } from './idempotency.service';
@@ -120,6 +122,10 @@ export class TwilioWebhooksService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
+    @InjectRepository(TenantPhoneNumber)
+    private tenantPhoneNumberRepo: Repository<TenantPhoneNumber>,
+    @InjectRepository(Tenant)
+    private tenantRepo: Repository<Tenant>,
     private encryptionService: EncryptionService,
     private eventsGateway: EventsGateway,
     private configService: ConfigService,
@@ -476,7 +482,18 @@ export class TwilioWebhooksService {
       });
     }
 
-    // Generate TwiML response - default to voicemail
+    // Check if tenant has a call forwarding number configured
+    const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
+      where: { workspaceId, phoneNumber: ourNumber },
+    });
+    if (phoneAllocation) {
+      const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
+      const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
+      if (forwardTo) {
+        this.logger.log(`Forwarding incoming call to ${forwardTo} (tenant: ${tenant!.id})`);
+        return this.generateForwardTwiML(forwardTo);
+      }
+    }
     return this.generateVoicemailTwiML();
   }
 
