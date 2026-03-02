@@ -157,9 +157,15 @@ export class ApiController {
       req.tenantId,
     );
 
+    // Include the provider so callers can verify correct routing
+    const conversation = await this.communicationService.getConversationById(message.conversationId);
+
     return {
       success: true,
-      data: message,
+      data: {
+        ...message,
+        provider: conversation?.provider || null,
+      },
     };
   }
 

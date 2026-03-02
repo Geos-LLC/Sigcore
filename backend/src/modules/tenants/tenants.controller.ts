@@ -91,6 +91,25 @@ export class TenantsController {
   }
 
   /**
+   * Copy integrations from another tenant (used during re-provisioning shared tenants).
+   * POST /api/tenants/:tenantId/copy-integrations
+   */
+  @Post(':tenantId/copy-integrations')
+  @HttpCode(HttpStatus.OK)
+  async copyIntegrations(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: { fromTenantId: string },
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot copy integrations');
+    }
+    const result = await this.tenantsService.copyTenantIntegrations(workspaceId, dto.fromTenantId, tenantId);
+    return { data: result };
+  }
+
+  /**
    * Get all tenants
    * GET /api/tenants
    */

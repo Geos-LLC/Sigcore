@@ -137,6 +137,10 @@ export class CommunicationService {
     return integration;
   }
 
+  async getConversationById(conversationId: string): Promise<CommunicationConversation | null> {
+    return this.conversationRepo.findOne({ where: { id: conversationId } });
+  }
+
   async getConversations(
     workspaceId: string,
     options: { page?: number; limit?: number; search?: string; phoneNumberId?: string; startDate?: Date; endDate?: Date; provider?: 'openphone' | 'twilio' } = {},
@@ -662,6 +666,11 @@ export class CommunicationService {
 
         // No OpenPhone at any level — fall back to workspace Twilio
         // (used for tenants with a provisioned Twilio phone number, e.g. the LeadBridge pool number)
+        this.logger.warn(
+          `[sendMessageToPhoneNumber] No OpenPhone integration found for tenant ${tenantId} ` +
+          `in workspace ${workspaceId} — falling back to Twilio. ` +
+          `Requested fromNumber=${normalizedFrom}`,
+        );
         const twilioIntegration = await this.integrationRepo.findOne({
           where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
         });

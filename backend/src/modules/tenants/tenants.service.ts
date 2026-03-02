@@ -155,6 +155,41 @@ export class TenantsService {
   }
 
   /**
+   * Copy integrations from one tenant to another (used during re-provisioning).
+   * Only copies integrations that don't already exist on the target tenant.
+   */
+  async copyTenantIntegrations(
+    workspaceId: string,
+    fromTenantId: string,
+    toTenantId: string,
+  ): Promise<{ copied: number }> {
+    const sourceIntegrations = await this.tenantIntegrationRepo.find({
+      where: { workspaceId, tenantId: fromTenantId, status: IntegrationStatus.ACTIVE },
+    });
+
+    let copied = 0;
+    for (const src of sourceIntegrations) {
+      const existing = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId: toTenantId, provider: src.provider },
+      });
+      if (!existing) {
+        const newIntegration = this.tenantIntegrationRepo.create({
+          workspaceId,
+          tenantId: toTenantId,
+          provider: src.provider,
+          credentialsEncrypted: src.credentialsEncrypted,
+          status: IntegrationStatus.ACTIVE,
+        });
+        await this.tenantIntegrationRepo.save(newIntegration);
+        copied++;
+        this.logger.log(`Copied ${src.provider} integration from tenant ${fromTenantId} to ${toTenantId}`);
+      }
+    }
+
+    return { copied };
+  }
+
+  /**
    * Update a tenant
    */
   async updateTenant(
