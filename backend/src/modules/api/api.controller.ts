@@ -146,6 +146,7 @@ export class ApiController {
       toNumber: string;
       body: string;
       channel?: string;
+      phoneNumberId?: string;
     },
   ) {
     const message = await this.communicationService.sendMessageToPhoneNumber(
@@ -155,6 +156,7 @@ export class ApiController {
       dto.body,
       dto.channel || 'sms',
       req.tenantId,
+      dto.phoneNumberId,
     );
 
     // Include the provider so callers can verify correct routing

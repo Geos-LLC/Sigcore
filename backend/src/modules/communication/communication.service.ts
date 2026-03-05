@@ -544,6 +544,7 @@ export class CommunicationService {
     body: string,
     channel: string = 'sms',
     tenantId?: string,
+    phoneNumberId?: string,
   ): Promise<CommunicationMessage> {
     // Normalize phone numbers to E.164 format
     const normalizedFrom = this.normalizePhoneNumber(fromNumber);
@@ -614,6 +615,53 @@ export class CommunicationService {
           providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
         });
         return this.messageRepo.save(message);
+      }
+
+      // If fromNumber not found in tenant_phone_numbers but phoneNumberId is provided,
+      // use it to route directly through OpenPhone — bypasses the tenant_phone_numbers lookup.
+      // This handles cases where tenant_phone_numbers is not yet populated (e.g. after re-provisioning)
+      // but the OpenPhone integration and phone number ARE known via the phoneNumberId.
+      if (!tenantPhone && phoneNumberId) {
+        const openPhoneIntegration =
+          await this.tenantIntegrationRepo.findOne({
+            where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE },
+          }) ||
+          await this.integrationRepo.findOne({
+            where: { workspaceId, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE },
+          });
+
+        if (openPhoneIntegration) {
+          this.logger.log(
+            `[sendMessageToPhoneNumber] fromNumber ${normalizedFrom} not in tenant_phone_numbers — ` +
+            `routing via OpenPhone using phoneNumberId=${phoneNumberId}`,
+          );
+          const credentials = this.encryptionService.decrypt(openPhoneIntegration.credentialsEncrypted);
+
+          let conversation = await this.conversationRepo.findOne({
+            where: { workspaceId, phoneNumber: normalizedFrom, participantPhoneNumber: normalizedTo, provider: ProviderType.OPENPHONE },
+          });
+          if (!conversation) {
+            conversation = this.conversationRepo.create({
+              workspaceId, contactId: null,
+              externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+              provider: ProviderType.OPENPHONE, phoneNumber: normalizedFrom,
+              participantPhoneNumber: normalizedTo, channel: channel as any,
+            });
+            await this.conversationRepo.save(conversation);
+          }
+
+          const result = await this.openPhoneProvider.sendMessage({
+            from: normalizedFrom, to: normalizedTo, body,
+            workspaceId: credentials, channel: channel as ChannelType,
+          });
+
+          const message = this.messageRepo.create({
+            conversationId: conversation.id, direction: MessageDirection.OUT, body,
+            fromNumber: normalizedFrom, toNumber: normalizedTo,
+            providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
+          });
+          return this.messageRepo.save(message);
+        }
       }
 
       // fromNumber is Twilio (explicit or not found in tenant_phone_numbers — default to Twilio)
