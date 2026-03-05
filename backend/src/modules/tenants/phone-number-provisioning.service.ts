@@ -638,6 +638,59 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
+   * Re-configure Twilio webhook URLs for all phone numbers belonging to a tenant.
+   * Call this after re-provisioning a tenant so inbound call/SMS webhooks point to the
+   * correct Sigcore instance (avoids 404s when the webhook URL has a stale domain).
+   */
+  async refreshPhoneWebhooks(
+    workspaceId: string,
+    tenantId: string,
+  ): Promise<{ refreshed: number; errors: string[] }> {
+    const baseUrl =
+      this.configService.get('BASE_URL') ||
+      (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+
+    if (!baseUrl) {
+      this.logger.warn(`[refreshPhoneWebhooks] No BASE_URL configured — skipping for tenant ${tenantId}`);
+      return { refreshed: 0, errors: ['BASE_URL not configured'] };
+    }
+
+    const integration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+    });
+
+    if (!integration?.credentialsEncrypted) {
+      return { refreshed: 0, errors: ['No active Twilio integration'] };
+    }
+
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+    const allocations = await this.tenantPhoneRepo.find({
+      where: { workspaceId, tenantId },
+    });
+
+    const smsWebhookUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`;
+    const voiceWebhookUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`;
+    let refreshed = 0;
+    const errors: string[] = [];
+
+    for (const allocation of allocations) {
+      if (!allocation.providerId) continue;
+      try {
+        await this.twilioProvider.configureWebhooks(credentials, allocation.providerId, smsWebhookUrl, voiceWebhookUrl);
+        refreshed++;
+        this.logger.log(
+          `[refreshPhoneWebhooks] Updated webhooks for ${allocation.phoneNumber} (${allocation.providerId}) → ${voiceWebhookUrl}`,
+        );
+      } catch (err: any) {
+        this.logger.error(`[refreshPhoneWebhooks] Failed for ${allocation.phoneNumber}: ${err.message}`);
+        errors.push(`${allocation.phoneNumber}: ${err.message}`);
+      }
+    }
+
+    return { refreshed, errors };
+  }
+
+  /**
    * Attach a phone number to the workspace's Messaging Service with retry
    */
   private async attachToMessagingService(

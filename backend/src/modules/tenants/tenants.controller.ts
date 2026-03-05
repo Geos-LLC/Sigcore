@@ -343,6 +343,25 @@ export class TenantsController {
   }
 
   /**
+   * Re-configure Twilio webhook URLs for all phone numbers in a tenant.
+   * Call after re-provisioning a tenant to fix stale webhook domains (404 on inbound calls).
+   * POST /api/tenants/:id/phone-numbers/refresh-webhooks
+   */
+  @Post(':id/phone-numbers/refresh-webhooks')
+  @HttpCode(HttpStatus.OK)
+  async refreshPhoneWebhooks(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Param('id') tenantId: string,
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot refresh phone webhooks');
+    }
+    const result = await this.provisioningService.refreshPhoneWebhooks(workspaceId, tenantId);
+    return { data: result };
+  }
+
+  /**
    * Retry A2P Messaging Service attachment for a phone number
    * POST /api/tenants/:id/phone-numbers/:allocationId/retry-a2p
    */
