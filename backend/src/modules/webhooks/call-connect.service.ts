@@ -78,8 +78,15 @@ export class CallConnectService {
     workspaceId: string,
     dto: UpsertCallConnectSettingsDto,
   ): Promise<CallConnectSettings> {
-    // Enforce ownership: botNumberE164 must be a dedicated number allocated to this workspace.
-    if (dto.botNumberE164) {
+    let settings = await this.settingsRepo.findOne({
+      where: { businessId: workspaceId },
+    });
+
+    // Enforce ownership only when botNumberE164 is being set to a NEW value.
+    // Re-pushing the same value (e.g. from pushSettingsToSigcore) must not re-validate,
+    // because the allocation row may be stale/missing for existing numbers provisioned
+    // before this guard existed. Use Part C (reallocate) to repair stale data.
+    if (dto.botNumberE164 && dto.botNumberE164 !== settings?.botNumberE164) {
       const allocation = await this.tenantPhoneRepo.findOne({
         where: { workspaceId, phoneNumber: dto.botNumberE164 },
       });
@@ -89,10 +96,6 @@ export class CallConnectService {
         );
       }
     }
-
-    let settings = await this.settingsRepo.findOne({
-      where: { businessId: workspaceId },
-    });
 
     if (settings) {
       Object.assign(settings, dto);
