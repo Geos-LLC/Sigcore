@@ -713,17 +713,11 @@ export class PhoneNumberProvisioningService {
     phoneNumber: string,
     callForwardingNumber: string | null,
   ): Promise<{ phoneNumber: string; callForwardingNumber: string | null }> {
-    // Try workspace-scoped lookup first; fall back to global search since the phone
-    // may have been provisioned in a different workspace (e.g., platform default workspace
-    // vs. the workspace associated with the calling API key).
-    let allocation = await this.tenantPhoneRepo.findOne({
+    const allocation = await this.tenantPhoneRepo.findOne({
       where: { workspaceId, phoneNumber },
     });
     if (!allocation) {
-      allocation = await this.tenantPhoneRepo.findOne({ where: { phoneNumber } });
-    }
-    if (!allocation) {
-      throw new NotFoundException(`Phone number ${phoneNumber} not found`);
+      throw new NotFoundException(`Phone number ${phoneNumber} not found in workspace`);
     }
     const meta = { ...(allocation.metadata || {}) };
     if (callForwardingNumber) {

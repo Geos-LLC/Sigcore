@@ -24,6 +24,7 @@ import {
 import { Workspace } from '../../database/entities/workspace.entity';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
+import { CallConnectSettings } from '../../database/entities/call-connect-settings.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { EventsGateway } from '../events/events.gateway';
 import { IdempotencyService } from './idempotency.service';
@@ -126,6 +127,8 @@ export class TwilioWebhooksService {
     private tenantPhoneNumberRepo: Repository<TenantPhoneNumber>,
     @InjectRepository(Tenant)
     private tenantRepo: Repository<Tenant>,
+    @InjectRepository(CallConnectSettings)
+    private ccSettingsRepo: Repository<CallConnectSettings>,
     private encryptionService: EncryptionService,
     private eventsGateway: EventsGateway,
     private configService: ConfigService,
@@ -482,19 +485,25 @@ export class TwilioWebhooksService {
       });
     }
 
-    // Check if there is a call forwarding number configured for this phone.
+    // Check if a Call Connect configuration exists for this bot number.
+    // CC settings are authoritative: they map botNumberE164 → agentPhoneE164 and are
+    // stored per-business (not per-workspace), so they survive tenant re-provisioning
+    // without requiring any cross-workspace lookup.
+    const ccSettings = await this.ccSettingsRepo.findOne({
+      where: { botNumberE164: ourNumber, enabled: true },
+    });
+    if (ccSettings?.agentPhoneE164) {
+      this.logger.log(
+        `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
+      );
+      return this.generateForwardTwiML(ccSettings.agentPhoneE164);
+    }
+
+    // Fall back: check the phone allocation's owning tenant metadata (non-CC / legacy).
     const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
       where: { workspaceId, phoneNumber: ourNumber },
     });
     if (phoneAllocation) {
-      // Allocation-level metadata is authoritative — set by LeadBridge and survives
-      // tenant re-provisioning where the owning tenantId may have changed.
-      const allocationForward = phoneAllocation.metadata?.callForwardingNumber as string | undefined;
-      if (allocationForward) {
-        this.logger.log(`Forwarding incoming call to ${allocationForward} (allocation metadata for ${ourNumber})`);
-        return this.generateForwardTwiML(allocationForward);
-      }
-      // Fall back to the owning tenant's metadata (legacy / non-LeadBridge setups).
       const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
       const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
       if (forwardTo) {
