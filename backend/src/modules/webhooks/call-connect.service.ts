@@ -3,7 +3,6 @@ import {
   Logger,
   NotFoundException,
   UnprocessableEntityException,
-  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -82,17 +81,17 @@ export class CallConnectService {
       where: { businessId: workspaceId },
     });
 
-    // Enforce ownership only when botNumberE164 is being set to a NEW value.
-    // Re-pushing the same value (e.g. from pushSettingsToSigcore) must not re-validate,
-    // because the allocation row may be stale/missing for existing numbers provisioned
-    // before this guard existed. Use Part C (reallocate) to repair stale data.
+    // Ownership audit: warn when botNumberE164 is not in tenant_phone_numbers for this workspace.
+    // This is advisory only — Twilio enforces actual caller-ID ownership at the call level.
+    // A hard block here causes false-positive 409s when allocation rows are stale or missing
+    // (e.g. after re-provisioning). Use Part C (reallocate) to repair stale allocations.
     if (dto.botNumberE164 && dto.botNumberE164 !== settings?.botNumberE164) {
       const allocation = await this.tenantPhoneRepo.findOne({
         where: { workspaceId, phoneNumber: dto.botNumberE164 },
       });
       if (!allocation) {
-        throw new ConflictException(
-          `BOT_NUMBER_NOT_OWNED: ${dto.botNumberE164} is not allocated to this workspace`,
+        this.logger.warn(
+          `[upsertSettings] BOT_NUMBER_NOT_OWNED (advisory): ${dto.botNumberE164} has no allocation row for workspace ${workspaceId} — continuing`,
         );
       }
     }
