@@ -144,9 +144,12 @@ export class TwilioWebhooksService {
   ) {}
 
   async getWorkspaceByWebhookId(webhookId: string): Promise<Workspace | null> {
-    return this.workspaceRepo.findOne({
-      where: { webhookId },
-    });
+    // Primary: look up by the dedicated webhookId token (correct format).
+    const byToken = await this.workspaceRepo.findOne({ where: { webhookId } });
+    if (byToken) return byToken;
+    // Fallback: some phone numbers were configured with the workspace's primary key (id)
+    // instead of its webhookId token. Accept both so legacy numbers don't 404.
+    return this.workspaceRepo.findOne({ where: { id: webhookId } });
   }
 
   /**
