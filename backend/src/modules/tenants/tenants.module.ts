@@ -12,6 +12,7 @@ import {
   TenantIntegration,
   PhoneNumberOrder,
   PhoneNumberPricing,
+  Workspace,
 } from '../../database/entities';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { CommunicationModule } from '../communication/communication.module';
@@ -27,6 +28,7 @@ import { ApiModule } from '../api/api.module';
       TenantIntegration,
       PhoneNumberOrder,
       PhoneNumberPricing,
+      Workspace,
     ]),
     forwardRef(() => CommunicationModule),
     forwardRef(() => ApiModule),

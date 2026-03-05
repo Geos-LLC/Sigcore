@@ -19,6 +19,7 @@ import {
   PhoneNumberOrderStatus,
   PhoneNumberPricing,
   PricingType,
+  Workspace,
 } from '../../database/entities';
 import { IntegrationStatus, ProviderType } from '../../database/entities/communication-integration.entity';
 import { ChannelType } from '../../database/entities/sender.entity';
@@ -80,6 +81,8 @@ export class PhoneNumberProvisioningService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(Tenant)
     private tenantRepo: Repository<Tenant>,
+    @InjectRepository(Workspace)
+    private workspaceRepo: Repository<Workspace>,
     private encryptionService: EncryptionService,
     private twilioProvider: TwilioProvider,
     private configService: ConfigService,
@@ -655,6 +658,15 @@ export class PhoneNumberProvisioningService {
       return { refreshed: 0, errors: ['BASE_URL not configured'] };
     }
 
+    // Fetch the workspace to get its webhookId (distinct from its UUID).
+    // The Twilio voice/SMS webhook handler resolves workspaces by workspace.webhookId,
+    // not by workspace.id — using the wrong value causes 404 on inbound calls.
+    const workspace = await this.workspaceRepo.findOne({ where: { id: workspaceId } });
+    if (!workspace?.webhookId) {
+      this.logger.warn(`[refreshPhoneWebhooks] Workspace ${workspaceId} not found or missing webhookId`);
+      return { refreshed: 0, errors: ['Workspace not found or missing webhookId'] };
+    }
+
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
     });
@@ -668,8 +680,8 @@ export class PhoneNumberProvisioningService {
       where: { workspaceId, tenantId },
     });
 
-    const smsWebhookUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`;
-    const voiceWebhookUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`;
+    const smsWebhookUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspace.webhookId}`;
+    const voiceWebhookUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspace.webhookId}`;
     let refreshed = 0;
     const errors: string[] = [];
 
