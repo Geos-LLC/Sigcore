@@ -488,33 +488,45 @@ export class TwilioWebhooksService {
       });
     }
 
-    // Check if a Call Connect configuration exists for this bot number.
+    // Check if a Call Connect configuration exists for this bot number (any state).
     // CC settings are authoritative: they map botNumberE164 → agentPhoneE164 and are
     // stored per-business (not per-workspace), so they survive tenant re-provisioning
     // without requiring any cross-workspace lookup.
+    // IMPORTANT: if CC settings EXIST for this number (even disabled), we NEVER fall
+    // through to the legacy callForwardingNumber path — doing so would send calls to an
+    // unintended BYO phone. Only fully-configured + enabled settings get forwarded;
+    // everything else goes to voicemail.
     const ccSettings = await this.ccSettingsRepo.findOne({
-      where: { botNumberE164: ourNumber, enabled: true },
+      where: { botNumberE164: ourNumber },
     });
-    if (ccSettings?.agentPhoneE164) {
-      // Ownership audit log only — CC settings are the authoritative source (they are
-      // written per-businessId and survive tenant re-provisioning). Do not block here:
-      // tenant_phone_numbers.tenantId can be stale after re-provisioning epochs, and
-      // blocking on it would prevent forwarding to the correct agent number.
-      const ownerAllocation = await this.tenantPhoneNumberRepo.findOne({
-        where: { workspaceId, phoneNumber: ourNumber, tenantId: ccSettings.businessId },
-      });
-      if (!ownerAllocation) {
-        this.logger.warn(
-          `[handleIncomingCall] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${ccSettings.businessId} (stale allocation — proceeding with CC settings)`,
+    if (ccSettings) {
+      if (ccSettings.enabled && ccSettings.agentPhoneE164) {
+        // Ownership audit log only — CC settings are the authoritative source (they are
+        // written per-businessId and survive tenant re-provisioning). Do not block here:
+        // tenant_phone_numbers.tenantId can be stale after re-provisioning epochs, and
+        // blocking on it would prevent forwarding to the correct agent number.
+        const ownerAllocation = await this.tenantPhoneNumberRepo.findOne({
+          where: { workspaceId, phoneNumber: ourNumber, tenantId: ccSettings.businessId },
+        });
+        if (!ownerAllocation) {
+          this.logger.warn(
+            `[handleIncomingCall] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${ccSettings.businessId} (stale allocation — proceeding with CC settings)`,
+          );
+        }
+        this.logger.log(
+          `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
         );
+        return this.generateForwardTwiML(ccSettings.agentPhoneE164);
       }
+      // CC settings exist but not actionable — do NOT fall through to legacy forwarding.
       this.logger.log(
-        `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
+        `[handleIncomingCall] CC settings exist for ${ourNumber} but not actionable ` +
+        `(enabled=${ccSettings.enabled}, agentPhone=${ccSettings.agentPhoneE164 ?? 'null'}) — returning voicemail`,
       );
-      return this.generateForwardTwiML(ccSettings.agentPhoneE164);
+      return this.generateVoicemailTwiML();
     }
 
-    // Fall back: check the phone allocation's owning tenant metadata (non-CC / legacy).
+    // No CC settings for this number — use legacy tenant metadata forwarding.
     const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
       where: { workspaceId, phoneNumber: ourNumber },
     });

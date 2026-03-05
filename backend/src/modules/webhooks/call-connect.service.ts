@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   UnprocessableEntityException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -23,6 +24,7 @@ import {
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
@@ -61,6 +63,8 @@ export class CallConnectService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(TenantIntegration)
     private tenantIntegrationRepo: Repository<TenantIntegration>,
+    @InjectRepository(TenantPhoneNumber)
+    private tenantPhoneRepo: Repository<TenantPhoneNumber>,
     private encryptionService: EncryptionService,
     private outboundWebhooks: OutboundWebhooksService,
     private config: ConfigService,
@@ -74,6 +78,18 @@ export class CallConnectService {
     workspaceId: string,
     dto: UpsertCallConnectSettingsDto,
   ): Promise<CallConnectSettings> {
+    // Enforce ownership: botNumberE164 must be a dedicated number allocated to this workspace.
+    if (dto.botNumberE164) {
+      const allocation = await this.tenantPhoneRepo.findOne({
+        where: { workspaceId, phoneNumber: dto.botNumberE164 },
+      });
+      if (!allocation) {
+        throw new ConflictException(
+          `BOT_NUMBER_NOT_OWNED: ${dto.botNumberE164} is not allocated to this workspace`,
+        );
+      }
+    }
+
     let settings = await this.settingsRepo.findOne({
       where: { businessId: workspaceId },
     });
