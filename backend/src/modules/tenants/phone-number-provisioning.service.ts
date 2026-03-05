@@ -703,6 +703,37 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
+   * Set the call-forwarding number on a specific phone allocation's metadata.
+   * Finds the allocation by phoneNumber across all tenants in the workspace.
+   * This is the authoritative way to set callForwardingNumber — handleIncomingCall
+   * reads allocation metadata first, so this survives tenant re-provisioning.
+   */
+  async setPhoneCallForwarding(
+    workspaceId: string,
+    phoneNumber: string,
+    callForwardingNumber: string | null,
+  ): Promise<{ phoneNumber: string; callForwardingNumber: string | null }> {
+    const allocation = await this.tenantPhoneRepo.findOne({
+      where: { workspaceId, phoneNumber },
+    });
+    if (!allocation) {
+      throw new NotFoundException(`Phone number ${phoneNumber} not found in workspace`);
+    }
+    const meta = { ...(allocation.metadata || {}) };
+    if (callForwardingNumber) {
+      meta.callForwardingNumber = callForwardingNumber;
+    } else {
+      delete meta.callForwardingNumber;
+    }
+    allocation.metadata = meta;
+    await this.tenantPhoneRepo.save(allocation);
+    this.logger.log(
+      `[setPhoneCallForwarding] callForwardingNumber=${callForwardingNumber ?? 'cleared'} on ${phoneNumber} (workspace: ${workspaceId})`,
+    );
+    return { phoneNumber, callForwardingNumber };
+  }
+
+  /**
    * Attach a phone number to the workspace's Messaging Service with retry
    */
   private async attachToMessagingService(

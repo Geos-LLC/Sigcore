@@ -482,11 +482,19 @@ export class TwilioWebhooksService {
       });
     }
 
-    // Check if tenant has a call forwarding number configured
+    // Check if there is a call forwarding number configured for this phone.
     const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
       where: { workspaceId, phoneNumber: ourNumber },
     });
     if (phoneAllocation) {
+      // Allocation-level metadata is authoritative — set by LeadBridge and survives
+      // tenant re-provisioning where the owning tenantId may have changed.
+      const allocationForward = phoneAllocation.metadata?.callForwardingNumber as string | undefined;
+      if (allocationForward) {
+        this.logger.log(`Forwarding incoming call to ${allocationForward} (allocation metadata for ${ourNumber})`);
+        return this.generateForwardTwiML(allocationForward);
+      }
+      // Fall back to the owning tenant's metadata (legacy / non-LeadBridge setups).
       const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
       const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
       if (forwardTo) {

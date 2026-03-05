@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Body,
   Param,
@@ -358,6 +359,31 @@ export class TenantsController {
       throw new ForbiddenException('Tenant keys cannot refresh phone webhooks');
     }
     const result = await this.provisioningService.refreshPhoneWebhooks(workspaceId, tenantId);
+    return { data: result };
+  }
+
+  /**
+   * Set the call-forwarding number on a phone allocation's metadata.
+   * Searches across all tenants in the workspace — used by LeadBridge after re-provisioning
+   * so the allocation stays in sync regardless of which Sigcore tenant "owns" the number.
+   * PATCH /api/tenants/phone-numbers/:phoneNumber/call-forwarding
+   */
+  @Patch('phone-numbers/:phoneNumber/call-forwarding')
+  @HttpCode(HttpStatus.OK)
+  async setPhoneCallForwarding(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Param('phoneNumber') phoneNumber: string,
+    @Body() dto: { callForwardingNumber: string | null },
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot set phone call-forwarding');
+    }
+    const result = await this.provisioningService.setPhoneCallForwarding(
+      workspaceId,
+      phoneNumber,
+      dto.callForwardingNumber ?? null,
+    );
     return { data: result };
   }
 
