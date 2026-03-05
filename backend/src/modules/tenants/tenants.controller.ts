@@ -363,6 +363,32 @@ export class TenantsController {
   }
 
   /**
+   * Re-home a phone allocation to a different tenant within the workspace.
+   * Used by LeadBridge when converting a pool number to dedicated so the allocation
+   * is moved from the platform tenant to the real tenant.
+   * Platform key only.
+   * PATCH /api/tenants/phone-numbers/:phoneNumber/reallocate
+   */
+  @Patch('phone-numbers/:phoneNumber/reallocate')
+  @HttpCode(HttpStatus.OK)
+  async reallocatePhoneNumber(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Param('phoneNumber') phoneNumber: string,
+    @Body() dto: { tenantId: string },
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot reallocate phone numbers');
+    }
+    const allocation = await this.provisioningService.reallocatePhoneNumber(
+      workspaceId,
+      phoneNumber,
+      dto.tenantId,
+    );
+    return { data: allocation };
+  }
+
+  /**
    * Set the call-forwarding number on a phone allocation's metadata.
    * Searches across all tenants in the workspace — used by LeadBridge after re-provisioning
    * so the allocation stays in sync regardless of which Sigcore tenant "owns" the number.

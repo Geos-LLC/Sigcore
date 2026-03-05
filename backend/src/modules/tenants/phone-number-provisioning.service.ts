@@ -734,6 +734,37 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
+   * Re-home a phone number allocation to a new tenant within the workspace.
+   * Used by LeadBridge when converting a pool number to dedicated — the number
+   * was allocated under the platform tenant and must be moved to the real tenant.
+   * Global search (no tenantId constraint) is intentional: the allocation may be
+   * stale under a previous tenant epoch after re-provisioning.
+   * Platform key only.
+   */
+  async reallocatePhoneNumber(
+    workspaceId: string,
+    phoneNumber: string,
+    newTenantId: string,
+  ): Promise<TenantPhoneNumber> {
+    const allocation = await this.tenantPhoneRepo.findOne({
+      where: { workspaceId, phoneNumber },
+    });
+    if (!allocation) {
+      throw new NotFoundException(`Phone number ${phoneNumber} not found in workspace ${workspaceId}`);
+    }
+    const tenant = await this.tenantRepo.findOne({ where: { id: newTenantId, workspaceId } });
+    if (!tenant) {
+      throw new NotFoundException(`Tenant ${newTenantId} not found in workspace`);
+    }
+    allocation.tenantId = newTenantId;
+    await this.tenantPhoneRepo.save(allocation);
+    this.logger.log(
+      `[reallocatePhoneNumber] ${phoneNumber} re-homed to tenant ${newTenantId} (workspace: ${workspaceId})`,
+    );
+    return allocation;
+  }
+
+  /**
    * Attach a phone number to the workspace's Messaging Service with retry
    */
   private async attachToMessagingService(

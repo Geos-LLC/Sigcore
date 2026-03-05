@@ -493,10 +493,21 @@ export class TwilioWebhooksService {
       where: { botNumberE164: ourNumber, enabled: true },
     });
     if (ccSettings?.agentPhoneE164) {
-      this.logger.log(
-        `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
-      );
-      return this.generateForwardTwiML(ccSettings.agentPhoneE164);
+      // Ownership guard (B3): verify botNumberE164 is actually a dedicated number owned by this
+      // business tenant. Prevents a tenant from setting CC on a number they don't own.
+      const ownerAllocation = await this.tenantPhoneNumberRepo.findOne({
+        where: { workspaceId, phoneNumber: ourNumber, tenantId: ccSettings.businessId },
+      });
+      if (!ownerAllocation) {
+        this.logger.warn(
+          `[handleIncomingCall] Ownership guard: ${ourNumber} is not owned by businessId=${ccSettings.businessId} — skipping CC forward`,
+        );
+      } else {
+        this.logger.log(
+          `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
+        );
+        return this.generateForwardTwiML(ccSettings.agentPhoneE164);
+      }
     }
 
     // Fall back: check the phone allocation's owning tenant metadata (non-CC / legacy).
