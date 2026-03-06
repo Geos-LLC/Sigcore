@@ -737,8 +737,11 @@ export class PhoneNumberProvisioningService {
    * Re-home a phone number allocation to a new tenant within the workspace.
    * Used by LeadBridge when converting a pool number to dedicated — the number
    * was allocated under the platform tenant and must be moved to the real tenant.
-   * Global search (no tenantId constraint) is intentional: the allocation may be
-   * stale under a previous tenant epoch after re-provisioning.
+   *
+   * If no tenant_phone_numbers record exists (e.g. number was in Twilio before Sigcore
+   * integration), it is created automatically. The Twilio SID is resolved via the Twilio
+   * API and webhooks are configured immediately so inbound calls route correctly.
+   *
    * Platform key only.
    */
   async reallocatePhoneNumber(
@@ -746,21 +749,91 @@ export class PhoneNumberProvisioningService {
     phoneNumber: string,
     newTenantId: string,
   ): Promise<TenantPhoneNumber> {
-    const allocation = await this.tenantPhoneRepo.findOne({
-      where: { workspaceId, phoneNumber },
-    });
-    if (!allocation) {
-      throw new NotFoundException(`Phone number ${phoneNumber} not found in workspace ${workspaceId}`);
-    }
     const tenant = await this.tenantRepo.findOne({ where: { id: newTenantId, workspaceId } });
     if (!tenant) {
       throw new NotFoundException(`Tenant ${newTenantId} not found in workspace`);
     }
-    allocation.tenantId = newTenantId;
+
+    let allocation = await this.tenantPhoneRepo.findOne({
+      where: { workspaceId, phoneNumber },
+    });
+
+    if (!allocation) {
+      // No record exists — this number was set up outside of Sigcore.
+      // Create it now so inbound routing works going forward.
+      this.logger.log(
+        `[reallocatePhoneNumber] No existing record for ${phoneNumber} in workspace ${workspaceId} — creating`,
+      );
+
+      // Resolve the Twilio SID so webhooks can be configured.
+      let twilioSid: string | undefined;
+      const integration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+      });
+      if (integration?.credentialsEncrypted) {
+        const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+        twilioSid = await this.twilioProvider.getPhoneNumberSid(credentials, phoneNumber);
+        if (twilioSid) {
+          this.logger.log(`[reallocatePhoneNumber] Resolved Twilio SID ${twilioSid} for ${phoneNumber}`);
+        } else {
+          this.logger.warn(`[reallocatePhoneNumber] ${phoneNumber} not found in Twilio account — webhooks cannot be auto-configured`);
+        }
+      } else {
+        this.logger.warn(`[reallocatePhoneNumber] No active Twilio integration for workspace ${workspaceId}`);
+      }
+
+      allocation = this.tenantPhoneRepo.create({
+        workspaceId,
+        tenantId: newTenantId,
+        phoneNumber,
+        providerId: twilioSid,
+        provider: PhoneNumberProvider.TWILIO,
+        status: PhoneNumberAllocationStatus.ACTIVE,
+        provisionedViaCallio: false,
+      });
+    } else {
+      allocation.tenantId = newTenantId;
+    }
+
     await this.tenantPhoneRepo.save(allocation);
     this.logger.log(
       `[reallocatePhoneNumber] ${phoneNumber} re-homed to tenant ${newTenantId} (workspace: ${workspaceId})`,
     );
+
+    // Configure Twilio webhooks immediately so inbound calls/SMS route correctly.
+    if (allocation.providerId) {
+      try {
+        const baseUrl =
+          this.configService.get<string>('BASE_URL') ||
+          (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+        const workspace = await this.workspaceRepo.findOne({ where: { id: workspaceId } });
+
+        if (baseUrl && workspace?.webhookId) {
+          const integration = await this.integrationRepo.findOne({
+            where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+          });
+          if (integration?.credentialsEncrypted) {
+            const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+            const smsWebhookUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspace.webhookId}`;
+            const voiceWebhookUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspace.webhookId}`;
+            await this.twilioProvider.configureWebhooks(
+              credentials,
+              allocation.providerId,
+              smsWebhookUrl,
+              voiceWebhookUrl,
+            );
+            this.logger.log(
+              `[reallocatePhoneNumber] Configured Twilio webhooks for ${phoneNumber} → ${voiceWebhookUrl}`,
+            );
+          }
+        } else {
+          this.logger.warn(`[reallocatePhoneNumber] Cannot configure webhooks — BASE_URL or workspace.webhookId missing`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`[reallocatePhoneNumber] Failed to configure Twilio webhooks for ${phoneNumber}: ${err.message}`);
+      }
+    }
+
     return allocation;
   }
 

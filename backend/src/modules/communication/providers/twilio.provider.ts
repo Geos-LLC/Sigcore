@@ -577,6 +577,24 @@ export class TwilioProvider implements CommunicationProvider {
   }
 
   /**
+   * Look up a single phone number's Twilio SID by E.164 phone number string.
+   * Used when creating a new tenant_phone_numbers record for a number that was not
+   * provisioned through Sigcore (e.g. imported or pre-existing Twilio numbers).
+   */
+  async getPhoneNumberSid(credentialsString: string, phoneNumber: string): Promise<string | undefined> {
+    try {
+      const credentials = JSON.parse(credentialsString) as TwilioCredentials;
+      const client = this.createClient(credentials);
+      const numbers = await client.incomingPhoneNumbers.list({ phoneNumber, limit: 1 });
+      return numbers[0]?.sid;
+    } catch (error) {
+      const err = error as Error;
+      this.logger.warn(`[getPhoneNumberSid] Failed to look up SID for ${phoneNumber}: ${err.message}`);
+      return undefined;
+    }
+  }
+
+  /**
    * Get recordings for a call.
    */
   async getCallRecordings(
