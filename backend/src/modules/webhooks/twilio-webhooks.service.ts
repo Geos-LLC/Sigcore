@@ -488,6 +488,9 @@ export class TwilioWebhooksService {
       });
     }
 
+    // ── ROUTING DECISION TRACE ──────────────────────────────────────────────
+    this.logger.log(`[ROUTING] CallSid=${payload.CallSid} ourNumber=${ourNumber} workspaceId=${workspaceId}`);
+
     // Check if a Call Connect configuration exists for this bot number (any state).
     // CC settings are authoritative: they map botNumberE164 → agentPhoneE164 and are
     // stored per-business (not per-workspace), so they survive tenant re-provisioning
@@ -499,6 +502,12 @@ export class TwilioWebhooksService {
     const ccSettings = await this.ccSettingsRepo.findOne({
       where: { botNumberE164: ourNumber },
     });
+    this.logger.log(
+      `[ROUTING] CC settings lookup for botNumberE164=${ourNumber}: ` +
+      (ccSettings
+        ? `FOUND businessId=${ccSettings.businessId} enabled=${ccSettings.enabled} agentPhoneE164=${ccSettings.agentPhoneE164 ?? 'null'}`
+        : 'NOT FOUND'),
+    );
     if (ccSettings) {
       if (ccSettings.enabled && ccSettings.agentPhoneE164) {
         // Ownership audit log only — CC settings are the authoritative source (they are
@@ -510,17 +519,17 @@ export class TwilioWebhooksService {
         });
         if (!ownerAllocation) {
           this.logger.warn(
-            `[handleIncomingCall] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${ccSettings.businessId} (stale allocation — proceeding with CC settings)`,
+            `[ROUTING] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${ccSettings.businessId} (stale allocation — proceeding with CC settings)`,
           );
         }
         this.logger.log(
-          `Forwarding incoming call to ${ccSettings.agentPhoneE164} via CC settings (businessId: ${ccSettings.businessId})`,
+          `[ROUTING] → CC path: forwarding to agentPhoneE164=${ccSettings.agentPhoneE164} (businessId=${ccSettings.businessId})`,
         );
         return this.generateForwardTwiML(ccSettings.agentPhoneE164);
       }
       // CC settings exist but not actionable — do NOT fall through to legacy forwarding.
       this.logger.log(
-        `[handleIncomingCall] CC settings exist for ${ourNumber} but not actionable ` +
+        `[ROUTING] → CC settings exist but not actionable ` +
         `(enabled=${ccSettings.enabled}, agentPhone=${ccSettings.agentPhoneE164 ?? 'null'}) — returning voicemail`,
       );
       return this.generateVoicemailTwiML();
@@ -530,14 +539,23 @@ export class TwilioWebhooksService {
     const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
       where: { workspaceId, phoneNumber: ourNumber },
     });
+    this.logger.log(
+      `[ROUTING] phoneAllocation for workspaceId=${workspaceId} phoneNumber=${ourNumber}: ` +
+      (phoneAllocation ? `FOUND tenantId=${phoneAllocation.tenantId}` : 'NOT FOUND'),
+    );
     if (phoneAllocation) {
       const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
       const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
+      this.logger.log(
+        `[ROUTING] tenant metadata for tenantId=${phoneAllocation.tenantId}: ` +
+        `callForwardingNumber=${forwardTo ?? 'null'} fullMetadata=${JSON.stringify(tenant?.metadata ?? {})}`,
+      );
       if (forwardTo) {
-        this.logger.log(`Forwarding incoming call to ${forwardTo} (tenant: ${tenant!.id})`);
+        this.logger.log(`[ROUTING] → Legacy path: forwarding to callForwardingNumber=${forwardTo} (tenantId=${tenant!.id})`);
         return this.generateForwardTwiML(forwardTo);
       }
     }
+    this.logger.log(`[ROUTING] → No forwarding configured — returning voicemail`);
     return this.generateVoicemailTwiML();
   }
 
