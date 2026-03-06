@@ -480,16 +480,19 @@ export class WebhooksController {
 
     let twiml: string;
 
-    // Check if this is an outgoing call from the browser (Voice SDK)
-    // When device.connect() is called with params {To, From}, Twilio sends those as part of the payload
-    if (payload.To && payload.From) {
+    // Use Twilio's Direction field to distinguish inbound vs outbound calls.
+    // Twilio always sends both To and From for ALL voice webhooks, so checking
+    // those fields alone cannot distinguish call direction.
+    // Direction="inbound" → lead called our number → handleIncomingCall
+    // Direction="outbound-dial" / "outbound-api" → browser SDK call → handleOutgoingCall
+    if (payload.Direction !== 'inbound') {
       // This is an outgoing call from the browser
-      this.logger.log(`>>> DETECTED: Outgoing call from browser`);
+      this.logger.log(`>>> DETECTED: Outgoing call from browser (Direction=${payload.Direction})`);
       this.logger.log(`>>> From: ${payload.From}, To: ${payload.To}, CallSid: ${payload.CallSid}`);
       twiml = await this.twilioWebhooksService.handleOutgoingCall(workspace.id, payload);
     } else {
       // This is an incoming call to a Twilio number
-      this.logger.log(`>>> DETECTED: Incoming call to workspace`);
+      this.logger.log(`>>> DETECTED: Incoming call to workspace (Direction=${payload.Direction})`);
       this.logger.log(`>>> Called: ${payload.Called || payload.To}, From: ${payload.From}, CallSid: ${payload.CallSid}`);
       twiml = await this.twilioWebhooksService.handleIncomingCall(workspace.id, payload);
     }
