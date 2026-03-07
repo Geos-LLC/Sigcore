@@ -8,6 +8,12 @@ async function bootstrap() {
     rawBody: true, // Needed for webhook signature verification
   });
 
+  // Trust Railway's reverse proxy so req.protocol reflects the real scheme (https).
+  // Without this, Twilio signature validation fails because req.protocol returns 'http'
+  // while Twilio signed the webhook URL with 'https'.
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.set('trust proxy', 1);
+
   const configService = app.get(ConfigService);
   const logger = new Logger('HTTP');
 

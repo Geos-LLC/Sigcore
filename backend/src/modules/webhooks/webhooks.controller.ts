@@ -434,29 +434,19 @@ export class WebhooksController {
     @Headers('x-twilio-signature') signature: string,
     @Body() payload: TwilioVoiceWebhookPayload,
   ) {
-    this.logger.log(`========== TWILIO VOICE WEBHOOK START ==========`);
-    this.logger.log(`Webhook ID: ${webhookId}`);
-    this.logger.log(`Request URL: ${req.protocol}://${req.get('host')}${req.originalUrl}`);
-    this.logger.log(`Payload: ${JSON.stringify(payload, null, 2)}`);
-    this.logger.log(`Signature present: ${!!signature}`);
+    this.logger.log(`Twilio voice webhook received for ${webhookId}`);
 
     const workspace = await this.twilioWebhooksService.getWorkspaceByWebhookId(webhookId);
 
     if (!workspace) {
-      this.logger.error(`Invalid webhook URL - workspace not found for ${webhookId}`);
       throw new NotFoundException('Invalid webhook URL');
     }
-
-    this.logger.log(`Found workspace: ${workspace.id} (${workspace.name})`);
 
     // Verify Twilio signature
     if (signature) {
       const authToken = await this.twilioWebhooksService.getAuthToken(workspace.id);
       if (authToken) {
         const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
-        this.logger.log(`Signature verification - URL: ${fullUrl}`);
-        this.logger.log(`Signature verification - Signature: ${signature}`);
-
         const isValid = this.twilioWebhooksService.verifyTwilioSignature(
           authToken,
           signature,
@@ -465,41 +455,19 @@ export class WebhooksController {
         );
 
         if (!isValid) {
-          this.logger.warn('⚠️ Invalid Twilio voice signature - TEMPORARILY ALLOWING for debugging');
-          // throw new BadRequestException('Invalid webhook signature');
-          // TODO: Re-enable signature verification after debugging
-        } else {
-          this.logger.log('✅ Twilio signature verified successfully');
+          this.logger.warn('Invalid Twilio voice signature');
+          throw new BadRequestException('Invalid webhook signature');
         }
-      } else {
-        this.logger.warn('Auth token not found for signature verification');
       }
-    } else {
-      this.logger.warn('No signature provided in request');
     }
 
     let twiml: string;
 
-    // Use Twilio's Direction field to distinguish inbound vs outbound calls.
-    // Twilio always sends both To and From for ALL voice webhooks, so checking
-    // those fields alone cannot distinguish call direction.
-    // Direction="inbound" → lead called our number → handleIncomingCall
-    // Direction="outbound-dial" / "outbound-api" → browser SDK call → handleOutgoingCall
     if (payload.Direction !== 'inbound') {
-      // This is an outgoing call from the browser
-      this.logger.log(`>>> DETECTED: Outgoing call from browser (Direction=${payload.Direction})`);
-      this.logger.log(`>>> From: ${payload.From}, To: ${payload.To}, CallSid: ${payload.CallSid}`);
       twiml = await this.twilioWebhooksService.handleOutgoingCall(workspace.id, payload);
     } else {
-      // This is an incoming call to a Twilio number
-      this.logger.log(`>>> DETECTED: Incoming call to workspace (Direction=${payload.Direction})`);
-      this.logger.log(`>>> Called: ${payload.Called || payload.To}, From: ${payload.From}, CallSid: ${payload.CallSid}`);
       twiml = await this.twilioWebhooksService.handleIncomingCall(workspace.id, payload);
     }
-
-    this.logger.log(`Generated TwiML (length: ${twiml.length} chars):`);
-    this.logger.log(twiml);
-    this.logger.log(`========== TWILIO VOICE WEBHOOK END ==========`);
 
     // Return TwiML response
     res.status(200).set('Content-Type', 'text/xml').send(twiml);
