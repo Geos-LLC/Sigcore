@@ -540,7 +540,7 @@ export class TwilioWebhooksService {
         this.logger.log(
           `[ROUTING] → CC path: forwarding to agentPhoneE164=${ccSettings.agentPhoneE164} (businessId=${ccSettings.businessId})`,
         );
-        return this.generateForwardTwiML(ccSettings.agentPhoneE164);
+        return this.generateForwardTwiML(ccSettings.agentPhoneE164, ourNumber);
       }
       // CC settings exist but not actionable — do NOT fall through to legacy forwarding.
       this.logger.log(
@@ -567,7 +567,7 @@ export class TwilioWebhooksService {
       );
       if (forwardTo) {
         this.logger.log(`[ROUTING] → Legacy path: forwarding to callForwardingNumber=${forwardTo} (tenantId=${tenant!.id})`);
-        return this.generateForwardTwiML(forwardTo);
+        return this.generateForwardTwiML(forwardTo, ourNumber);
       }
     }
     this.logger.log(`[ROUTING] → No forwarding configured — returning voicemail`);
@@ -793,13 +793,14 @@ export class TwilioWebhooksService {
   /**
    * Generate TwiML for call forwarding.
    */
-  generateForwardTwiML(forwardToNumber: string): string {
+  generateForwardTwiML(forwardToNumber: string, callerId?: string): string {
     const response = new twilio.twiml.VoiceResponse();
 
     response.say('Please hold while we connect your call.');
 
     const dial = response.dial({
       timeout: 30,
+      ...(callerId && { callerId }),
     });
     dial.number(forwardToNumber);
 
