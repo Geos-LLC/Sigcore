@@ -134,7 +134,7 @@ export class WebhookSubscriptionsController {
         dto.secret = tenant.webhookSecret;
       }
     }
-    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto);
+    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto, tenantId);
     return { data: subscription };
   }
 
@@ -273,7 +273,7 @@ export class WebhookSubscriptionsAliasController {
       const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
       if (tenant?.webhookSecret) dto.secret = tenant.webhookSecret;
     }
-    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto);
+    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto, tenantId);
     return { data: subscription };
   }
 
@@ -340,7 +340,7 @@ export class WebhookSubscriptionsV1Controller {
         dto.secret = tenant.webhookSecret;
       }
     }
-    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto);
+    const subscription = await this.outboundWebhooksService.createSubscription(workspaceId, dto, tenantId);
     return { data: subscription };
   }
 

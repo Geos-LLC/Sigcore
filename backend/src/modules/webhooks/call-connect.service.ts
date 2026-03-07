@@ -1496,19 +1496,24 @@ export class CallConnectService {
     extra?: Record<string, unknown>,
   ): Promise<void> {
     try {
-      await this.outboundWebhooks.emitEvent(session.businessId, eventType, {
-        sessionId: session.id,
-        leadId: session.leadId,
-        businessId: session.businessId,
-        sigcoreConversationId: session.sigcoreConversationId ?? null,
-        status: session.status,
-        mode: session.mode,
-        agentPhone: session.agentPhoneE164,
-        leadPhone: session.leadPhoneE164,
-        attempt: session.attempt,
-        updatedAt: new Date().toISOString(),
-        ...extra,
-      });
+      await this.outboundWebhooks.emitEvent(
+        session.businessId,
+        eventType,
+        {
+          sessionId: session.id,
+          leadId: session.leadId,
+          businessId: session.businessId,
+          sigcoreConversationId: session.sigcoreConversationId ?? null,
+          status: session.status,
+          mode: session.mode,
+          agentPhone: session.agentPhoneE164,
+          leadPhone: session.leadPhoneE164,
+          attempt: session.attempt,
+          updatedAt: new Date().toISOString(),
+          ...extra,
+        },
+        session.tenantId || undefined,
+      );
     } catch (err: any) {
       this.logger.error(`Failed to emit ${eventType} for session ${session.id}: ${err.message}`);
     }

@@ -46,6 +46,11 @@ export class WebhookSubscription {
   @Index()
   workspaceId: string;
 
+  /** Tenant scope — when set, only events for this tenant are delivered */
+  @Column({ name: 'tenant_id', nullable: true })
+  @Index()
+  tenantId?: string;
+
   @Column({ type: 'text' })
   name: string;
 

@@ -28,12 +28,15 @@ export class OutboundWebhooksService {
   ) {}
 
   /**
-   * Emit an event to all active subscriptions for a workspace
+   * Emit an event to active subscriptions for a workspace.
+   * When tenantId is provided, only subscriptions scoped to that tenant
+   * (or unscoped subscriptions) receive the event — prevents fan-out noise.
    */
   async emitEvent(
     workspaceId: string,
     eventType: WebhookEventType,
     data: Record<string, unknown>,
+    tenantId?: string,
   ): Promise<void> {
     const subscriptions = await this.subscriptionRepo.find({
       where: [
@@ -43,9 +46,17 @@ export class OutboundWebhooksService {
     });
 
     // Filter to only subscriptions that listen for this event
-    const relevantSubscriptions = subscriptions.filter((sub) =>
+    let relevantSubscriptions = subscriptions.filter((sub) =>
       sub.events.includes(eventType),
     );
+
+    // When tenantId is provided, only deliver to subscriptions scoped to that
+    // tenant or unscoped (tenantId IS NULL) subscriptions.
+    if (tenantId) {
+      relevantSubscriptions = relevantSubscriptions.filter(
+        (sub) => !sub.tenantId || sub.tenantId === tenantId,
+      );
+    }
 
     if (relevantSubscriptions.length === 0) {
       this.logger.debug(`No active subscriptions for event ${eventType} in workspace ${workspaceId}`);
@@ -72,6 +83,7 @@ export class OutboundWebhooksService {
     eventType: WebhookEventType,
     message: CommunicationMessage,
     additionalData?: Record<string, unknown>,
+    tenantId?: string,
   ): Promise<void> {
     const data = {
       messageId: message.id,
@@ -89,7 +101,7 @@ export class OutboundWebhooksService {
       ...(additionalData || {}),
     };
 
-    await this.emitEvent(workspaceId, eventType, data);
+    await this.emitEvent(workspaceId, eventType, data, tenantId);
   }
 
   /**
@@ -182,6 +194,7 @@ export class OutboundWebhooksService {
       events: WebhookEventType[];
       metadata?: Record<string, unknown>;
     },
+    tenantId?: string,
   ): Promise<WebhookSubscription> {
     const existing = await this.subscriptionRepo.findOne({
       where: { workspaceId, webhookUrl: data.webhookUrl },
@@ -194,6 +207,7 @@ export class OutboundWebhooksService {
         secret: data.secret,
         events: data.events,
         metadata: data.metadata,
+        ...(tenantId && { tenantId }),
         status: WebhookSubscriptionStatus.ACTIVE,
         failureCount: 0,
       } as any);
@@ -206,6 +220,7 @@ export class OutboundWebhooksService {
     const subscription = this.subscriptionRepo.create({
       workspaceId,
       ...data,
+      ...(tenantId && { tenantId }),
       status: WebhookSubscriptionStatus.ACTIVE,
       failureCount: 0,
     });
