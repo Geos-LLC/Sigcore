@@ -321,6 +321,16 @@ export class TwilioWebhooksService {
         lastMessageAt: message.createdAt,
       });
     }
+
+    // Emit outbound webhook to subscriptions so LeadBridge (and other subscribers)
+    // receive inbound SMS events — same as OpenPhone's handleMessageEvent does.
+    if (this.outboundWebhooksService) {
+      this.outboundWebhooksService
+        .emitMessageEvent(workspaceId, WebhookEventType.MESSAGE_INBOUND, message)
+        .catch((err) => {
+          this.logger.error(`Failed to emit inbound SMS webhook for message ${message.id}: ${err.message}`);
+        });
+    }
   }
 
   /**
