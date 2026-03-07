@@ -324,9 +324,14 @@ export class TwilioWebhooksService {
 
     // Emit outbound webhook to subscriptions so LeadBridge (and other subscribers)
     // receive inbound SMS events — same as OpenPhone's handleMessageEvent does.
+    // Include conversation metadata so receivers can determine the purpose of the
+    // conversation (e.g., ICC vs customer texting) for proper routing.
     if (this.outboundWebhooksService) {
+      const convMeta = (conversation.metadata as Record<string, unknown>) || {};
       this.outboundWebhooksService
-        .emitMessageEvent(workspaceId, WebhookEventType.MESSAGE_INBOUND, message)
+        .emitMessageEvent(workspaceId, WebhookEventType.MESSAGE_INBOUND, message, {
+          conversationMetadata: convMeta,
+        })
         .catch((err) => {
           this.logger.error(`Failed to emit inbound SMS webhook for message ${message.id}: ${err.message}`);
         });

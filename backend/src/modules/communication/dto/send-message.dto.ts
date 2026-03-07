@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsObject } from 'class-validator';
 
 export class SendMessageDto {
   @IsString()
@@ -8,4 +8,8 @@ export class SendMessageDto {
   @IsString()
   @IsOptional()
   fromNumber?: string;
+
+  @IsObject()
+  @IsOptional()
+  metadata?: Record<string, unknown>;
 }

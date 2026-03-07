@@ -545,6 +545,7 @@ export class CommunicationService {
     channel: string = 'sms',
     tenantId?: string,
     phoneNumberId?: string,
+    metadata?: Record<string, unknown>,
   ): Promise<CommunicationMessage> {
     // Normalize phone numbers to E.164 format
     const normalizedFrom = this.normalizePhoneNumber(fromNumber);
@@ -609,10 +610,17 @@ export class CommunicationService {
           workspaceId: credentials, channel: channel as ChannelType,
         });
 
+        if (metadata) {
+          await this.conversationRepo.update(conversation.id, {
+            metadata: { ...(conversation.metadata || {}), ...metadata },
+          } as any);
+        }
+
         const message = this.messageRepo.create({
           conversationId: conversation.id, direction: MessageDirection.OUT, body,
           fromNumber: normalizedFrom, toNumber: normalizedTo,
           providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
+          ...(metadata && { metadata }),
         });
         return this.messageRepo.save(message);
       }
@@ -655,10 +663,17 @@ export class CommunicationService {
             workspaceId: credentials, channel: channel as ChannelType,
           });
 
+          if (metadata) {
+            await this.conversationRepo.update(conversation.id, {
+              metadata: { ...(conversation.metadata || {}), ...metadata },
+            } as any);
+          }
+
           const message = this.messageRepo.create({
             conversationId: conversation.id, direction: MessageDirection.OUT, body,
             fromNumber: normalizedFrom, toNumber: normalizedTo,
             providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
+            ...(metadata && { metadata }),
           });
           return this.messageRepo.save(message);
         }
@@ -705,10 +720,17 @@ export class CommunicationService {
         workspaceId: credentials, channel: channel as ChannelType,
       });
 
+      if (metadata) {
+        await this.conversationRepo.update(conversation.id, {
+          metadata: { ...(conversation.metadata || {}), ...metadata },
+        } as any);
+      }
+
       const message = this.messageRepo.create({
         conversationId: conversation.id, direction: MessageDirection.OUT, body,
         fromNumber: normalizedFrom, toNumber: normalizedTo,
         providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
+        ...(metadata && { metadata }),
       });
       return this.messageRepo.save(message);
     }
@@ -815,6 +837,12 @@ export class CommunicationService {
       channel: channel as ChannelType,
     });
 
+    if (metadata) {
+      await this.conversationRepo.update(conversation.id, {
+        metadata: { ...(conversation.metadata || {}), ...metadata },
+      } as any);
+    }
+
     // Create and save the message
     const message = this.messageRepo.create({
       conversationId: conversation.id,
@@ -825,6 +853,7 @@ export class CommunicationService {
       providerMessageId: result.providerMessageId,
       status: result.status,
       channel: channel as any,
+      ...(metadata && { metadata }),
     });
 
     return this.messageRepo.save(message);
