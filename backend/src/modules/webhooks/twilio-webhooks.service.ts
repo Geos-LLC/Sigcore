@@ -781,7 +781,7 @@ export class TwilioWebhooksService {
       maxLength: 120,
       transcribe: true,
       playBeep: true,
-      action: '/api/webhooks/twilio/recording-complete',
+      action: '/api/webhooks/twilio/recording-status',
       timeout: 10,
     });
 
@@ -800,16 +800,16 @@ export class TwilioWebhooksService {
 
     const dial = response.dial({
       timeout: 30,
-      action: '/api/webhooks/twilio/call-status',
     });
     dial.number(forwardToNumber);
 
-    // Fallback to voicemail if no answer
+    // Fallback to voicemail if no answer (plays when <Dial> ends without action URL)
     response.say('The person you are trying to reach is unavailable. Please leave a message after the tone.');
     response.record({
       maxLength: 120,
       transcribe: true,
       playBeep: true,
+      action: '/api/webhooks/twilio/recording-status',
     });
 
     return response.toString();
