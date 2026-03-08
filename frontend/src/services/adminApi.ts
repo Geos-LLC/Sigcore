@@ -263,6 +263,42 @@ class AdminApiService {
     return response.data.data;
   }
 
+  // ==================== Sync Monitor ====================
+
+  async getSyncOverview(): Promise<{ tenants: any[]; syncStatus: any }> {
+    const response = await this.client.get<ApiResponse<{ tenants: any[]; syncStatus: any }>>('/tenants/sync/overview');
+    return response.data.data;
+  }
+
+  async getTenantSyncStatus(): Promise<any> {
+    const response = await this.client.get<ApiResponse<any>>('/tenants/sync/status');
+    return response.data.data;
+  }
+
+  async triggerTenantSync(options?: { syncMessages?: boolean; provider?: string; limit?: number }): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>('/tenants/sync/trigger', options);
+    return response.data.data;
+  }
+
+  async cancelTenantSync(): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>('/tenants/sync/cancel');
+    return response.data.data;
+  }
+
+  // ==================== Orphan Cleanup ====================
+
+  async getOrphanedTenants(): Promise<any[]> {
+    const response = await this.client.get<ApiResponse<any[]>>('/tenants/orphans');
+    return response.data.data;
+  }
+
+  async deleteOrphanedTenants(tenantIds?: string[]): Promise<{ deleted: number; skipped: number }> {
+    const response = await this.client.delete<ApiResponse<{ deleted: number; skipped: number }>>('/tenants/orphans', {
+      data: tenantIds ? { tenantIds } : undefined,
+    });
+    return response.data.data;
+  }
+
   // ==================== Conversations (from DB) ====================
 
   async getConversations(options?: { page?: number; limit?: number; provider?: string }): Promise<{ conversations: any[]; meta: any }> {

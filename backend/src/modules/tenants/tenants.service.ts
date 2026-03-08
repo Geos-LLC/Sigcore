@@ -6,7 +6,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import * as crypto from 'crypto';
 import {
   Tenant,
@@ -665,5 +665,76 @@ export class TenantsService {
     const integration = await this.getTenantIntegration(workspaceId, tenantId, integrationId);
     await this.tenantIntegrationRepo.remove(integration);
     this.logger.log(`Deleted tenant integration ${integrationId}`);
+  }
+
+  // ==================== ORPHAN DETECTION ====================
+
+  /**
+   * Find orphaned tenants — tenants with no integrations and no phone numbers.
+   */
+  async findOrphanedTenants(workspaceId: string): Promise<Array<{
+    id: string;
+    externalId: string;
+    name: string;
+    status: string;
+    createdAt: Date;
+    hasIntegrations: boolean;
+    hasPhoneNumbers: boolean;
+  }>> {
+    const tenants = await this.tenantRepo.find({
+      where: { workspaceId },
+      relations: ['phoneNumbers'],
+      order: { createdAt: 'DESC' },
+    });
+
+    const orphans = [];
+    for (const tenant of tenants) {
+      const integrations = await this.tenantIntegrationRepo.find({
+        where: { workspaceId, tenantId: tenant.id },
+      });
+
+      const hasIntegrations = integrations.length > 0;
+      const hasPhoneNumbers = (tenant.phoneNumbers || []).length > 0;
+
+      // A tenant is orphaned if it has no integrations AND no phone numbers
+      if (!hasIntegrations && !hasPhoneNumbers) {
+        orphans.push({
+          id: tenant.id,
+          externalId: tenant.externalId,
+          name: tenant.name,
+          status: tenant.status,
+          createdAt: tenant.createdAt,
+          hasIntegrations,
+          hasPhoneNumbers,
+        });
+      }
+    }
+
+    this.logger.log(`Found ${orphans.length} orphaned tenants out of ${tenants.length} total`);
+    return orphans;
+  }
+
+  /**
+   * Delete orphaned tenants. If tenantIds provided, only delete those.
+   */
+  async deleteOrphanedTenants(
+    workspaceId: string,
+    tenantIds?: string[],
+  ): Promise<{ deleted: number; skipped: number }> {
+    const orphans = await this.findOrphanedTenants(workspaceId);
+    const orphanIds = new Set(orphans.map(o => o.id));
+
+    const toDelete = tenantIds
+      ? tenantIds.filter(id => orphanIds.has(id))
+      : Array.from(orphanIds);
+
+    const skipped = tenantIds ? tenantIds.length - toDelete.length : 0;
+
+    if (toDelete.length > 0) {
+      await this.tenantRepo.delete({ workspaceId, id: In(toDelete) });
+      this.logger.log(`Deleted ${toDelete.length} orphaned tenants`);
+    }
+
+    return { deleted: toDelete.length, skipped };
   }
 }

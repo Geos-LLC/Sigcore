@@ -17,6 +17,7 @@ import {
 import { TenantsService, CreateTenantDto, AllocatePhoneNumberDto, ConnectTenantIntegrationDto } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
 import { ApiKeysService } from '../api/api-keys.service';
+import { CommunicationService } from '../communication/communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
 import { TenantStatus } from '../../database/entities/tenant.entity';
@@ -38,6 +39,7 @@ export class TenantsController {
     private readonly tenantsService: TenantsService,
     private readonly provisioningService: PhoneNumberProvisioningService,
     private readonly apiKeysService: ApiKeysService,
+    private readonly communicationService: CommunicationService,
   ) {}
 
   // ==================== TENANT MANAGEMENT ====================
@@ -118,6 +120,111 @@ export class TenantsController {
   async getTenants(@WorkspaceId() workspaceId: string) {
     const tenants = await this.tenantsService.getTenants(workspaceId);
     return { data: tenants };
+  }
+
+  // ==================== SYNC MONITOR ====================
+
+  /**
+   * Get sync status for the workspace.
+   * GET /api/tenants/sync/status
+   */
+  @Get('sync/status')
+  async getSyncStatus(@WorkspaceId() workspaceId: string) {
+    const status = this.communicationService.getSyncStatus(workspaceId);
+    return { data: status };
+  }
+
+  /**
+   * Get all tenants with their integrations — for sync monitor overview.
+   * GET /api/tenants/sync/overview
+   */
+  @Get('sync/overview')
+  async getSyncOverview(@WorkspaceId() workspaceId: string) {
+    const tenants = await this.tenantsService.getTenants(workspaceId);
+    const overview = [];
+
+    for (const tenant of tenants) {
+      const integrations = await this.tenantsService.getTenantIntegrations(workspaceId, tenant.id);
+      overview.push({
+        id: tenant.id,
+        externalId: tenant.externalId,
+        name: tenant.name,
+        status: tenant.status,
+        phoneNumbers: (tenant.phoneNumbers || []).map(pn => ({
+          id: pn.id,
+          phoneNumber: pn.phoneNumber,
+          provider: pn.provider,
+          friendlyName: pn.friendlyName,
+        })),
+        integrations: integrations.map(i => ({
+          id: i.id,
+          provider: i.provider,
+          status: i.status,
+        })),
+        createdAt: tenant.createdAt,
+      });
+    }
+
+    const syncStatus = this.communicationService.getSyncStatus(workspaceId);
+    return { data: { tenants: overview, syncStatus } };
+  }
+
+  /**
+   * Trigger sync for the workspace.
+   * POST /api/tenants/sync/trigger
+   */
+  @Post('sync/trigger')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async triggerSync(
+    @WorkspaceId() workspaceId: string,
+    @Body() options?: { syncMessages?: boolean; provider?: string; limit?: number },
+  ) {
+    this.communicationService.syncConversations(workspaceId, {
+      syncMessages: options?.syncMessages ?? true,
+      provider: options?.provider as any,
+      limit: options?.limit,
+    }).catch(err => {
+      console.error('Background sync error:', err);
+    });
+
+    return { data: { started: true, message: 'Sync started. Poll /tenants/sync/status for progress.' } };
+  }
+
+  /**
+   * Cancel running sync.
+   * POST /api/tenants/sync/cancel
+   */
+  @Post('sync/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancelSync(@WorkspaceId() workspaceId: string) {
+    const result = this.communicationService.cancelSync(workspaceId);
+    return { data: result };
+  }
+
+  // ==================== ORPHAN CLEANUP ====================
+
+  /**
+   * Find orphaned tenants (no integrations, no phone numbers).
+   * GET /api/tenants/orphans
+   */
+  @Get('orphans')
+  async findOrphanedTenants(@WorkspaceId() workspaceId: string) {
+    const orphans = await this.tenantsService.findOrphanedTenants(workspaceId);
+    return { data: orphans };
+  }
+
+  /**
+   * Delete orphaned tenants.
+   * DELETE /api/tenants/orphans
+   */
+  @Delete('orphans')
+  @HttpCode(HttpStatus.OK)
+  async deleteOrphanedTenants(
+    @WorkspaceId() workspaceId: string,
+    @Body() body?: { tenantIds?: string[] },
+  ) {
+    const result = await this.tenantsService.deleteOrphanedTenants(workspaceId, body?.tenantIds);
+    return { data: result };
   }
 
   /**
@@ -935,4 +1042,5 @@ export class TenantsV1Controller {
       },
     };
   }
+
 }

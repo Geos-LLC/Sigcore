@@ -14,6 +14,7 @@ import ApiDocsPage from './pages/ApiDocsPage';
 import AdminCallConnectTestPage from './pages/admin/AdminCallConnectTestPage';
 import AdminSmsTestPage from './pages/admin/AdminSmsTestPage';
 import AdminProvisioningTestPage from './pages/admin/AdminProvisioningTestPage';
+import AdminSyncMonitorPage from './pages/admin/AdminSyncMonitorPage';
 
 // Portal
 import TenantPortalLoginPage from './pages/portal/TenantPortalLoginPage';
@@ -47,6 +48,7 @@ export default function App() {
         <Route path="call-connect" element={<AdminCallConnectTestPage />} />
         <Route path="sms" element={<AdminSmsTestPage />} />
         <Route path="provisioning" element={<AdminProvisioningTestPage />} />
+        <Route path="sync-monitor" element={<AdminSyncMonitorPage />} />
       </Route>
 
       {/* Portal */}
