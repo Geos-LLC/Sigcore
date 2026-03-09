@@ -610,9 +610,10 @@ export class CommunicationService {
           workspaceId: credentials, channel: channel as ChannelType,
         });
 
-        if (metadata) {
+        const enrichedMeta = { ...(metadata || {}), ...(tenantId && { tenantId }) };
+        if (Object.keys(enrichedMeta).length) {
           await this.conversationRepo.update(conversation.id, {
-            metadata: { ...(conversation.metadata || {}), ...metadata },
+            metadata: { ...(conversation.metadata || {}), ...enrichedMeta },
           } as any);
         }
 
@@ -620,7 +621,7 @@ export class CommunicationService {
           conversationId: conversation.id, direction: MessageDirection.OUT, body,
           fromNumber: normalizedFrom, toNumber: normalizedTo,
           providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
-          ...(metadata && { metadata }),
+          metadata: enrichedMeta,
         });
         return this.messageRepo.save(message);
       }
@@ -663,9 +664,10 @@ export class CommunicationService {
             workspaceId: credentials, channel: channel as ChannelType,
           });
 
-          if (metadata) {
+          const enrichedMeta2 = { ...(metadata || {}), ...(tenantId && { tenantId }) };
+          if (Object.keys(enrichedMeta2).length) {
             await this.conversationRepo.update(conversation.id, {
-              metadata: { ...(conversation.metadata || {}), ...metadata },
+              metadata: { ...(conversation.metadata || {}), ...enrichedMeta2 },
             } as any);
           }
 
@@ -673,7 +675,7 @@ export class CommunicationService {
             conversationId: conversation.id, direction: MessageDirection.OUT, body,
             fromNumber: normalizedFrom, toNumber: normalizedTo,
             providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
-            ...(metadata && { metadata }),
+            metadata: enrichedMeta2,
           });
           return this.messageRepo.save(message);
         }
@@ -720,9 +722,10 @@ export class CommunicationService {
         workspaceId: credentials, channel: channel as ChannelType,
       });
 
-      if (metadata) {
+      const enrichedMeta3 = { ...(metadata || {}), ...(tenantId && { tenantId }) };
+      if (Object.keys(enrichedMeta3).length) {
         await this.conversationRepo.update(conversation.id, {
-          metadata: { ...(conversation.metadata || {}), ...metadata },
+          metadata: { ...(conversation.metadata || {}), ...enrichedMeta3 },
         } as any);
       }
 
@@ -730,7 +733,7 @@ export class CommunicationService {
         conversationId: conversation.id, direction: MessageDirection.OUT, body,
         fromNumber: normalizedFrom, toNumber: normalizedTo,
         providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
-        ...(metadata && { metadata }),
+        metadata: enrichedMeta3,
       });
       return this.messageRepo.save(message);
     }
