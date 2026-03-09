@@ -20,6 +20,7 @@ import {
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { EventsGateway } from '../events/events.gateway';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
@@ -83,6 +84,8 @@ export class WebhooksService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
+    @InjectRepository(TenantPhoneNumber)
+    private tenantPhoneNumberRepo: Repository<TenantPhoneNumber>,
     private encryptionService: EncryptionService,
     private eventsGateway: EventsGateway,
     private openPhoneProvider: OpenPhoneProvider,
@@ -252,6 +255,18 @@ export class WebhooksService {
       ? msgData.from
       : (Array.isArray(msgData.to) ? msgData.to[0] : msgData.to);
 
+    // Resolve tenantId from the phone number so webhooks are sent only to the relevant account
+    let resolvedTenantId: string | undefined;
+    if (msgData.phoneNumberId) {
+      const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
+        where: { workspaceId, providerId: msgData.phoneNumberId },
+      });
+      if (tenantPhone) {
+        resolvedTenantId = tenantPhone.tenantId;
+        this.logger.log(`Resolved tenantId=${resolvedTenantId} from phoneNumberId=${msgData.phoneNumberId}`);
+      }
+    }
+
     let conversation: CommunicationConversation | null = null;
 
     // First try to find by conversationId if available
@@ -367,7 +382,7 @@ export class WebhooksService {
         ? WebhookEventType.MESSAGE_DELIVERED
         : WebhookEventType.MESSAGE_SENT;
       this.outboundWebhooksService
-        .emitMessageEvent(workspaceId, statusEventType, existingMessage)
+        .emitMessageEvent(workspaceId, statusEventType, existingMessage, undefined, resolvedTenantId)
         .catch((err) => {
           this.logger.error(`Failed to emit status-update webhook for message ${existingMessage.id}: ${err.message}`);
         });
@@ -438,7 +453,7 @@ export class WebhooksService {
         : WebhookEventType.MESSAGE_SENT;
 
     this.outboundWebhooksService
-      .emitMessageEvent(workspaceId, webhookEventType, message)
+      .emitMessageEvent(workspaceId, webhookEventType, message, undefined, resolvedTenantId)
       .catch((err) => {
         this.logger.error(`Failed to emit outbound webhook for OpenPhone message: ${err.message}`);
       });

@@ -326,12 +326,21 @@ export class TwilioWebhooksService {
     // receive inbound SMS events — same as OpenPhone's handleMessageEvent does.
     // Include conversation metadata so receivers can determine the purpose of the
     // conversation (e.g., ICC vs customer texting) for proper routing.
+    // Resolve tenantId from the receiving phone number so webhooks go only to the relevant account.
     if (this.outboundWebhooksService) {
       const convMeta = (conversation.metadata as Record<string, unknown>) || {};
+      let tenantId: string | undefined;
+      const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
+        where: { workspaceId, phoneNumber: ourNumber },
+      });
+      if (tenantPhone) {
+        tenantId = tenantPhone.tenantId;
+        this.logger.log(`Resolved tenantId=${tenantId} from Twilio number ${ourNumber}`);
+      }
       this.outboundWebhooksService
         .emitMessageEvent(workspaceId, WebhookEventType.MESSAGE_INBOUND, message, {
           conversationMetadata: convMeta,
-        })
+        }, tenantId)
         .catch((err) => {
           this.logger.error(`Failed to emit inbound SMS webhook for message ${message.id}: ${err.message}`);
         });
@@ -383,6 +392,7 @@ export class TwilioWebhooksService {
     }
 
     // Emit webhook event to subscriptions (fire and forget)
+    // Resolve tenantId from the message's fromNumber (our number for outbound status updates)
     if (this.outboundWebhooksService && message.conversation) {
       const eventType = message.status === MessageStatus.DELIVERED
         ? WebhookEventType.MESSAGE_DELIVERED
@@ -391,6 +401,13 @@ export class TwilioWebhooksService {
           : null;
 
       if (eventType) {
+        let statusTenantId: string | undefined;
+        const statusTenantPhone = await this.tenantPhoneNumberRepo.findOne({
+          where: { workspaceId: message.conversation.workspaceId, phoneNumber: message.fromNumber },
+        });
+        if (statusTenantPhone) {
+          statusTenantId = statusTenantPhone.tenantId;
+        }
         this.outboundWebhooksService
           .emitMessageEvent(
             message.conversation.workspaceId,
@@ -400,6 +417,7 @@ export class TwilioWebhooksService {
               errorCode: payload.ErrorCode,
               errorMessage: payload.ErrorMessage,
             },
+            statusTenantId,
           )
           .catch((err) => {
             this.logger.error(`Failed to emit webhook event: ${err.message}`);
