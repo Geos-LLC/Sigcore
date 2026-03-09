@@ -13,6 +13,7 @@ export enum WebhookEventType {
   MESSAGE_FAILED = 'message.failed',
   MESSAGE_INBOUND = 'message.inbound',
   CALL_STARTED = 'call.started',
+  CALL_INBOUND = 'call.inbound',
   CALL_COMPLETED = 'call.completed',
   CALL_MISSED = 'call.missed',
   // Call Connect events (Instant Call Bridge for LeadBridge)

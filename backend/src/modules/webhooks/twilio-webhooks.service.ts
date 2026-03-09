@@ -143,6 +143,20 @@ export class TwilioWebhooksService {
     private callConnectService?: CallConnectService,
   ) {}
 
+  /**
+   * Resolve workspaceId from a Twilio phone number.
+   * Checks CC settings first, then tenant_phone_numbers.
+   */
+  async getWorkspaceIdByPhoneNumber(phoneNumber: string): Promise<string | null> {
+    // Check CC settings (maps botNumberE164 → businessId which is the workspaceId)
+    const cc = await this.ccSettingsRepo.findOne({ where: { botNumberE164: phoneNumber } });
+    if (cc) return cc.businessId;
+    // Fallback: tenant_phone_numbers
+    const tpn = await this.tenantPhoneNumberRepo.findOne({ where: { phoneNumber } });
+    if (tpn) return tpn.workspaceId;
+    return null;
+  }
+
   async getWorkspaceByWebhookId(webhookId: string): Promise<Workspace | null> {
     // Primary: look up by the dedicated webhookId token (correct format).
     const byToken = await this.workspaceRepo.findOne({ where: { webhookId } });
@@ -489,6 +503,22 @@ export class TwilioWebhooksService {
     await this.callRepo.save(call);
     this.logger.log(`Created Twilio call record ${payload.CallSid}`);
 
+    // Emit call.inbound webhook so LeadBridge can match caller to lead
+    if (this.outboundWebhooksService) {
+      this.outboundWebhooksService
+        .emitEvent(workspaceId, WebhookEventType.CALL_INBOUND, {
+          callId: call.id,
+          conversationId: conversation.id,
+          callSid: payload.CallSid,
+          fromNumber: participantNumber,
+          toNumber: ourNumber,
+          direction: 'inbound',
+        })
+        .catch((err) => {
+          this.logger.error(`Failed to emit call.inbound webhook: ${err.message}`);
+        });
+    }
+
     // Emit real-time event
     this.eventsGateway.emitNewCall(workspaceId, {
       id: call.id,
@@ -810,8 +840,10 @@ export class TwilioWebhooksService {
 
   /**
    * Generate TwiML for call forwarding.
+   * Uses an action URL so we get notified of the dial outcome (answered/no-answer/busy).
    */
   generateForwardTwiML(forwardToNumber: string, callerId?: string): string {
+    const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
 
     response.say('Please hold while we connect your call.');
@@ -819,19 +851,66 @@ export class TwilioWebhooksService {
     const dial = response.dial({
       timeout: 30,
       ...(callerId && { callerId }),
+      action: `${baseUrl}/api/webhooks/twilio/voice/forward-status`,
+      method: 'POST',
     });
     dial.number(forwardToNumber);
 
-    // Fallback to voicemail if no answer (plays when <Dial> ends without action URL)
-    response.say('The person you are trying to reach is unavailable. Please leave a message after the tone.');
-    response.record({
-      maxLength: 120,
-      transcribe: true,
-      playBeep: true,
-      action: '/api/webhooks/twilio/recording-status',
-    });
-
     return response.toString();
+  }
+
+  /**
+   * Handle the outcome of a forwarded inbound call (<Dial> action callback).
+   * Emits call.completed or call.missed webhook, returns voicemail TwiML on no-answer.
+   */
+  async handleForwardDialStatus(
+    workspaceId: string,
+    payload: Record<string, string>,
+  ): Promise<string> {
+    const dialStatus = payload.DialCallStatus; // completed, no-answer, busy, failed, canceled
+    const callSid = payload.CallSid;
+    const fromNumber = payload.From;
+    const toNumber = payload.To;
+
+    this.logger.log(
+      `[FORWARD] Dial status for CallSid=${callSid}: DialCallStatus=${dialStatus}, From=${fromNumber}, To=${toNumber}`,
+    );
+
+    // Emit webhook so LeadBridge can react (e.g. send missed-call SMS)
+    if (this.outboundWebhooksService) {
+      const eventType = dialStatus === 'completed'
+        ? WebhookEventType.CALL_COMPLETED
+        : WebhookEventType.CALL_MISSED;
+      this.outboundWebhooksService
+        .emitEvent(workspaceId, eventType, {
+          callSid,
+          fromNumber,
+          toNumber,
+          dialCallStatus: dialStatus,
+          dialCallDuration: payload.DialCallDuration,
+        })
+        .catch((err) => {
+          this.logger.error(`Failed to emit ${eventType} webhook: ${err.message}`);
+        });
+    }
+
+    // If agent answered and call completed normally, just hang up
+    if (dialStatus === 'completed') {
+      const response = new twilio.twiml.VoiceResponse();
+      response.hangup();
+      return response.toString();
+    }
+
+    // Agent didn't answer — play voicemail
+    return this.generateVoicemailTwiML();
+  }
+
+  private getBaseUrl(): string {
+    const configured = this.configService.get<string>('BASE_URL');
+    if (configured) return configured.replace(/\/$/, '');
+    const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+    if (railwayDomain) return `https://${railwayDomain}`;
+    return 'http://localhost:3002';
   }
 
   private mapMessageStatus(status: string): MessageStatus {

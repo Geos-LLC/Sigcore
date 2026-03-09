@@ -4,6 +4,7 @@ import {
   Body,
   Param,
   Query,
+  Header,
   Headers,
   RawBodyRequest,
   Req,
@@ -184,6 +185,33 @@ export class WebhooksController {
     this.logger.log(`Twilio call status webhook: ${payload.CallSid} -> ${payload.CallStatus}`);
     await this.twilioWebhooksService.handleCallStatus(payload);
     return '';
+  }
+
+  /**
+   * Handle forwarded inbound call dial status (Dial action callback).
+   * Called when an inbound call forwarded to an agent's phone completes.
+   * MUST be before twilio/voice/:webhookId to avoid route conflicts.
+   */
+  @Post('twilio/voice/forward-status')
+  @HttpCode(HttpStatus.OK)
+  @Header('Content-Type', 'text/xml')
+  async handleForwardDialStatus(@Body() payload: any) {
+    this.logger.log(
+      `Twilio forward dial status: CallSid=${payload.CallSid} DialCallStatus=${payload.DialCallStatus}`,
+    );
+    // Resolve workspace from the Twilio number (To = the dedicated number that was called)
+    const toNumber = payload.To;
+    const workspaceId = toNumber
+      ? await this.twilioWebhooksService.getWorkspaceIdByPhoneNumber(toNumber)
+      : null;
+    if (workspaceId) {
+      return await this.twilioWebhooksService.handleForwardDialStatus(
+        workspaceId,
+        payload,
+      );
+    }
+    // Fallback: return voicemail
+    return this.twilioWebhooksService.generateVoicemailTwiML();
   }
 
   // ==================== CALL CONNECT TwiML WEBHOOKS ====================
