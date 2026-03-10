@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Param,
+  Query,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -46,12 +47,16 @@ export class CallConnectController {
 
   /**
    * Get current settings for the authenticated workspace.
+   * Pass ?businessId=<savedAccountId> to retrieve per-account settings.
    *
    * GET /api/internal/call-connect/settings
    */
   @Get('settings')
-  async getSettings(@WorkspaceId() workspaceId: string) {
-    return this.callConnectService.getSettings(workspaceId);
+  async getSettings(
+    @WorkspaceId() workspaceId: string,
+    @Query('businessId') businessId?: string,
+  ) {
+    return this.callConnectService.getSettings(workspaceId, businessId);
   }
 
   // ──────────────────────────────────────────────────────────────

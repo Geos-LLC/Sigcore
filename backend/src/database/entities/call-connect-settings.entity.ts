@@ -1,9 +1,10 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  Unique,
 } from 'typeorm';
 
 export enum CallConnectMode {
@@ -29,10 +30,27 @@ export enum AgentVoicemailMode {
   SPEAK = 'SPEAK',
 }
 
+/**
+ * CallConnect settings — tenant-scoped.
+ * One row per (workspaceId, businessId) pair.
+ * workspaceId = Sigcore platform workspace (from API-key auth guard)
+ * businessId  = LeadBridge savedAccountId — per-account identifier sent in request body
+ *
+ * Multiple LeadBridge accounts that share the same Sigcore workspace
+ * (platform API key) each get their own isolated settings row.
+ */
 @Entity('call_connect_settings')
+@Unique(['workspaceId', 'businessId'])
 export class CallConnectSettings {
-  /** Primary key = workspaceId (one row per business) */
-  @PrimaryColumn({ name: 'business_id' })
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  /** Sigcore platform workspace ID — resolved from API key by auth guard */
+  @Column({ name: 'workspace_id' })
+  workspaceId: string;
+
+  /** LeadBridge per-account identifier (savedAccountId). One row per account. */
+  @Column({ name: 'business_id' })
   businessId: string;
 
   @Column({ default: false })

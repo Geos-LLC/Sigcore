@@ -14,6 +14,15 @@ export class StartCallConnectDto {
   @IsString()
   leadSummary?: string;
 
+  /**
+   * Bot number (E.164) to use as caller ID. Used to look up the per-account
+   * CallConnect settings row. Required for multi-tenant isolation — without this,
+   * settings lookup falls back to any row for the workspace (legacy behaviour).
+   */
+  @IsOptional()
+  @IsString()
+  fromNumberHint?: string;
+
   /** Agent phone or owner ID hint; overrides settings.agentPhoneE164 if provided */
   @IsOptional()
   @IsString()

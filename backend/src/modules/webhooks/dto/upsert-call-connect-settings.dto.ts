@@ -2,6 +2,15 @@ import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-valid
 import { CallConnectMode, AgentStrategy, CallerIdStrategy, AgentVoicemailMode } from '../../../database/entities/call-connect-settings.entity';
 
 export class UpsertCallConnectSettingsDto {
+  /**
+   * LeadBridge per-account identifier (savedAccountId).
+   * When provided, settings are stored per-account within the workspace.
+   * When omitted, falls back to workspaceId for backward compatibility.
+   */
+  @IsOptional()
+  @IsString()
+  businessId?: string;
+
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;

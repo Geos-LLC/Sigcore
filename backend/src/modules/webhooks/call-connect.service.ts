@@ -77,14 +77,16 @@ export class CallConnectService {
     workspaceId: string,
     dto: UpsertCallConnectSettingsDto,
   ): Promise<CallConnectSettings> {
+    // businessId from the request body = LeadBridge savedAccountId (per-account key).
+    // Fall back to workspaceId for legacy callers that don't send businessId yet.
+    const businessId = dto.businessId || workspaceId;
+
     let settings = await this.settingsRepo.findOne({
-      where: { businessId: workspaceId },
+      where: { workspaceId, businessId },
     });
 
     // Ownership audit: warn when botNumberE164 is not in tenant_phone_numbers for this workspace.
-    // This is advisory only — Twilio enforces actual caller-ID ownership at the call level.
-    // A hard block here causes false-positive 409s when allocation rows are stale or missing
-    // (e.g. after re-provisioning). Use Part C (reallocate) to repair stale allocations.
+    // Advisory only — Twilio enforces actual caller-ID ownership at the call level.
     if (dto.botNumberE164 && dto.botNumberE164 !== settings?.botNumberE164) {
       const allocation = await this.tenantPhoneRepo.findOne({
         where: { workspaceId, phoneNumber: dto.botNumberE164 },
@@ -96,17 +98,28 @@ export class CallConnectService {
       }
     }
 
+    const { businessId: _ignored, ...rest } = dto;
     if (settings) {
-      Object.assign(settings, dto);
+      Object.assign(settings, rest);
     } else {
-      settings = this.settingsRepo.create({ businessId: workspaceId, ...dto });
+      settings = this.settingsRepo.create({ workspaceId, businessId, ...rest });
     }
+
+    this.logger.log(
+      `[upsertSettings] workspace=${workspaceId} business=${businessId} bot=${dto.botNumberE164 ?? settings.botNumberE164 ?? 'N/A'} agent=${dto.agentPhoneE164 ?? settings.agentPhoneE164 ?? 'N/A'}`,
+    );
 
     return this.settingsRepo.save(settings);
   }
 
-  async getSettings(workspaceId: string): Promise<CallConnectSettings | null> {
-    return this.settingsRepo.findOne({ where: { businessId: workspaceId } });
+  async getSettings(
+    workspaceId: string,
+    businessId?: string,
+  ): Promise<CallConnectSettings | null> {
+    const effectiveBusinessId = businessId || workspaceId;
+    return this.settingsRepo.findOne({
+      where: { workspaceId, businessId: effectiveBusinessId },
+    });
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -122,14 +135,42 @@ export class CallConnectService {
     dto: StartCallConnectDto,
     tenantId?: string,
   ): Promise<{ sessionId: string; status: SessionStatus }> {
-    // 1. Load & validate settings
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: workspaceId },
+    // businessId = LeadBridge savedAccountId (per-account key).
+    // Fall back to workspaceId for legacy callers that don't send businessId.
+    const businessId = dto.businessId || workspaceId;
+
+    // 1. Load & validate settings — tenant-scoped lookup
+    // Primary: (workspaceId, businessId) — per-account row
+    // Legacy fallback: (workspaceId, workspaceId) — old shared row
+    let settings = await this.settingsRepo.findOne({
+      where: { workspaceId, businessId },
     });
+    if (!settings && businessId !== workspaceId) {
+      // Backward compat: legacy row created before multi-tenant migration
+      settings = await this.settingsRepo.findOne({
+        where: { workspaceId, businessId: workspaceId },
+      });
+      if (settings) {
+        this.logger.warn(
+          `[startSession] Using legacy workspace-level settings for business=${businessId} — LeadBridge should re-push settings with businessId`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `[startSession] workspace=${workspaceId} business=${businessId} bot=${dto.fromNumberHint ?? 'N/A'} agent=${dto.agentHint ?? 'N/A'} lead=${dto.leadId}`,
+    );
 
     if (!settings?.enabled) {
       throw new UnprocessableEntityException(
         'Call Connect is not enabled for this business',
+      );
+    }
+
+    // Validate fromNumberHint matches configured bot number (advisory warning)
+    if (dto.fromNumberHint && settings.botNumberE164 && dto.fromNumberHint !== settings.botNumberE164) {
+      this.logger.warn(
+        `[startSession] fromNumberHint=${dto.fromNumberHint} does not match settings.botNumberE164=${settings.botNumberE164} for business=${businessId}`,
       );
     }
 
@@ -152,7 +193,7 @@ export class CallConnectService {
     }
 
     // 4. Resolve caller-ID and agent phone
-    const fromNumber = settings.botNumberE164;
+    const fromNumber = dto.fromNumberHint || settings.botNumberE164;
     if (!fromNumber) {
       throw new UnprocessableEntityException(
         'Bot number not configured in Call Connect settings',
@@ -168,7 +209,6 @@ export class CallConnectService {
 
     const mode =
       (dto.requestedMode as CallConnectMode) || settings.mode;
-    const conferenceName = `cc_${Date.now()}`; // will be updated after session saved
 
     // 5. Create session row
     const session = this.sessionRepo.create({
@@ -194,7 +234,7 @@ export class CallConnectService {
     await this.sessionRepo.save(session);
 
     this.logger.log(
-      `Created Call Connect session ${session.id} for lead ${dto.leadId} (mode=${mode})`,
+      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode}`,
     );
 
     // 6. Emit session.created event to LeadBridge
