@@ -275,11 +275,6 @@ resource "aws_secretsmanager_secret_version" "app_secrets" {
     # Service-to-service auth
     SIGCORE_SERVICE_KEY = var.sigcore_service_key
 
-    # Twilio
-    TWILIO_API_KEY       = var.twilio_api_key
-    TWILIO_API_SECRET    = var.twilio_api_secret
-    TWILIO_TWIML_APP_SID = var.twilio_twiml_app_sid
-
     # Loghub (Grafana log forwarding)
     LOGHUB_URL    = var.loghub_url
     LOGHUB_SOURCE = var.loghub_source
@@ -406,20 +401,16 @@ resource "aws_ecs_task_definition" "backend" {
       { name = "PORT",                   value = tostring(var.container_port) },
       { name = "NODE_ENV",               value = "production" },
       { name = "BASE_URL",               value = "http://${aws_lb.backend.dns_name}" },
-      { name = "CALLIO_BACKEND_URL",     value = var.callio_backend_url },
       { name = "OPENPHONE_API_BASE_URL", value = "https://api.openphone.com/v1" },
     ]
 
     secrets = [
-      { name = "DATABASE_URL",         valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DATABASE_URL::" },
-      { name = "ENCRYPTION_KEY",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:ENCRYPTION_KEY::" },
-      { name = "SIGCORE_SERVICE_KEY",  valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:SIGCORE_SERVICE_KEY::" },
-      { name = "TWILIO_API_KEY",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_KEY::" },
-      { name = "TWILIO_API_SECRET",    valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_SECRET::" },
-      { name = "TWILIO_TWIML_APP_SID", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_TWIML_APP_SID::" },
-      { name = "LOGHUB_URL",           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_URL::" },
-      { name = "LOGHUB_SOURCE",        valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_SOURCE::" },
-      { name = "LOGHUB_KEY",           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_KEY::" },
+      { name = "DATABASE_URL",        valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DATABASE_URL::" },
+      { name = "ENCRYPTION_KEY",      valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:ENCRYPTION_KEY::" },
+      { name = "SIGCORE_SERVICE_KEY", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:SIGCORE_SERVICE_KEY::" },
+      { name = "LOGHUB_URL",          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_URL::" },
+      { name = "LOGHUB_SOURCE",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_SOURCE::" },
+      { name = "LOGHUB_KEY",          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_KEY::" },
     ]
 
     logConfiguration = {

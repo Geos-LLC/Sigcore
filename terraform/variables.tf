@@ -92,14 +92,6 @@ variable "skip_final_snapshot" {
   default     = true
 }
 
-# --- App ---
-
-variable "callio_backend_url" {
-  description = "LeadBridge (Callio) backend ALB URL — added to Sigcore CORS allowed origins"
-  type        = string
-  default     = ""
-}
-
 # --- Encryption ---
 
 variable "encryption_key" {
@@ -114,28 +106,6 @@ variable "sigcore_service_key" {
   description = "Shared secret for Callio ↔ Sigcore internal service-to-service calls"
   type        = string
   sensitive   = true
-}
-
-# --- Twilio ---
-
-variable "twilio_api_key" {
-  description = "Twilio API key SID"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "twilio_api_secret" {
-  description = "Twilio API key secret"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "twilio_twiml_app_sid" {
-  description = "Twilio TwiML App SID for browser-based calling"
-  type        = string
-  default     = ""
 }
 
 # --- Loghub (Grafana log forwarding) ---

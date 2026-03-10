@@ -3,35 +3,27 @@
 # ============================================================
 # Copy this file to terraform.tfvars and fill in actual values.
 # NEVER commit terraform.tfvars to version control!
+#
+# Note: No Twilio keys here — each tenant provides their own
+#       credentials stored encrypted in the database.
 # ============================================================
 
 # --- AWS ---
 aws_region  = "us-east-1"
 environment = "prod"
 
-# --- Database (RDS) ---
+# --- Database (RDS — created fresh on AWS) ---
 db_password = "your-strong-db-password"
 db_username = "sigcore"
 db_name     = "sigcore"
 
 # --- Encryption ---
-# Must match ENCRYPTION_KEY in Railway production
-# Get from Railway: Dashboard > Sigcore > Variables > ENCRYPTION_KEY
+# Railway > Sigcore (production) > Variables > ENCRYPTION_KEY
 encryption_key = "your-64-char-hex-key"
 
 # --- Service Auth ---
-# Must match SIGCORE_SERVICE_KEY in Railway production
+# Railway > Sigcore (production) > Variables > SIGCORE_SERVICE_KEY
 sigcore_service_key = "your-sigcore-service-key"
-
-# --- LeadBridge backend URL (for CORS) ---
-# After deploying LeadBridge, use: terraform output backend_api_url (from LeadBridge terraform dir)
-callio_backend_url = "http://leadbridge-prod-alb-xxxx.us-east-1.elb.amazonaws.com"
-
-# --- Twilio ---
-# Get from Railway production env vars
-twilio_api_key       = "SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-twilio_api_secret    = "your-twilio-api-secret"
-twilio_twiml_app_sid = "APxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # --- Loghub ---
 loghub_url    = "https://geosloghub-production.up.railway.app"
