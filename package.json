@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@geos/loghub-client": "github:goscha01/geos-loghub-client"
+  }
+}

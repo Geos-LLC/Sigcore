@@ -2,10 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { LoghubLogger } from '@geos/loghub-client';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     rawBody: true, // Needed for webhook signature verification
+    logger: new LoghubLogger({ service: 'sigcore-api', app: 'sigcore' }),
   });
 
   // Trust Railway's reverse proxy so req.protocol reflects the real scheme (https).
