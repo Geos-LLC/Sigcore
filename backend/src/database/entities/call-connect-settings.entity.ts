@@ -1,10 +1,9 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
+  PrimaryColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
-  Unique,
 } from 'typeorm';
 
 export enum CallConnectMode {
@@ -32,26 +31,31 @@ export enum AgentVoicemailMode {
 
 /**
  * CallConnect settings — tenant-scoped.
- * One row per (workspaceId, businessId) pair.
- * workspaceId = Sigcore platform workspace (from API-key auth guard)
- * businessId  = LeadBridge savedAccountId — per-account identifier sent in request body
  *
- * Multiple LeadBridge accounts that share the same Sigcore workspace
- * (platform API key) each get their own isolated settings row.
+ * Primary key: business_id
+ * - Legacy rows: business_id = Sigcore workspaceId (all shared within workspace)
+ * - New rows:    business_id = LeadBridge savedAccountId (per-account isolation)
+ *
+ * workspace_id column: stores the Sigcore workspace ID for audit/query purposes.
+ * - Legacy rows: workspace_id = NULL (or = business_id after migration)
+ * - New rows:    workspace_id = platform workspace from @WorkspaceId() auth guard
  */
 @Entity('call_connect_settings')
-@Unique(['workspaceId', 'businessId'])
 export class CallConnectSettings {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  /** Sigcore platform workspace ID — resolved from API key by auth guard */
-  @Column({ name: 'workspace_id' })
-  workspaceId: string;
-
-  /** LeadBridge per-account identifier (savedAccountId). One row per account. */
-  @Column({ name: 'business_id' })
+  /**
+   * For legacy rows: the Sigcore workspaceId.
+   * For new per-account rows: the LeadBridge savedAccountId.
+   * One settings row per unique key.
+   */
+  @PrimaryColumn({ name: 'business_id' })
   businessId: string;
+
+  /**
+   * Sigcore platform workspace ID resolved from API key.
+   * Nullable for backward compat with legacy rows.
+   */
+  @Column({ name: 'workspace_id', nullable: true })
+  workspaceId: string | null;
 
   @Column({ default: false })
   enabled: boolean;

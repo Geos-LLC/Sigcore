@@ -77,12 +77,12 @@ export class CallConnectService {
     workspaceId: string,
     dto: UpsertCallConnectSettingsDto,
   ): Promise<CallConnectSettings> {
-    // businessId from the request body = LeadBridge savedAccountId (per-account key).
-    // Fall back to workspaceId for legacy callers that don't send businessId yet.
+    // businessId (from request body) = LeadBridge savedAccountId (per-account PK).
+    // Falls back to workspaceId for legacy callers that don't send businessId.
     const businessId = dto.businessId || workspaceId;
 
     let settings = await this.settingsRepo.findOne({
-      where: { workspaceId, businessId },
+      where: { businessId },
     });
 
     // Ownership audit: warn when botNumberE164 is not in tenant_phone_numbers for this workspace.
@@ -100,9 +100,9 @@ export class CallConnectService {
 
     const { businessId: _ignored, ...rest } = dto;
     if (settings) {
-      Object.assign(settings, rest);
+      Object.assign(settings, { workspaceId, ...rest });
     } else {
-      settings = this.settingsRepo.create({ workspaceId, businessId, ...rest });
+      settings = this.settingsRepo.create({ businessId, workspaceId, ...rest });
     }
 
     this.logger.log(
@@ -116,10 +116,9 @@ export class CallConnectService {
     workspaceId: string,
     businessId?: string,
   ): Promise<CallConnectSettings | null> {
-    const effectiveBusinessId = businessId || workspaceId;
-    return this.settingsRepo.findOne({
-      where: { workspaceId, businessId: effectiveBusinessId },
-    });
+    // Prefer per-account row; fall back to workspace-level legacy row
+    const key = businessId || workspaceId;
+    return this.settingsRepo.findOne({ where: { businessId: key } });
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -135,24 +134,23 @@ export class CallConnectService {
     dto: StartCallConnectDto,
     tenantId?: string,
   ): Promise<{ sessionId: string; status: SessionStatus }> {
-    // businessId = LeadBridge savedAccountId (per-account key).
-    // Fall back to workspaceId for legacy callers that don't send businessId.
+    // businessId = LeadBridge savedAccountId (per-account PK key).
+    // Falls back to workspaceId for legacy callers that don't send businessId.
     const businessId = dto.businessId || workspaceId;
 
-    // 1. Load & validate settings — tenant-scoped lookup
-    // Primary: (workspaceId, businessId) — per-account row
-    // Legacy fallback: (workspaceId, workspaceId) — old shared row
+    // 1. Load settings — per-account row by businessId PK
+    // New rows: businessId = savedAccountId; Legacy rows: businessId = workspaceId
     let settings = await this.settingsRepo.findOne({
-      where: { workspaceId, businessId },
+      where: { businessId },
     });
     if (!settings && businessId !== workspaceId) {
-      // Backward compat: legacy row created before multi-tenant migration
+      // Backward compat: legacy row where PK = workspaceId
       settings = await this.settingsRepo.findOne({
-        where: { workspaceId, businessId: workspaceId },
+        where: { businessId: workspaceId },
       });
       if (settings) {
         this.logger.warn(
-          `[startSession] Using legacy workspace-level settings for business=${businessId} — LeadBridge should re-push settings with businessId`,
+          `[startSession] Using legacy workspace-level settings for business=${businessId} — push settings with businessId to fix`,
         );
       }
     }
