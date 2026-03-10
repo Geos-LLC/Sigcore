@@ -60,20 +60,44 @@ variable "container_port" {
   default     = 3002
 }
 
+# --- Database (RDS) ---
+
+variable "db_instance_class" {
+  description = "RDS instance class"
+  type        = string
+  default     = "db.t3.small"
+}
+
+variable "db_password" {
+  description = "RDS PostgreSQL master password"
+  type        = string
+  sensitive   = true
+}
+
+variable "db_username" {
+  description = "RDS PostgreSQL master username"
+  type        = string
+  default     = "sigcore"
+}
+
+variable "db_name" {
+  description = "RDS PostgreSQL database name"
+  type        = string
+  default     = "sigcore"
+}
+
+variable "skip_final_snapshot" {
+  description = "Skip final DB snapshot on destroy"
+  type        = bool
+  default     = true
+}
+
 # --- App ---
 
 variable "callio_backend_url" {
-  description = "LeadBridge (Callio) backend URL for CORS and callbacks"
+  description = "LeadBridge (Callio) backend ALB URL — added to Sigcore CORS allowed origins"
   type        = string
-  default     = "https://sigcore-production.up.railway.app"
-}
-
-# --- Database (external Supabase) ---
-
-variable "database_url" {
-  description = "Supabase session-mode PostgreSQL connection string (port 5432)"
-  type        = string
-  sensitive   = true
+  default     = ""
 }
 
 # --- Encryption ---

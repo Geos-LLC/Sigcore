@@ -9,22 +9,26 @@
 aws_region  = "us-east-1"
 environment = "prod"
 
-# --- Database (Supabase session pooler, port 5432) ---
-database_url = "postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:5432/postgres"
+# --- Database (RDS) ---
+db_password = "your-strong-db-password"
+db_username = "sigcore"
+db_name     = "sigcore"
 
 # --- Encryption ---
-# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# Must match ENCRYPTION_KEY in Railway production
+# Get from Railway: Dashboard > Sigcore > Variables > ENCRYPTION_KEY
 encryption_key = "your-64-char-hex-key"
 
 # --- Service Auth ---
-# Must match SIGCORE_SERVICE_KEY used by LeadBridge
+# Must match SIGCORE_SERVICE_KEY in Railway production
 sigcore_service_key = "your-sigcore-service-key"
 
-# --- Callio (LeadBridge) backend URL ---
-# After deploying LeadBridge, set this to LeadBridge's ALB URL
+# --- LeadBridge backend URL (for CORS) ---
+# After deploying LeadBridge, use: terraform output backend_api_url (from LeadBridge terraform dir)
 callio_backend_url = "http://leadbridge-prod-alb-xxxx.us-east-1.elb.amazonaws.com"
 
 # --- Twilio ---
+# Get from Railway production env vars
 twilio_api_key       = "SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 twilio_api_secret    = "your-twilio-api-secret"
 twilio_twiml_app_sid = "APxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

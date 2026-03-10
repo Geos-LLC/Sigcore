@@ -6,11 +6,9 @@
 #   - ECR repository for backend Docker image
 #   - ECS Fargate cluster + service for backend API
 #   - ALB for backend with health checks
+#   - RDS PostgreSQL database
 #   - Secrets Manager for sensitive env vars
 #   - IAM roles and security groups
-#
-# Note: No RDS (Sigcore uses external Supabase DB)
-#       No S3/CloudFront (API-only service)
 # ============================================================
 
 terraform {
@@ -68,7 +66,7 @@ resource "aws_subnet" "public" {
   tags = { Name = "${local.name_prefix}-public-${var.availability_zones[count.index]}" }
 }
 
-# Private subnets (for ECS tasks)
+# Private subnets (for ECS tasks + RDS)
 resource "aws_subnet" "private" {
   count             = length(var.availability_zones)
   vpc_id            = aws_vpc.main.id
@@ -191,6 +189,70 @@ resource "aws_security_group" "ecs" {
   }
 }
 
+resource "aws_security_group" "rds" {
+  name_prefix = "${local.name_prefix}-rds-"
+  vpc_id      = aws_vpc.main.id
+  description = "RDS security group"
+
+  ingress {
+    description     = "PostgreSQL from ECS"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${local.name_prefix}-rds-sg" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# ============================================================
+# RDS — PostgreSQL Database
+# ============================================================
+
+resource "aws_db_subnet_group" "main" {
+  name       = "${local.name_prefix}-db-subnets"
+  subnet_ids = aws_subnet.private[*].id
+
+  tags = { Name = "${local.name_prefix}-db-subnets" }
+}
+
+resource "aws_db_instance" "main" {
+  identifier     = "${local.name_prefix}-db"
+  engine         = "postgres"
+  engine_version = "15"
+  instance_class = var.db_instance_class
+
+  allocated_storage = 20
+  storage_type      = "gp3"
+
+  db_name  = var.db_name
+  username = var.db_username
+  password = var.db_password
+
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+
+  multi_az            = false
+  publicly_accessible = false
+  skip_final_snapshot = var.skip_final_snapshot
+
+  backup_retention_period = 7
+  storage_encrypted       = true
+
+  tags = { Name = "${local.name_prefix}-db" }
+}
+
 # ============================================================
 # SECRETS MANAGER
 # ============================================================
@@ -204,8 +266,8 @@ resource "aws_secretsmanager_secret" "app_secrets" {
 resource "aws_secretsmanager_secret_version" "app_secrets" {
   secret_id = aws_secretsmanager_secret.app_secrets.id
   secret_string = jsonencode({
-    # Database (external Supabase — session mode, port 5432)
-    DATABASE_URL = var.database_url
+    # Database (AWS RDS — direct connection, no pgBouncer)
+    DATABASE_URL = "postgresql://${var.db_username}:${var.db_password}@${aws_db_instance.main.endpoint}/${var.db_name}"
 
     # Encryption
     ENCRYPTION_KEY = var.encryption_key
@@ -214,9 +276,9 @@ resource "aws_secretsmanager_secret_version" "app_secrets" {
     SIGCORE_SERVICE_KEY = var.sigcore_service_key
 
     # Twilio
-    TWILIO_API_KEY        = var.twilio_api_key
-    TWILIO_API_SECRET     = var.twilio_api_secret
-    TWILIO_TWIML_APP_SID  = var.twilio_twiml_app_sid
+    TWILIO_API_KEY       = var.twilio_api_key
+    TWILIO_API_SECRET    = var.twilio_api_secret
+    TWILIO_TWIML_APP_SID = var.twilio_twiml_app_sid
 
     # Loghub (Grafana log forwarding)
     LOGHUB_URL    = var.loghub_url
@@ -341,23 +403,23 @@ resource "aws_ecs_task_definition" "backend" {
     }]
 
     environment = [
-      { name = "PORT",      value = tostring(var.container_port) },
-      { name = "NODE_ENV",  value = "production" },
-      { name = "BASE_URL",  value = "http://${aws_lb.backend.dns_name}" },
-      { name = "CALLIO_BACKEND_URL", value = var.callio_backend_url },
+      { name = "PORT",                   value = tostring(var.container_port) },
+      { name = "NODE_ENV",               value = "production" },
+      { name = "BASE_URL",               value = "http://${aws_lb.backend.dns_name}" },
+      { name = "CALLIO_BACKEND_URL",     value = var.callio_backend_url },
       { name = "OPENPHONE_API_BASE_URL", value = "https://api.openphone.com/v1" },
     ]
 
     secrets = [
-      { name = "DATABASE_URL",        valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DATABASE_URL::" },
-      { name = "ENCRYPTION_KEY",      valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:ENCRYPTION_KEY::" },
-      { name = "SIGCORE_SERVICE_KEY", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:SIGCORE_SERVICE_KEY::" },
-      { name = "TWILIO_API_KEY",      valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_KEY::" },
-      { name = "TWILIO_API_SECRET",   valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_SECRET::" },
+      { name = "DATABASE_URL",         valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DATABASE_URL::" },
+      { name = "ENCRYPTION_KEY",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:ENCRYPTION_KEY::" },
+      { name = "SIGCORE_SERVICE_KEY",  valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:SIGCORE_SERVICE_KEY::" },
+      { name = "TWILIO_API_KEY",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_KEY::" },
+      { name = "TWILIO_API_SECRET",    valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_API_SECRET::" },
       { name = "TWILIO_TWIML_APP_SID", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:TWILIO_TWIML_APP_SID::" },
-      { name = "LOGHUB_URL",          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_URL::" },
-      { name = "LOGHUB_SOURCE",       valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_SOURCE::" },
-      { name = "LOGHUB_KEY",          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_KEY::" },
+      { name = "LOGHUB_URL",           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_URL::" },
+      { name = "LOGHUB_SOURCE",        valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_SOURCE::" },
+      { name = "LOGHUB_KEY",           valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:LOGHUB_KEY::" },
     ]
 
     logConfiguration = {
@@ -440,3 +502,9 @@ resource "aws_ecs_service" "backend" {
 
   depends_on = [aws_lb_listener.http]
 }
+
+# ============================================================
+# APP DEPLOYMENT — handled by GitHub Actions (.github/workflows/deploy.yml)
+# Push to main branch triggers: Docker build → ECR → ECS force-deploy
+# TypeORM migrations run automatically on container start (migrationsRun: true in production)
+# ============================================================

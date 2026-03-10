@@ -2,7 +2,7 @@ name: Deploy Sigcore
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   workflow_dispatch:
 
 env:

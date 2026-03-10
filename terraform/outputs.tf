@@ -3,7 +3,7 @@
 # ============================================================
 
 output "api_url" {
-  description = "Sigcore API URL (ALB DNS)"
+  description = "Sigcore API URL (ALB DNS) — use this as SIGCORE_API_URL in LeadBridge"
   value       = "http://${aws_lb.backend.dns_name}"
 }
 
@@ -20,6 +20,11 @@ output "ecs_cluster_name" {
 output "ecs_service_name" {
   description = "ECS service name"
   value       = aws_ecs_service.backend.name
+}
+
+output "rds_endpoint" {
+  description = "RDS PostgreSQL endpoint"
+  value       = aws_db_instance.main.endpoint
 }
 
 output "vpc_id" {
