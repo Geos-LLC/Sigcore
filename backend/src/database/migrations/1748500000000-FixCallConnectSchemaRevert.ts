@@ -50,10 +50,17 @@ export class FixCallConnectSchemaRevert1748500000000
     }
 
     // Ensure workspace_id is nullable (original migration set it NOT NULL)
-    await queryRunner.query(`
-      ALTER TABLE "call_connect_settings"
-        ALTER COLUMN "workspace_id" DROP NOT NULL
+    // Guard: only run if workspace_id column exists
+    const [wsColExists] = await queryRunner.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'call_connect_settings' AND column_name = 'workspace_id'
     `);
+    if (wsColExists) {
+      await queryRunner.query(`
+        ALTER TABLE "call_connect_settings"
+          ALTER COLUMN "workspace_id" DROP NOT NULL
+      `);
+    }
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
