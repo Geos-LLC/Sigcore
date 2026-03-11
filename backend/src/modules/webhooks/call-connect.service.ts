@@ -338,7 +338,7 @@ export class CallConnectService {
       const template =
         session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
-        'New lead: {summary}. Press {digit} to connect.';
+        'New lead for {category}. Customer: {customerName}. Press {digit} to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
 
       // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
