@@ -338,7 +338,7 @@ export class CallConnectService {
       const template =
         session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
-        'You have a new lead: {summary}. Press {digit} to connect.';
+        'New lead: {summary}. Press {digit} to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
 
       // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
@@ -356,6 +356,9 @@ export class CallConnectService {
       // This replaces the old "... , " text prefix that caused garbled TTS.
       gather.pause({ length: 3 });
       gather.say(whisper);
+      // Brief pause then repeat instruction so agent doesn't miss it
+      gather.pause({ length: 1 });
+      gather.say(`Press ${digitHint} to connect.`);
 
       response.say('No input received. Goodbye.');
       response.hangup();
@@ -742,7 +745,8 @@ export class CallConnectService {
       method: 'POST',
       timeout: 8,
     });
-    gather.say('Voicemail. Press 1 for personal message, any key for automated.');
+    gather.pause({ length: 2 });
+    gather.say('Voicemail detected. Press 1 to leave a personal message. Press any other key for automated voicemail.');
     // Gather timeout fires the action with Digits="" — handled as automated in choice-action.
     return response.toString();
   }
