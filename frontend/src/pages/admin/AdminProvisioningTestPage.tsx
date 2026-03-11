@@ -14,6 +14,7 @@ import {
   ClipboardList,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
+import type { PhoneNumberOrder } from '../../types';
 
 interface Tenant {
   id: string;
@@ -45,16 +46,7 @@ interface AllocatedNumber {
   messagingServiceSid?: string;
 }
 
-interface Order {
-  id: string;
-  phoneNumber: string;
-  orderType: string;
-  status: string;
-  totalPrice?: number;
-  createdAt: string;
-  completedAt?: string;
-  metadata?: any;
-}
+type Order = PhoneNumberOrder;
 
 type LoadingKey = string;
 
@@ -141,7 +133,7 @@ export default function AdminProvisioningTestPage() {
     setOrdersLoading(true);
     try {
       const all = await adminApi.getWorkspaceOrders();
-      setOrders(all.filter((o: Order) => true)); // all workspace orders for now
+      setOrders(all);
     } catch {
       setOrders([]);
     } finally {
@@ -534,7 +526,7 @@ export default function AdminProvisioningTestPage() {
                   <tr key={order.id} className="hover:bg-gray-50">
                     <td className="py-2.5 font-mono text-gray-900">{order.phoneNumber}</td>
                     <td className="py-2.5">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${order.orderType === 'PURCHASE' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${order.orderType === 'purchase' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700'}`}>
                         {order.orderType}
                       </span>
                     </td>
