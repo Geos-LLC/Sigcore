@@ -329,7 +329,9 @@ export class CallConnectService {
         method: 'POST',
         timeout: gatherTimeout,
       });
-      gather.pause({ length: 2 });
+      // 3s pause ensures the audio channel is fully open before TTS starts.
+      // This replaces the old "... , " text prefix that caused garbled TTS.
+      gather.pause({ length: 3 });
       gather.say(whisper);
 
       response.say('No input received. Goodbye.');
