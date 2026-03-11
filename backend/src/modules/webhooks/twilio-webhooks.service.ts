@@ -148,9 +148,12 @@ export class TwilioWebhooksService {
    * Checks CC settings first, then tenant_phone_numbers.
    */
   async getWorkspaceIdByPhoneNumber(phoneNumber: string): Promise<string | null> {
-    // Check CC settings (maps botNumberE164 → businessId which is the workspaceId)
-    const cc = await this.ccSettingsRepo.findOne({ where: { botNumberE164: phoneNumber } });
-    if (cc) return cc.businessId;
+    // Check CC settings — prefer workspaceId (explicit), fall back to businessId (legacy rows)
+    const cc = await this.ccSettingsRepo.findOne({
+      where: { botNumberE164: phoneNumber },
+      order: { updatedAt: 'DESC' },
+    });
+    if (cc) return cc.workspaceId || cc.businessId;
     // Fallback: tenant_phone_numbers
     const tpn = await this.tenantPhoneNumberRepo.findOne({ where: { phoneNumber } });
     if (tpn) return tpn.workspaceId;
@@ -562,8 +565,12 @@ export class TwilioWebhooksService {
     // through to the legacy callForwardingNumber path — doing so would send calls to an
     // unintended BYO phone. Only fully-configured + enabled settings get forwarded;
     // everything else goes to voicemail.
+    // When multiple CC settings share the same botNumber (e.g., per-account
+    // isolation created new rows while legacy rows remain), prefer the most
+    // recently updated row — it has the freshest agent phone number.
     const ccSettings = await this.ccSettingsRepo.findOne({
       where: { botNumberE164: ourNumber },
+      order: { updatedAt: 'DESC' },
     });
     this.logger.log(
       `[ROUTING] CC settings lookup for botNumberE164=${ourNumber}: ` +

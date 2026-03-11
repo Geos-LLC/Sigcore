@@ -109,7 +109,30 @@ export class CallConnectService {
       `[upsertSettings] workspace=${workspaceId} business=${businessId} bot=${dto.botNumberE164 ?? settings.botNumberE164 ?? 'N/A'} agent=${dto.agentPhoneE164 ?? settings.agentPhoneE164 ?? 'N/A'}`,
     );
 
-    return this.settingsRepo.save(settings);
+    const saved = await this.settingsRepo.save(settings);
+
+    // Clean up stale legacy CC settings: when per-account isolation is active
+    // (businessId != workspaceId), delete any old row where businessId equals
+    // a workspace/tenant ID (legacy pattern) to prevent routing from finding stale data.
+    const botNum = saved.botNumberE164;
+    if (botNum && businessId !== workspaceId) {
+      const stale = await this.settingsRepo.find({
+        where: { botNumberE164: botNum },
+      });
+      for (const row of stale) {
+        // Only remove rows that look like legacy (businessId = some workspace/tenant ID,
+        // not a LeadBridge savedAccountId). Legacy rows have workspaceId NULL or
+        // workspaceId = businessId.
+        if (row.businessId !== businessId && (!row.workspaceId || row.workspaceId === row.businessId)) {
+          this.logger.warn(
+            `[upsertSettings] Deleting stale legacy CC settings: businessId=${row.businessId} botNumberE164=${botNum} agentPhoneE164=${row.agentPhoneE164}`,
+          );
+          await this.settingsRepo.remove(row);
+        }
+      }
+    }
+
+    return saved;
   }
 
   async getSettings(
