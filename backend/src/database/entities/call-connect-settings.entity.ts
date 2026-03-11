@@ -54,7 +54,7 @@ export class CallConnectSettings {
    * Sigcore platform workspace ID resolved from API key.
    * Nullable for backward compat with legacy rows.
    */
-  @Column({ name: 'workspace_id', nullable: true })
+  @Column({ name: 'workspace_id', type: 'varchar', nullable: true })
   workspaceId: string | null;
 
   @Column({ default: false })
