@@ -256,7 +256,7 @@ export class CallConnectService {
     await this.sessionRepo.save(session);
 
     this.logger.log(
-      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode}`,
+      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode} recordAgentLeg=${session.recordAgentLeg}`,
     );
 
     // 6. Emit session.created event to LeadBridge
