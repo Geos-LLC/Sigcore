@@ -353,9 +353,13 @@ export class CallConnectService {
         method: 'POST',
         timeout: gatherTimeout,
       });
-      // 3s pause ensures the audio channel is fully open before TTS starts.
-      // This replaces the old "... , " text prefix that caused garbled TTS.
-      gather.pause({ length: 3 });
+      // Audio primer: a short spoken word forces the TTS engine + phone audio
+      // channel to fully activate before the real message starts.  A silent
+      // <Pause> alone is not enough — some carriers/handsets mute until they
+      // detect actual audio, so the first words of the whisper get swallowed.
+      gather.pause({ length: 1 });
+      gather.say('Attention.');
+      gather.pause({ length: 1 });
       gather.say(whisper);
       // Brief pause then repeat instruction so agent doesn't miss it
       gather.pause({ length: 1 });
