@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsIn } from 'class-validator';
+import { IsString, IsOptional, IsIn, IsBoolean } from 'class-validator';
 
 export class StartCallConnectDto {
   @IsString()
@@ -55,4 +55,9 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsString()
   leadVoicemailMessage?: string;
+
+  /** When true, record the agent leg (whisper + conversation) for debugging. Used by test calls. */
+  @IsOptional()
+  @IsBoolean()
+  recordAgentLeg?: boolean;
 }

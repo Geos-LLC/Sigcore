@@ -242,6 +242,7 @@ export class CallConnectService {
       agentWhisperMessage: dto.agentWhisperMessage || undefined,
       leadGreetingMessage: dto.leadGreetingMessage || undefined,
       leadVoicemailMessage: dto.leadVoicemailMessage || undefined,
+      recordAgentLeg: dto.recordAgentLeg ?? false,
       mode,
       status: SessionStatus.CREATED,
       provider: CallConnectProvider.TWILIO,
@@ -1267,7 +1268,7 @@ export class CallConnectService {
 
     // No machineDetection: it caused ~6s silence on pickup (sync AMD delayed TwiML).
     // Agent voicemail is handled naturally: carrier voicemail → no-answer → tryNextAgentOrFail.
-    const call = await client.calls.create({
+    const callParams: Record<string, unknown> = {
       to: session.agentPhoneE164,
       from: session.fromNumberE164,
       url: `${baseUrl}/api/webhooks/twilio/voice/agent?sessionId=${session.id}`,
@@ -1275,7 +1276,14 @@ export class CallConnectService {
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       timeout: settings.ringTimeoutSeconds,
-    });
+    };
+    // Record the agent leg when requested (test calls) so we can hear the whisper
+    if (session.recordAgentLeg) {
+      (callParams as any).record = true;
+      (callParams as any).recordingStatusCallback = `${baseUrl}/api/webhooks/twilio/recording-status`;
+      this.logger.log(`[AGENT_FIRST] Recording agent leg for session ${session.id}`);
+    }
+    const call = await client.calls.create(callParams as any);
 
     await this.updateSession(session, {
       status: SessionStatus.CALLING_AGENT,

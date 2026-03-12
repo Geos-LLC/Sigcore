@@ -112,6 +112,10 @@ export class CallConnectSession {
   @Column({ name: 'sigcore_conversation_id', type: 'uuid', nullable: true })
   sigcoreConversationId: string;
 
+  /** When true, record the agent leg for debugging (not persisted — set per-session in memory) */
+  @Column({ name: 'record_agent_leg', type: 'boolean', default: false })
+  recordAgentLeg: boolean;
+
   /** Append-only audit trail of state transitions */
   @Column({ type: 'jsonb', default: [] })
   timeline: Array<Record<string, unknown>>;
