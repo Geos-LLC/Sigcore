@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Key, Plus, Trash2, Copy, Check, RefreshCw, Loader2, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Key, Plus, Trash2, Copy, Check, RefreshCw, Loader2, ToggleLeft, ToggleRight, Link } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type { WorkspaceApiKey } from '../../types';
 
@@ -12,6 +12,9 @@ export default function AdminApiKeysPage() {
   const [creating, setCreating] = useState(false);
   const [newKeyFullValue, setNewKeyFullValue] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const apiUrl = import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
 
   const loadApiKeys = async () => {
     setLoading(true);
@@ -82,6 +85,33 @@ export default function AdminApiKeysPage() {
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">{error}</div>
       )}
+
+      {/* API URL */}
+      <div className="card p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2">
+          <Link className="h-5 w-5 text-blue-500" />
+          API URL
+        </h2>
+        <p className="text-sm text-gray-500 mb-3">
+          Tenants use this URL to connect their systems to Sigcore. Include it with the API key when onboarding a new tenant.
+        </p>
+        <div className="flex items-center gap-2">
+          <code className="text-sm font-mono bg-blue-50 border border-blue-200 px-3 py-2 rounded flex-1 text-blue-800 break-all">
+            {apiUrl}
+          </code>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(apiUrl);
+              setCopiedUrl(true);
+              setTimeout(() => setCopiedUrl(false), 2000);
+            }}
+            className={`flex-shrink-0 p-2 rounded ${copiedUrl ? 'text-green-600 bg-green-50' : 'text-blue-600 hover:bg-blue-50'}`}
+            title="Copy API URL"
+          >
+            {copiedUrl ? <Check className="h-5 w-5" /> : <Copy className="h-5 w-5" />}
+          </button>
+        </div>
+      </div>
 
       {/* Create New Key */}
       <div className="card p-6">
