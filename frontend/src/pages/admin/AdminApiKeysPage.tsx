@@ -1,7 +1,29 @@
 import { useState, useEffect } from 'react';
-import { Key, Plus, Trash2, Copy, Check, RefreshCw, Loader2, ToggleLeft, ToggleRight, Link } from 'lucide-react';
+import { Key, Plus, Trash2, Copy, Check, RefreshCw, Loader2, ToggleLeft, ToggleRight, Link, Eye, EyeOff } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type { WorkspaceApiKey } from '../../types';
+
+const STORED_KEYS_KEY = 'workspaceApiFullKeys';
+
+function loadStoredKeys(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(STORED_KEYS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredKey(keyId: string, fullKey: string) {
+  const stored = loadStoredKeys();
+  stored[keyId] = fullKey;
+  localStorage.setItem(STORED_KEYS_KEY, JSON.stringify(stored));
+}
+
+function removeStoredKey(keyId: string) {
+  const stored = loadStoredKeys();
+  delete stored[keyId];
+  localStorage.setItem(STORED_KEYS_KEY, JSON.stringify(stored));
+}
 
 export default function AdminApiKeysPage() {
   const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
@@ -13,6 +35,9 @@ export default function AdminApiKeysPage() {
   const [newKeyFullValue, setNewKeyFullValue] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [fullKeys, setFullKeys] = useState<Record<string, string>>(loadStoredKeys);
+  const [revealedKeyId, setRevealedKeyId] = useState<string | null>(null);
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
 
   const apiUrl = import.meta.env.VITE_API_URL || `${window.location.origin}/api`;
 
@@ -40,6 +65,10 @@ export default function AdminApiKeysPage() {
       setNewKeyFullValue(null);
       const result = await adminApi.createApiKey(newKeyName.trim());
       setNewKeyFullValue(result.fullKey);
+      if (result.apiKey?.id) {
+        saveStoredKey(result.apiKey.id, result.fullKey);
+        setFullKeys(loadStoredKeys());
+      }
       setNewKeyName('');
       await loadApiKeys();
     } catch (err: any) {
@@ -53,8 +82,11 @@ export default function AdminApiKeysPage() {
     if (!confirm('Are you sure you want to delete this API key? This action cannot be undone.')) return;
     try {
       await adminApi.deleteApiKey(keyId);
+      removeStoredKey(keyId);
+      setFullKeys(loadStoredKeys());
       setApiKeys(apiKeys.filter(k => k.id !== keyId));
       setNewKeyFullValue(null);
+      if (revealedKeyId === keyId) setRevealedKeyId(null);
     } catch (err: any) {
       setError(err.response?.data?.message || 'Failed to delete API key');
     }
@@ -172,47 +204,84 @@ export default function AdminApiKeysPage() {
           </div>
         ) : (
           <div className="divide-y divide-gray-200">
-            {apiKeys.map((key) => (
-              <div key={key.id} className="p-4 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <Key className={`h-5 w-5 ${key.active ? 'text-green-500' : 'text-gray-300'}`} />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-gray-900">{key.name}</span>
-                      <span className={`px-2 py-0.5 text-xs rounded-full ${
-                        key.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-                      }`}>
-                        {key.active ? 'Active' : 'Inactive'}
-                      </span>
-                      <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-600">
-                        {key.scope}
-                      </span>
+            {apiKeys.map((key) => {
+              const hasFullKey = !!fullKeys[key.id];
+              const isRevealed = revealedKeyId === key.id;
+              const isCopied = copiedKeyId === key.id;
+
+              return (
+                <div key={key.id} className={`p-4 ${isRevealed ? 'bg-green-50' : ''}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Key className={`h-5 w-5 ${key.active ? 'text-green-500' : 'text-gray-300'}`} />
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-gray-900">{key.name}</span>
+                          <span className={`px-2 py-0.5 text-xs rounded-full ${
+                            key.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {key.active ? 'Active' : 'Inactive'}
+                          </span>
+                          <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-600">
+                            {key.scope}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500 font-mono mt-0.5">{key.keyPreview}</div>
+                        <div className="text-xs text-gray-400 mt-0.5">
+                          Created: {new Date(key.createdAt).toLocaleDateString()}
+                          {key.lastUsedAt && ` · Last used: ${new Date(key.lastUsedAt).toLocaleDateString()}`}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-500 font-mono mt-0.5">{key.keyPreview}</div>
-                    <div className="text-xs text-gray-400 mt-0.5">
-                      Created: {new Date(key.createdAt).toLocaleDateString()}
-                      {key.lastUsedAt && ` · Last used: ${new Date(key.lastUsedAt).toLocaleDateString()}`}
+                    <div className="flex items-center gap-2">
+                      {hasFullKey && (
+                        <button
+                          onClick={() => setRevealedKeyId(isRevealed ? null : key.id)}
+                          className={`p-1 rounded ${isRevealed ? 'text-green-700 hover:bg-green-100' : 'text-gray-400 hover:bg-gray-100'}`}
+                          title={isRevealed ? 'Hide key' : 'Show key'}
+                        >
+                          {isRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      )}
+                      {hasFullKey && (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(fullKeys[key.id]);
+                            setCopiedKeyId(key.id);
+                            setTimeout(() => setCopiedKeyId(null), 2000);
+                          }}
+                          className={`p-1 rounded ${isCopied ? 'text-green-600' : 'text-gray-400 hover:bg-gray-100'}`}
+                          title="Copy full key"
+                        >
+                          {isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleToggle(key.id)}
+                        className={`p-1 rounded hover:bg-gray-100 ${key.active ? 'text-green-500' : 'text-gray-400'}`}
+                        title={key.active ? 'Disable' : 'Enable'}
+                      >
+                        {key.active ? <ToggleRight className="h-5 w-5" /> : <ToggleLeft className="h-5 w-5" />}
+                      </button>
+                      <button
+                        onClick={() => handleDelete(key.id)}
+                        className="p-1 text-red-500 hover:bg-red-50 rounded"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
                     </div>
                   </div>
+                  {isRevealed && hasFullKey && (
+                    <div className="mt-2 ml-8">
+                      <code className="text-xs font-mono bg-white px-2 py-1 rounded border border-green-200 block break-all">
+                        {fullKeys[key.id]}
+                      </code>
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => handleToggle(key.id)}
-                    className={`p-1 rounded hover:bg-gray-100 ${key.active ? 'text-green-500' : 'text-gray-400'}`}
-                    title={key.active ? 'Disable' : 'Enable'}
-                  >
-                    {key.active ? <ToggleRight className="h-5 w-5" /> : <ToggleLeft className="h-5 w-5" />}
-                  </button>
-                  <button
-                    onClick={() => handleDelete(key.id)}
-                    className="p-1 text-red-500 hover:bg-red-50 rounded"
-                    title="Delete"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
