@@ -17,3 +17,7 @@ export * from './call-connect-settings.entity';
 export * from './call-connect-session.entity';
 export * from './sms-message.entity';
 export * from './phone-number-assignment.entity';
+export * from './business.entity';
+export * from './product-workspace.entity';
+export * from './shared-communication-asset.entity';
+export * from './workspace-asset-link.entity';

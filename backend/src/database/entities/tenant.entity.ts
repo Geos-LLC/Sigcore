@@ -48,6 +48,13 @@ export class Tenant {
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 
+  // Cross-app identity references (populated by business-identity module)
+  @Column({ name: 'business_identity_id', nullable: true })
+  businessIdentityId?: string;
+
+  @Column({ name: 'product_workspace_id', nullable: true })
+  productWorkspaceId?: string;
+
   @OneToMany(() => TenantPhoneNumber, (tpn) => tpn.tenant)
   phoneNumbers: TenantPhoneNumber[];
 
