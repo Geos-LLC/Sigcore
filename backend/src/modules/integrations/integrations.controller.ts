@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  NotFoundException,
 } from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
 import { CommunicationService } from '../communication/communication.service';
