@@ -428,7 +428,7 @@ export class IntegrationsService {
     }));
   }
 
-  async getOpenPhoneConversations(workspaceId: string, days: number = 1): Promise<any> {
+  async getOpenPhoneConversations(workspaceId: string, days: number = 1, phoneNumberId?: string): Promise<any> {
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.OPENPHONE },
     });
@@ -439,7 +439,7 @@ export class IntegrationsService {
 
     const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
 
-    const conversations = await this.openPhoneProvider.getRecentConversations(credentials, days);
+    const conversations = await this.openPhoneProvider.getRecentConversations(credentials, days, phoneNumberId);
 
     // Only look up contact names for participants that DON'T already have a conversation name
     const numbersNeedingLookup = conversations
@@ -465,6 +465,21 @@ export class IntegrationsService {
         contactName,
       };
     });
+  }
+
+  /**
+   * Get messages for a specific conversation from OpenPhone (live from API)
+   */
+  async getOpenPhoneMessages(workspaceId: string, phoneNumberId: string, participant: string): Promise<any[]> {
+    const integration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.OPENPHONE },
+    });
+    if (!integration) {
+      throw new NotFoundException('OpenPhone integration not found');
+    }
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+    const messages = await this.openPhoneProvider.getMessages(credentials, 'live', phoneNumberId, participant);
+    return messages;
   }
 
   /**

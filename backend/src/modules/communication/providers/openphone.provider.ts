@@ -586,7 +586,7 @@ export class OpenPhoneProvider implements CommunicationProvider {
    * Single API call: GET /conversations?maxResults=50&updatedAfter=3d
    * No per-conversation message fetching — uses lastActivityAt for sorting.
    */
-  async getRecentConversations(credentialsString: string, days: number = 1): Promise<Array<{
+  async getRecentConversations(credentialsString: string, days: number = 1, filterPhoneNumberId?: string): Promise<Array<{
     participantPhone: string;
     phoneNumberId: string;
     phoneNumber: string;
@@ -623,7 +623,10 @@ export class OpenPhoneProvider implements CommunicationProvider {
       .filter(conv => {
         if (conv.deletedAt) return false;
         const participants = (conv.participants as string[]) || [];
-        return participants.length > 0;
+        if (participants.length === 0) return false;
+        // Filter by phoneNumberId if specified
+        if (filterPhoneNumberId && conv.phoneNumberId !== filterPhoneNumberId) return false;
+        return true;
       })
       .map(conv => {
         const participants = (conv.participants as string[]) || [];

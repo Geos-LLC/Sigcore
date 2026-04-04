@@ -132,10 +132,28 @@ export class IntegrationsController {
   async getOpenPhoneConversations(
     @WorkspaceId() workspaceId: string,
     @Query('days') days?: string,
+    @Query('phoneNumberId') phoneNumberId?: string,
   ) {
-    const daysNum = days ? Math.min(Math.max(parseInt(days, 10) || 1, 1), 5) : 1;
-    const conversations = await this.integrationsService.getOpenPhoneConversations(workspaceId, daysNum);
+    const daysNum = days ? Math.min(Math.max(parseInt(days, 10) || 1, 1), 30) : 1;
+    const conversations = await this.integrationsService.getOpenPhoneConversations(workspaceId, daysNum, phoneNumberId);
     return { data: conversations };
+  }
+
+  /**
+   * Get messages for a specific conversation from OpenPhone (live from API)
+   * GET /integrations/openphone/messages?phoneNumberId=X&participant=+1234567890
+   */
+  @Get('openphone/messages')
+  async getOpenPhoneMessages(
+    @WorkspaceId() workspaceId: string,
+    @Query('phoneNumberId') phoneNumberId: string,
+    @Query('participant') participant: string,
+  ) {
+    if (!phoneNumberId || !participant) {
+      throw new NotFoundException('phoneNumberId and participant are required');
+    }
+    const messages = await this.integrationsService.getOpenPhoneMessages(workspaceId, phoneNumberId, participant);
+    return { data: messages };
   }
 
   /**
