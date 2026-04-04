@@ -1,0 +1,296 @@
+import { CommunicationService } from './communication.service';
+import { ProviderType, IntegrationStatus } from '../../database/entities/communication-integration.entity';
+import { PhoneNumberProvider } from '../../database/entities/tenant-phone-number.entity';
+import { NotFoundException } from '@nestjs/common';
+
+// ---------------------------------------------------------------------------
+// Mock builders (same pattern as call-connect.service.spec.ts)
+// ---------------------------------------------------------------------------
+function buildMockRepo() {
+  return {
+    findOne: jest.fn(),
+    find: jest.fn(),
+    create: jest.fn((data: any) => ({ ...data })),
+    save: jest.fn(async (entity: any) => entity),
+    remove: jest.fn(),
+    count: jest.fn().mockResolvedValue(0),
+    createQueryBuilder: jest.fn(),
+    update: jest.fn(),
+  };
+}
+
+function buildService() {
+  const integrationRepo = buildMockRepo();
+  const tenantIntegrationRepo = buildMockRepo();
+  const conversationRepo = buildMockRepo();
+  const messageRepo = buildMockRepo();
+  const callRepo = buildMockRepo();
+  const senderRepo = buildMockRepo();
+  const tenantPhoneNumberRepo = buildMockRepo();
+  const openPhoneProvider = { sendMessage: jest.fn() };
+  const twilioProvider = { sendMessage: jest.fn() };
+  const whatsappWebProvider = { sendMessage: jest.fn() };
+  const encryptionService = { decrypt: jest.fn().mockReturnValue('decrypted-creds'), encrypt: jest.fn() };
+
+  const service = new CommunicationService(
+    integrationRepo as any,
+    tenantIntegrationRepo as any,
+    conversationRepo as any,
+    messageRepo as any,
+    callRepo as any,
+    senderRepo as any,
+    tenantPhoneNumberRepo as any,
+    openPhoneProvider as any,
+    twilioProvider as any,
+    whatsappWebProvider as any,
+    encryptionService as any,
+  );
+
+  return {
+    service,
+    integrationRepo,
+    tenantIntegrationRepo,
+    conversationRepo,
+    messageRepo,
+    callRepo,
+    senderRepo,
+    tenantPhoneNumberRepo,
+    openPhoneProvider,
+    twilioProvider,
+    encryptionService,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+const WS_ID = 'ws-1';
+const TENANT_A = 'tenant-a';
+const TENANT_B = 'tenant-b';
+
+function makeConversation(overrides: Record<string, any> = {}) {
+  return {
+    id: 'conv-1',
+    workspaceId: WS_ID,
+    tenantId: null,
+    externalId: 'ext-1',
+    provider: ProviderType.OPENPHONE,
+    phoneNumber: '+15551234567',
+    participantPhoneNumber: '+15559876543',
+    participantPhoneNumbers: null,
+    metadata: {},
+    channel: 'sms',
+    contactId: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tenant Isolation Tests
+// ---------------------------------------------------------------------------
+describe('CommunicationService – Tenant Isolation', () => {
+  describe('getConversations', () => {
+    function setupQueryBuilder(conversations: any[], total: number) {
+      const qb = {
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue(conversations),
+        getCount: jest.fn().mockResolvedValue(total),
+        getRawMany: jest.fn().mockResolvedValue([]),
+      };
+      return qb;
+    }
+
+    it('filters by tenantId when tenant-scoped key is used', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const convA = makeConversation({ id: 'conv-a', tenantId: TENANT_A });
+      const qb = setupQueryBuilder([convA], 1);
+      conversationRepo.createQueryBuilder.mockReturnValue(qb);
+      conversationRepo.count.mockResolvedValue(1);
+      conversationRepo.find.mockResolvedValue([convA]);
+      messageRepo.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([]),
+      });
+
+      await service.getConversations(WS_ID, { tenantId: TENANT_A });
+
+      // Verify tenantId filter was applied
+      const andWhereCalls = qb.andWhere.mock.calls.map((c: any) => c[0]);
+      expect(andWhereCalls).toContain('conv.tenantId = :tenantId');
+    });
+
+    it('does NOT filter by tenantId for workspace-scoped keys', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const qb = setupQueryBuilder([], 0);
+      conversationRepo.createQueryBuilder.mockReturnValue(qb);
+      conversationRepo.count.mockResolvedValue(0);
+      messageRepo.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([]),
+      });
+
+      await service.getConversations(WS_ID, { tenantId: null });
+
+      const andWhereCalls = qb.andWhere.mock.calls.map((c: any) => c[0]);
+      expect(andWhereCalls).not.toContain('conv.tenantId = :tenantId');
+    });
+  });
+
+  describe('getMessagesForConversation – tenant enforcement', () => {
+    function mockConvQueryBuilder(conversations: any[]) {
+      return {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue(conversations),
+      };
+    }
+
+    it('returns messages when conversation belongs to the tenant', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+      messageRepo.find.mockResolvedValue([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]);
+
+      const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A);
+      expect(messages).toHaveLength(1);
+      // Verify findOne was called with tenantId
+      expect(conversationRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'conv-1', workspaceId: WS_ID, tenantId: TENANT_A },
+      });
+    });
+
+    it('throws NotFoundException when conversation belongs to a different tenant', async () => {
+      const { service, conversationRepo } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('returns messages without tenant filter for workspace key', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+      messageRepo.find.mockResolvedValue([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]);
+
+      const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', null);
+      expect(messages).toHaveLength(1);
+      // Verify findOne was called without tenantId
+      expect(conversationRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'conv-1', workspaceId: WS_ID },
+      });
+    });
+  });
+
+  describe('getCallsForConversation – tenant enforcement', () => {
+    it('throws NotFoundException when conversation not found for tenant', async () => {
+      const { service, conversationRepo } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getCallsForConversation(WS_ID, 'conv-1', TENANT_A),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('sendMessageToPhoneNumber – tenant tagging', () => {
+    it('tags new Twilio conversation with tenantId', async () => {
+      const { service, conversationRepo, messageRepo, integrationRepo, tenantPhoneNumberRepo, twilioProvider } = buildService();
+
+      // Phone number belongs to tenant as Twilio
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_A,
+      });
+
+      // integrationRepo.findOne is called once: for Twilio at line 710
+      integrationRepo.findOne.mockResolvedValue({
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+        credentialsEncrypted: 'encrypted',
+      });
+
+      // No existing conversation
+      conversationRepo.findOne.mockResolvedValue(null);
+
+      twilioProvider.sendMessage.mockResolvedValue({
+        providerMessageId: 'SM123',
+        status: 'sent',
+      });
+      messageRepo.create.mockImplementation((data: any) => data);
+      messageRepo.save.mockImplementation(async (m: any) => m);
+
+      await service.sendMessageToPhoneNumber(
+        WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+      );
+
+      // Verify conversation was created with tenantId
+      expect(conversationRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A }),
+      );
+    });
+
+    it('backfills tenantId on existing conversation without one', async () => {
+      const { service, conversationRepo, messageRepo, integrationRepo, tenantPhoneNumberRepo, twilioProvider } = buildService();
+
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_A,
+      });
+
+      integrationRepo.findOne.mockResolvedValue({
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+        credentialsEncrypted: 'encrypted',
+      });
+
+      // Existing conversation without tenantId
+      const existingConv = makeConversation({ tenantId: null, provider: ProviderType.TWILIO });
+      conversationRepo.findOne.mockResolvedValue(existingConv);
+
+      twilioProvider.sendMessage.mockResolvedValue({
+        providerMessageId: 'SM456',
+        status: 'sent',
+      });
+      messageRepo.create.mockImplementation((data: any) => data);
+      messageRepo.save.mockImplementation(async (m: any) => m);
+
+      await service.sendMessageToPhoneNumber(
+        WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+      );
+
+      // Verify tenantId was backfilled
+      expect(conversationRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT_A }),
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SyncOptions tenantId
+// ---------------------------------------------------------------------------
+describe('CommunicationService – SyncOptions.tenantId', () => {
+  it('SyncOptions interface accepts tenantId', () => {
+    // Type-level test: just verify the interface shape compiles
+    const options: import('./communication.service').SyncOptions = {
+      tenantId: 'tenant-123',
+      provider: ProviderType.OPENPHONE,
+    };
+    expect(options.tenantId).toBe('tenant-123');
+  });
+});
