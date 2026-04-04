@@ -10,6 +10,7 @@ import { EventsModule } from './modules/events/events.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { ApiModule } from './modules/api/api.module';
 import { EmailModule } from './modules/email/email.module';
+import { BusinessIdentityModule } from './modules/business-identity/business-identity.module';
 import { HealthController } from './health.controller';
 import { DocsController } from './docs.controller';
 import { BootstrapController } from './bootstrap.controller';
@@ -53,6 +54,7 @@ import { ApiKey } from './database/entities/api-key.entity';
     TenantsModule,
     ApiModule,
     EmailModule,
+    BusinessIdentityModule,
   ],
   controllers: [HealthController, DocsController, BootstrapController],
 })
