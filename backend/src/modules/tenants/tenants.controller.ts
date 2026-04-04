@@ -19,7 +19,7 @@ import { PhoneNumberProvisioningService } from './phone-number-provisioning.serv
 import { ApiKeysService } from '../api/api-keys.service';
 import { CommunicationService } from '../communication/communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { TenantStatus } from '../../database/entities/tenant.entity';
 import { IntegrationStatus } from '../../database/entities/communication-integration.entity';
 import {
@@ -177,12 +177,14 @@ export class TenantsController {
   @HttpCode(HttpStatus.ACCEPTED)
   async triggerSync(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Body() options?: { syncMessages?: boolean; provider?: string; limit?: number },
   ) {
     this.communicationService.syncConversations(workspaceId, {
       syncMessages: options?.syncMessages ?? true,
       provider: options?.provider as any,
       limit: options?.limit,
+      tenantId,
     }).catch(err => {
       console.error('Background sync error:', err);
     });

@@ -26,6 +26,10 @@ export class CommunicationConversation {
   @Index()
   workspaceId: string;
 
+  @Column({ name: 'tenant_id', type: 'uuid', nullable: true })
+  @Index()
+  tenantId: string | null;
+
   // Cross-service reference to Callio's contact (plain UUID, no FK)
   @Column({ name: 'contact_id', type: 'uuid', nullable: true })
   @Index()

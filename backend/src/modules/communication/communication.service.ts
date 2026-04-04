@@ -63,6 +63,7 @@ export interface SyncOptions {
   phoneNumberId?: string; // If provided, only sync conversations from this phone line
   onlySavedContacts?: boolean; // If true, only sync conversations where the contact has a name (not just phone number)
   provider?: ProviderType; // If provided, sync from this provider (defaults to first active integration)
+  tenantId?: string | null; // If provided, tag synced conversations with this tenant
 }
 
 @Injectable()
@@ -146,7 +147,7 @@ export class CommunicationService {
 
   async getConversations(
     workspaceId: string,
-    options: { page?: number; limit?: number; search?: string; phoneNumberId?: string; startDate?: Date; endDate?: Date; provider?: 'openphone' | 'twilio' } = {},
+    options: { tenantId?: string | null; page?: number; limit?: number; search?: string; phoneNumberId?: string; startDate?: Date; endDate?: Date; provider?: 'openphone' | 'twilio' } = {},
   ): Promise<{
     conversations: {
       id: string;
@@ -169,7 +170,7 @@ export class CommunicationService {
       totalPages: number;
     };
   }> {
-    const { page = 1, limit = 50, search, phoneNumberId, startDate, endDate, provider } = options;
+    const { tenantId, page = 1, limit = 50, search, phoneNumberId, startDate, endDate, provider } = options;
     const skip = (page - 1) * limit;
 
     // Build query with last message time as a computed column for proper ordering
@@ -185,6 +186,11 @@ export class CommunicationService {
         'last_activity',
       )
       .where('conv.workspaceId = :workspaceId', { workspaceId });
+
+    // Tenant isolation: if request comes from a tenant-scoped API key, only return that tenant's conversations
+    if (tenantId) {
+      queryBuilder.andWhere('conv.tenantId = :tenantId', { tenantId });
+    }
 
     // Log total conversations before filtering for debugging
     const allConvsBeforeFilter = await this.conversationRepo.count({ where: { workspaceId } });
@@ -371,10 +377,11 @@ export class CommunicationService {
   async getMessagesForConversation(
     workspaceId: string,
     conversationId: string,
+    tenantId?: string | null,
   ): Promise<CommunicationMessage[]> {
-    const conversation = await this.conversationRepo.findOne({
-      where: { id: conversationId, workspaceId },
-    });
+    const where: any = { id: conversationId, workspaceId };
+    if (tenantId) where.tenantId = tenantId;
+    const conversation = await this.conversationRepo.findOne({ where });
 
     if (!conversation) {
       throw new NotFoundException('Conversation not found');
@@ -597,11 +604,15 @@ export class CommunicationService {
         });
         if (!conversation) {
           conversation = this.conversationRepo.create({
-            workspaceId, contactId: null,
+            workspaceId, tenantId: tenantId || null, contactId: null,
             externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
             provider: ProviderType.OPENPHONE, phoneNumber: normalizedFrom,
             participantPhoneNumber: normalizedTo, channel: channel as any,
           });
+          await this.conversationRepo.save(conversation);
+        } else if (tenantId && !conversation.tenantId) {
+          // Backfill tenantId on existing conversation
+          conversation.tenantId = tenantId;
           await this.conversationRepo.save(conversation);
         }
 
@@ -610,7 +621,7 @@ export class CommunicationService {
           workspaceId: credentials, channel: channel as ChannelType,
         });
 
-        const enrichedMeta = { ...(metadata || {}), ...(tenantId && { tenantId }) };
+        const enrichedMeta = { ...(metadata || {}) };
         if (Object.keys(enrichedMeta).length) {
           await this.conversationRepo.update(conversation.id, {
             metadata: { ...(conversation.metadata || {}), ...enrichedMeta },
@@ -651,11 +662,14 @@ export class CommunicationService {
           });
           if (!conversation) {
             conversation = this.conversationRepo.create({
-              workspaceId, contactId: null,
+              workspaceId, tenantId: tenantId || null, contactId: null,
               externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
               provider: ProviderType.OPENPHONE, phoneNumber: normalizedFrom,
               participantPhoneNumber: normalizedTo, channel: channel as any,
             });
+            await this.conversationRepo.save(conversation);
+          } else if (tenantId && !conversation.tenantId) {
+            conversation.tenantId = tenantId;
             await this.conversationRepo.save(conversation);
           }
 
@@ -709,11 +723,14 @@ export class CommunicationService {
       });
       if (!conversation) {
         conversation = this.conversationRepo.create({
-          workspaceId, contactId: null,
+          workspaceId, tenantId: tenantId || null, contactId: null,
           externalId: `conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           provider: ProviderType.TWILIO, phoneNumber: normalizedFrom,
           participantPhoneNumber: normalizedTo, channel: channel as any,
         });
+        await this.conversationRepo.save(conversation);
+      } else if (tenantId && !conversation.tenantId) {
+        conversation.tenantId = tenantId;
         await this.conversationRepo.save(conversation);
       }
 
@@ -1100,10 +1117,11 @@ export class CommunicationService {
   async getCallsForConversation(
     workspaceId: string,
     conversationId: string,
+    tenantId?: string | null,
   ): Promise<CommunicationCall[]> {
-    const conversation = await this.conversationRepo.findOne({
-      where: { id: conversationId, workspaceId },
-    });
+    const where: any = { id: conversationId, workspaceId };
+    if (tenantId) where.tenantId = tenantId;
+    const conversation = await this.conversationRepo.findOne({ where });
 
     if (!conversation) {
       throw new NotFoundException('Conversation not found');
@@ -1216,7 +1234,7 @@ export class CommunicationService {
   }
 
   async syncConversations(workspaceId: string, options: SyncOptions = {}): Promise<SyncResult> {
-    const { limit, since, until, syncMessages = true, forceRefresh = false, phoneNumberId, onlySavedContacts = true, provider: providerType } = options;
+    const { limit, since, until, syncMessages = true, forceRefresh = false, phoneNumberId, onlySavedContacts = true, provider: providerType, tenantId } = options;
 
     // Check if sync is already running
     const currentProgress = this.syncProgress.get(workspaceId);
@@ -1492,6 +1510,7 @@ export class CommunicationService {
           if (!conversation) {
             conversation = this.conversationRepo.create({
               workspaceId,
+              tenantId: tenantId || null,
               externalId: convData.externalId,
               provider: integration.provider,
               phoneNumber: convData.phoneNumber,
@@ -1500,6 +1519,10 @@ export class CommunicationService {
               metadata: convData.metadata,
             });
           } else {
+            // Backfill tenantId on existing conversations during sync
+            if (tenantId && !conversation.tenantId) {
+              conversation.tenantId = tenantId;
+            }
             conversation.metadata = convData.metadata;
             conversation.phoneNumber = convData.phoneNumber;
             conversation.participantPhoneNumbers = convData.participantPhoneNumbers;

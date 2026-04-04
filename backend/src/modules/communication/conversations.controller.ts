@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { CommunicationService } from './communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { SendMessageDto } from './dto';
 
 @Controller('conversations')
@@ -25,6 +25,7 @@ export class ConversationsController {
   @Header('Cache-Control', 'no-cache, no-store, must-revalidate')
   async getConversations(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
@@ -37,6 +38,7 @@ export class ConversationsController {
     const limitNum = limit ? parseInt(limit, 10) : 50;
 
     const result = await this.communicationService.getConversations(workspaceId, {
+      tenantId,
       page: pageNum,
       limit: limitNum,
       search,
@@ -53,10 +55,12 @@ export class ConversationsController {
   async getMessages(
     @Param('id') conversationId: string,
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
   ) {
     const messages = await this.communicationService.getMessagesForConversation(
       workspaceId,
       conversationId,
+      tenantId,
     );
     return { data: messages };
   }
@@ -66,10 +70,12 @@ export class ConversationsController {
   async getCalls(
     @Param('id') conversationId: string,
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
   ) {
     const calls = await this.communicationService.getCallsForConversation(
       workspaceId,
       conversationId,
+      tenantId,
     );
     return { data: calls };
   }

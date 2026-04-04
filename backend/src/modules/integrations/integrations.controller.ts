@@ -204,10 +204,11 @@ export class IntegrationsController {
   @HttpCode(HttpStatus.ACCEPTED)
   async syncConversations(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Body() options?: SyncOptions,
   ) {
     // Log the provider being requested
-    console.log(`[SYNC REQUEST] Provider: ${options?.provider || 'undefined (will use first active)'}, Options:`, JSON.stringify(options));
+    console.log(`[SYNC REQUEST] Provider: ${options?.provider || 'undefined (will use first active)'}, tenantId: ${tenantId || 'none'}, Options:`, JSON.stringify(options));
 
     // Start sync in background - don't await
     // This prevents HTTP timeout for long-running syncs
@@ -218,8 +219,9 @@ export class IntegrationsController {
       syncMessages: options?.syncMessages ?? true,
       forceRefresh: options?.forceRefresh ?? false,
       phoneNumberId: options?.phoneNumberId,
-      onlySavedContacts: options?.onlySavedContacts ?? true, // Default to true - only sync saved contacts
-      provider: options?.provider, // Pass provider to sync from specific integration
+      onlySavedContacts: options?.onlySavedContacts ?? true,
+      provider: options?.provider,
+      tenantId,
     }).catch(err => {
       // Log error but don't throw - sync status will reflect the error
       console.error('Background sync error:', err);
