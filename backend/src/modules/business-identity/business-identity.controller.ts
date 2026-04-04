@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { BusinessIdentityService } from './business-identity.service';
+import { BackfillService } from './backfill.service';
 import { IdentityResolutionService } from './identity-resolution.service';
 import { RoutingSelectionService } from './routing-selection.service';
 import { CreateBusinessDto } from './dto/create-business.dto';
@@ -31,6 +32,7 @@ export class BusinessIdentityController {
     private readonly biService: BusinessIdentityService,
     private readonly identityService: IdentityResolutionService,
     private readonly routingService: RoutingSelectionService,
+    private readonly backfillService: BackfillService,
   ) {}
 
   // ═══ Business CRUD ═══
@@ -162,6 +164,25 @@ export class BusinessIdentityController {
   @HttpCode(HttpStatus.OK)
   async selectRouting(@Body() dto: SelectRoutingDto) {
     const result = this.routingService.select(dto.candidates, dto.context);
+    return { data: result };
+  }
+
+  // ═══ Admin / Backfill ═══
+
+  @Get('admin/backfill/preview')
+  async backfillPreview() {
+    const preview = await this.backfillService.preview();
+    return { data: preview };
+  }
+
+  @Post('admin/backfill/run')
+  @HttpCode(HttpStatus.OK)
+  async backfillRun(@Body() dto: { dry_run?: boolean; confidence_threshold?: number; include_review?: boolean }) {
+    const result = await this.backfillService.run({
+      dry_run: dto.dry_run,
+      confidence_threshold: dto.confidence_threshold,
+      include_review: dto.include_review,
+    });
     return { data: result };
   }
 }

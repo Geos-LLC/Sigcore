@@ -5,9 +5,12 @@ import { ProductWorkspace } from '../../database/entities/product-workspace.enti
 import { SharedCommunicationAsset } from '../../database/entities/shared-communication-asset.entity';
 import { WorkspaceAssetLink } from '../../database/entities/workspace-asset-link.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { Workspace } from '../../database/entities/workspace.entity';
 import { BusinessIdentityService } from './business-identity.service';
 import { IdentityResolutionService } from './identity-resolution.service';
 import { RoutingSelectionService } from './routing-selection.service';
+import { BackfillService } from './backfill.service';
 import { BusinessIdentityController } from './business-identity.controller';
 import { SigcoreAuthModule } from '../auth/sigcore-auth.module';
 
@@ -19,6 +22,8 @@ import { SigcoreAuthModule } from '../auth/sigcore-auth.module';
       SharedCommunicationAsset,
       WorkspaceAssetLink,
       Tenant,
+      TenantPhoneNumber,
+      Workspace,
     ]),
     SigcoreAuthModule,
   ],
@@ -27,6 +32,7 @@ import { SigcoreAuthModule } from '../auth/sigcore-auth.module';
     BusinessIdentityService,
     IdentityResolutionService,
     RoutingSelectionService,
+    BackfillService,
   ],
   exports: [
     BusinessIdentityService,
