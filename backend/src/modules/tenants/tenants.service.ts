@@ -135,6 +135,7 @@ export class TenantsService {
       this.tenantRepo.manager.getRepository('ProductWorkspace') as any,
       this.tenantRepo.manager.getRepository('SharedCommunicationAsset') as any,
       this.tenantRepo.manager.getRepository('WorkspaceAssetLink') as any,
+      this.tenantRepo.manager.getRepository('EndpointRoute') as any,
     );
 
     const { business } = await biService.createOrResolveBusiness({

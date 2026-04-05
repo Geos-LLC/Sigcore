@@ -158,11 +158,13 @@ export class TwilioWebhooksService {
       const { Business } = await import('../../database/entities/business.entity');
       const { ProductWorkspace } = await import('../../database/entities/product-workspace.entity');
 
+      const { EndpointRoute } = await import('../../database/entities/endpoint-route.entity');
       const biService = new BusinessIdentityService(
         this.tenantRepo.manager.getRepository(Business),
         this.tenantRepo.manager.getRepository(ProductWorkspace),
         this.tenantRepo.manager.getRepository(SharedCommunicationAsset),
         this.tenantRepo.manager.getRepository(WorkspaceAssetLink),
+        this.tenantRepo.manager.getRepository(EndpointRoute),
       );
       const identityService = new IdentityResolutionService(
         this.tenantRepo.manager.getRepository(SharedCommunicationAsset),

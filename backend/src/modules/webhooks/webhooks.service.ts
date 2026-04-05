@@ -269,11 +269,13 @@ export class WebhooksService {
         const { Business } = await import('../../database/entities/business.entity');
         const { ProductWorkspace } = await import('../../database/entities/product-workspace.entity');
 
+        const { EndpointRoute } = await import('../../database/entities/endpoint-route.entity');
         const biService = new BusinessIdentityService(
           this.conversationRepo.manager.getRepository(Business),
           this.conversationRepo.manager.getRepository(ProductWorkspace),
           this.conversationRepo.manager.getRepository(SharedCommunicationAsset),
           this.conversationRepo.manager.getRepository(WorkspaceAssetLink),
+          this.conversationRepo.manager.getRepository(EndpointRoute),
         );
         const identityService = new IdentityResolutionService(
           this.conversationRepo.manager.getRepository(SharedCommunicationAsset),
