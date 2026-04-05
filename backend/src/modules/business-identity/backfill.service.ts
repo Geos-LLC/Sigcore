@@ -18,6 +18,7 @@ export interface BackfillCandidate {
   normalizedName: string;
   phones: string[];
   externalId: string;
+  productType: string; // resolved from externalId/name pattern
   provider?: string;
 }
 
@@ -68,6 +69,29 @@ export class BackfillService {
 
   // ═══ Name normalization ═══
 
+  /**
+   * Detect which app a tenant belongs to based on externalId and name patterns.
+   */
+  private detectProductType(tenant: Tenant): string {
+    const ext = tenant.externalId || '';
+    const name = (tenant.name || '').toLowerCase();
+
+    // ServiceFlow: numeric external IDs (user.id)
+    if (/^\d+$/.test(ext) || name.includes('serviceflow')) return 'serviceflow';
+
+    // Callio app tenant
+    if (ext.startsWith('callio-') || name === 'callio') return 'callio';
+
+    // LeadBridge app tenant
+    if (ext.startsWith('leadbridge-') || name === 'leadbridge') return 'leadbridge';
+
+    // UUID external IDs are typically LeadBridge business tenants (LB user IDs are UUIDs)
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ext)) return 'leadbridge';
+
+    // Fallback
+    return 'sigcore';
+  }
+
   private normalizeName(name: string): string {
     return (name || '')
       .toLowerCase()
@@ -103,6 +127,7 @@ export class BackfillService {
         normalizedName: this.normalizeName(tenant.name),
         phones,
         externalId: tenant.externalId,
+        productType: this.detectProductType(tenant),
       });
     }
 
@@ -242,7 +267,7 @@ export class BackfillService {
         // 2. Create product workspaces for each member
         for (const member of group.members) {
           const { workspace, created: wsCreated } = await this.biService.registerWorkspace(business.id, {
-            product_type: ProductType.SIGCORE,
+            product_type: member.productType as ProductType,
             workspace_name: member.name,
             external_workspace_id: member.tenantId,
             metadata: { sigcore_workspace_id: member.workspaceId },
