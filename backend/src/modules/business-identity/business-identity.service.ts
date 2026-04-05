@@ -5,6 +5,7 @@ import { Business, BusinessStatus } from '../../database/entities/business.entit
 import { ProductWorkspace, ProductType, ProductWorkspaceStatus } from '../../database/entities/product-workspace.entity';
 import { SharedCommunicationAsset, AssetType, AssetStatus } from '../../database/entities/shared-communication-asset.entity';
 import { WorkspaceAssetLink, LinkStatus } from '../../database/entities/workspace-asset-link.entity';
+import { EndpointRoute } from '../../database/entities/endpoint-route.entity';
 
 @Injectable()
 export class BusinessIdentityService {
@@ -15,6 +16,7 @@ export class BusinessIdentityService {
     @InjectRepository(ProductWorkspace) private readonly workspaceRepo: Repository<ProductWorkspace>,
     @InjectRepository(SharedCommunicationAsset) private readonly assetRepo: Repository<SharedCommunicationAsset>,
     @InjectRepository(WorkspaceAssetLink) private readonly linkRepo: Repository<WorkspaceAssetLink>,
+    @InjectRepository(EndpointRoute) private readonly routeRepo: Repository<EndpointRoute>,
   ) {}
 
   // ═══ Normalization ═══
@@ -273,5 +275,126 @@ export class BusinessIdentityService {
     if (role) where.role = role;
     const links = await this.linkRepo.find({ where, relations: ['asset'] });
     return { workspace, links };
+  }
+
+  // ═══ Endpoint Routes ═══
+
+  async createRoute(tenantId: string, dto: {
+    provider: string; provider_account_id?: string; endpoint_id?: string;
+    phone_number?: string; channel?: string; role?: string; purpose?: string;
+    priority?: number; route_source?: string; metadata?: Record<string, unknown>;
+  }): Promise<{ route: EndpointRoute; created: boolean }> {
+    const phoneNormalized = dto.phone_number ? this.normalizePhone(dto.phone_number) : undefined;
+
+    // Idempotent: check existing active route by (provider, endpoint_id, channel)
+    if (dto.endpoint_id) {
+      const existing = await this.routeRepo.findOne({
+        where: { provider: dto.provider, endpointId: dto.endpoint_id, channel: dto.channel || 'sms', isActive: true },
+      });
+      if (existing) {
+        // Update tenant if different
+        if (existing.tenantId !== tenantId) {
+          existing.tenantId = tenantId;
+          await this.routeRepo.save(existing);
+        }
+        return { route: existing, created: false };
+      }
+    }
+
+    const route = new EndpointRoute();
+    route.tenantId = tenantId;
+    route.provider = dto.provider;
+    route.providerAccountId = dto.provider_account_id;
+    route.endpointId = dto.endpoint_id;
+    route.phoneNumber = phoneNormalized;
+    route.channel = dto.channel || 'sms';
+    route.role = dto.role;
+    route.purpose = dto.purpose;
+    route.priority = dto.priority || 0;
+    route.isActive = true;
+    route.routeSource = dto.route_source || 'manual';
+    route.activatedAt = new Date();
+    route.metadata = dto.metadata;
+
+    const saved = await this.routeRepo.save(route);
+    this.logger.log(`[Route] Created: ${saved.provider}/${saved.endpointId}/${saved.channel} → tenant ${tenantId}`);
+    return { route: saved, created: true };
+  }
+
+  async listRoutes(filters: { tenant_id?: string; provider?: string; is_active?: boolean }): Promise<EndpointRoute[]> {
+    const where: any = {};
+    if (filters.tenant_id) where.tenantId = filters.tenant_id;
+    if (filters.provider) where.provider = filters.provider;
+    if (filters.is_active !== undefined) where.isActive = filters.is_active;
+    else where.isActive = true;
+    return this.routeRepo.find({ where, order: { createdAt: 'DESC' } });
+  }
+
+  async updateRoute(id: string, dto: { is_active?: boolean; role?: string; purpose?: string; priority?: number; metadata?: Record<string, unknown> }): Promise<EndpointRoute> {
+    const route = await this.routeRepo.findOne({ where: { id } });
+    if (!route) throw new NotFoundException(`Route ${id} not found`);
+    if (dto.is_active !== undefined) {
+      route.isActive = dto.is_active;
+      if (!dto.is_active) route.deactivatedAt = new Date();
+    }
+    if (dto.role !== undefined) route.role = dto.role;
+    if (dto.purpose !== undefined) route.purpose = dto.purpose;
+    if (dto.priority !== undefined) route.priority = dto.priority;
+    if (dto.metadata !== undefined) route.metadata = dto.metadata;
+    return this.routeRepo.save(route);
+  }
+
+  async deleteRoute(id: string): Promise<void> {
+    const route = await this.routeRepo.findOne({ where: { id } });
+    if (!route) return;
+    route.isActive = false;
+    route.deactivatedAt = new Date();
+    await this.routeRepo.save(route);
+  }
+
+  /**
+   * Deterministic resolve: given provider context, find the matching route.
+   * Returns exactly 1 route or null. If multiple, returns ambiguous flag.
+   */
+  async resolveRoute(input: {
+    provider: string; endpoint_id?: string; phone_number?: string;
+    channel?: string; provider_account_id?: string;
+  }): Promise<{ route: EndpointRoute | null; step: string | null; ambiguous: boolean; candidates: EndpointRoute[] }> {
+    const channel = input.channel || 'sms';
+
+    // Step A: exact endpoint match
+    if (input.endpoint_id) {
+      const routes = await this.routeRepo.find({
+        where: { provider: input.provider, endpointId: input.endpoint_id, channel, isActive: true },
+      });
+      if (routes.length === 1) return { route: routes[0], step: 'A', ambiguous: false, candidates: [] };
+      if (routes.length > 1) return { route: null, step: 'A', ambiguous: true, candidates: routes };
+    }
+
+    // Step C: provider account match
+    if (input.provider_account_id) {
+      const routes = await this.routeRepo.find({
+        where: { provider: input.provider, providerAccountId: input.provider_account_id, isActive: true },
+        order: { priority: 'DESC' },
+      });
+      if (routes.length === 1) return { route: routes[0], step: 'C', ambiguous: false, candidates: [] };
+      if (routes.length > 1) return { route: null, step: 'C', ambiguous: true, candidates: routes };
+    }
+
+    // Step D: phone fallback (strict — exactly 1)
+    if (input.phone_number) {
+      const normalized = this.normalizePhone(input.phone_number);
+      if (normalized) {
+        const routes = await this.routeRepo.find({
+          where: { phoneNumber: normalized, isActive: true },
+          order: { priority: 'DESC' },
+        });
+        if (routes.length === 1) return { route: routes[0], step: 'D', ambiguous: false, candidates: [] };
+        if (routes.length > 1) return { route: null, step: 'D', ambiguous: true, candidates: routes };
+      }
+    }
+
+    // No match
+    return { route: null, step: null, ambiguous: false, candidates: [] };
   }
 }

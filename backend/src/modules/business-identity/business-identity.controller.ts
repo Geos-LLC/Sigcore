@@ -204,4 +204,77 @@ export class BusinessIdentityController {
     const suggestions = await this.backfillService.suggestCrossAppLinks();
     return { data: suggestions };
   }
+
+  // ═══ Endpoint Routes (Platform Primitive) ═══
+
+  @Post('routes')
+  async createRoute(@Body() dto: {
+    tenant_id: string;
+    provider: string;
+    provider_account_id?: string;
+    endpoint_id?: string;
+    phone_number?: string;
+    channel?: string;
+    role?: string;
+    purpose?: string;
+    priority?: number;
+    route_source?: string;
+    metadata?: Record<string, unknown>;
+  }) {
+    const { route, created } = await this.biService.createRoute(dto.tenant_id, dto);
+    return { data: { ...route, created } };
+  }
+
+  @Get('routes')
+  async listRoutes(
+    @Query('tenant_id') tenantId?: string,
+    @Query('provider') provider?: string,
+    @Query('is_active') isActive?: string,
+  ) {
+    const routes = await this.biService.listRoutes({
+      tenant_id: tenantId,
+      provider,
+      is_active: isActive === undefined ? undefined : isActive === 'true',
+    });
+    return { data: routes };
+  }
+
+  @Get('routes/resolve')
+  async resolveRoute(
+    @Query('provider') provider: string,
+    @Query('endpoint_id') endpointId?: string,
+    @Query('phone_number') phoneNumber?: string,
+    @Query('channel') channel?: string,
+    @Query('provider_account_id') providerAccountId?: string,
+  ) {
+    const result = await this.biService.resolveRoute({
+      provider,
+      endpoint_id: endpointId,
+      phone_number: phoneNumber,
+      channel,
+      provider_account_id: providerAccountId,
+    });
+    return { data: result };
+  }
+
+  @Patch('routes/:id')
+  async updateRoute(
+    @Param('id') id: string,
+    @Body() dto: {
+      is_active?: boolean;
+      role?: string;
+      purpose?: string;
+      priority?: number;
+      metadata?: Record<string, unknown>;
+    },
+  ) {
+    const route = await this.biService.updateRoute(id, dto);
+    return { data: route };
+  }
+
+  @Delete('routes/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteRoute(@Param('id') id: string) {
+    await this.biService.deleteRoute(id);
+  }
 }

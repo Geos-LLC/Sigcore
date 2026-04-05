@@ -7,6 +7,7 @@ import { WorkspaceAssetLink } from '../../database/entities/workspace-asset-link
 import { Tenant } from '../../database/entities/tenant.entity';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
+import { EndpointRoute } from '../../database/entities/endpoint-route.entity';
 import { BusinessIdentityService } from './business-identity.service';
 import { IdentityResolutionService } from './identity-resolution.service';
 import { RoutingSelectionService } from './routing-selection.service';
@@ -24,6 +25,7 @@ import { SigcoreAuthModule } from '../auth/sigcore-auth.module';
       Tenant,
       TenantPhoneNumber,
       Workspace,
+      EndpointRoute,
     ]),
     SigcoreAuthModule,
   ],
