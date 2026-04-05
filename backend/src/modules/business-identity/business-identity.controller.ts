@@ -186,6 +186,13 @@ export class BusinessIdentityController {
     return { data: result };
   }
 
+  @Post('admin/backfill/reset')
+  @HttpCode(HttpStatus.OK)
+  async backfillReset() {
+    const result = await this.backfillService.reset();
+    return { data: result };
+  }
+
   /**
    * Suggest cross-app business links based on name/phone/email similarity.
    * Read-only — does NOT create or modify any records.

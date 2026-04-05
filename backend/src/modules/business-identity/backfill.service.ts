@@ -313,6 +313,31 @@ export class BackfillService {
     return result;
   }
 
+  // ═══ Reset ═══
+
+  async reset(): Promise<{ cleared_tenants: number; deleted_links: number; deleted_workspaces: number; deleted_assets: number; deleted_businesses: number }> {
+    // 1. Clear tenant refs
+    const tenants = await this.tenantRepo.find();
+    let clearedTenants = 0;
+    for (const t of tenants) {
+      if (t.businessIdentityId || t.productWorkspaceId) {
+        t.businessIdentityId = undefined;
+        t.productWorkspaceId = undefined;
+        await this.tenantRepo.save(t);
+        clearedTenants++;
+      }
+    }
+
+    // 2. Delete links, workspaces, assets, businesses (in order)
+    const { affected: links } = await this.tenantRepo.manager.getRepository('WorkspaceAssetLink').delete({});
+    const { affected: workspaces } = await this.productWsRepo.delete({});
+    const { affected: assets } = await this.tenantRepo.manager.getRepository('SharedCommunicationAsset').delete({});
+    const { affected: businesses } = await this.businessRepo.delete({});
+
+    this.logger.log(`[Reset] Cleared ${clearedTenants} tenants, deleted ${links} links, ${workspaces} workspaces, ${assets} assets, ${businesses} businesses`);
+    return { cleared_tenants: clearedTenants, deleted_links: links || 0, deleted_workspaces: workspaces || 0, deleted_assets: assets || 0, deleted_businesses: businesses || 0 };
+  }
+
   // ═══ Cross-app link suggestions (read-only) ═══
 
   /**
