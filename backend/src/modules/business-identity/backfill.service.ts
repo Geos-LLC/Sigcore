@@ -178,15 +178,15 @@ export class BackfillService {
   }
 
   private shouldGroup(a: BackfillCandidate, b: BackfillCandidate): boolean {
-    // Same normalized name
+    // Same normalized name (strong signal)
     if (a.normalizedName && b.normalizedName && a.normalizedName === b.normalizedName) return true;
 
-    // Shared phone number
+    // Shared phone number (strong signal)
     const sharedPhones = a.phones.filter((p) => b.phones.includes(p));
     if (sharedPhones.length > 0) return true;
 
-    // Same workspace ID (different tenants in same Sigcore workspace)
-    if (a.workspaceId === b.workspaceId) return true;
+    // NOTE: Same workspace ID is NOT a grouping signal.
+    // Multi-tenant workspaces have many unrelated tenants sharing one workspaceId.
 
     return false;
   }
@@ -224,12 +224,7 @@ export class BackfillService {
       matchingKeys.push(`phone_match: ${[...new Set(shared)].join(', ')}`);
     }
 
-    // Check same workspace
-    const workspaces = new Set(group.map((c) => c.workspaceId));
-    if (workspaces.size === 1) {
-      confidence += 50;
-      matchingKeys.push(`same_workspace: ${group[0].workspaceId}`);
-    }
+    // NOTE: same workspace is NOT scored — multi-tenant workspaces are common
 
     // Ambiguity checks
     let needsReview = false;
