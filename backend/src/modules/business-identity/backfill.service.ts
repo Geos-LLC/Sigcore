@@ -205,6 +205,7 @@ export class BackfillService {
     dry_run?: boolean;
     confidence_threshold?: number;
     include_review?: boolean;
+    exclude_tenant_ids?: string[];
   }): Promise<BackfillResult> {
     const dryRun = options.dry_run !== false; // Default true
     const threshold = options.confidence_threshold ?? 80;

@@ -203,6 +203,10 @@ export class TenantsService {
     return tenant;
   }
 
+  async saveTenant(tenant: Tenant): Promise<Tenant> {
+    return this.tenantRepo.save(tenant);
+  }
+
   /**
    * Get a tenant by external ID
    */
