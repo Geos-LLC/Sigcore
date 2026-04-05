@@ -114,7 +114,66 @@ export class TenantsService {
 
     await this.tenantRepo.save(tenant);
     this.logger.log(`Created tenant: ${tenant.id} (${tenant.name})`);
+
+    // Register in business identity model (fire-and-forget, non-blocking)
+    this.registerTenantIdentity(tenant).catch((e) =>
+      this.logger.warn(`[BusinessIdentity] Auto-registration for tenant ${tenant.id}: ${e.message}`),
+    );
+
     return tenant;
+  }
+
+  /**
+   * Register a tenant in the business identity model.
+   * Creates a business + product_workspace + links phone numbers as assets.
+   */
+  private async registerTenantIdentity(tenant: Tenant): Promise<void> {
+    // Lazy import to avoid circular dependency
+    const { BusinessIdentityService } = await import('../business-identity/business-identity.service');
+    const biService = new BusinessIdentityService(
+      this.tenantRepo.manager.getRepository('Business') as any,
+      this.tenantRepo.manager.getRepository('ProductWorkspace') as any,
+      this.tenantRepo.manager.getRepository('SharedCommunicationAsset') as any,
+      this.tenantRepo.manager.getRepository('WorkspaceAssetLink') as any,
+    );
+
+    const { business } = await biService.createOrResolveBusiness({
+      name: tenant.name,
+      external_id: `sigcore-tenant-${tenant.id}`,
+    });
+
+    const { workspace } = await biService.registerWorkspace(business.id, {
+      product_type: 'sigcore' as any,
+      workspace_name: tenant.name,
+      external_workspace_id: tenant.id,
+    });
+
+    // Update tenant
+    tenant.businessIdentityId = business.id;
+    tenant.productWorkspaceId = workspace.id;
+    await this.tenantRepo.save(tenant);
+
+    // Register phone numbers as assets
+    const phoneNumbers = await this.tenantRepo.manager
+      .getRepository('TenantPhoneNumber')
+      .find({ where: { tenantId: tenant.id } }) as any[];
+
+    for (const pn of phoneNumbers) {
+      const { asset } = await biService.createOrResolveAsset({
+        asset_type: 'phone' as any,
+        value: pn.phoneNumber,
+        provider: pn.provider,
+        external_asset_id: pn.providerId,
+      });
+      await biService.linkAssetToWorkspace(asset.id, {
+        workspace_id: workspace.id,
+        role: 'sigcore_registered_number',
+        purpose: 'general_inbox',
+        is_primary: pn.isDefault,
+      });
+    }
+
+    this.logger.log(`[BusinessIdentity] Registered tenant ${tenant.id} as business ${business.id}`);
   }
 
   /**
