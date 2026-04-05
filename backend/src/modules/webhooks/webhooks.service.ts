@@ -256,14 +256,68 @@ export class WebhooksService {
       : (Array.isArray(msgData.to) ? msgData.to[0] : msgData.to);
 
     // Resolve tenantId from the phone number so webhooks are sent only to the relevant account
+    // Two-step: try business-identity resolution first, fallback to tenant_phone_numbers
     let resolvedTenantId: string | undefined;
     if (msgData.phoneNumberId) {
-      const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
-        where: { workspaceId, providerId: msgData.phoneNumberId },
-      });
-      if (tenantPhone) {
-        resolvedTenantId = tenantPhone.tenantId;
-        this.logger.log(`Resolved tenantId=${resolvedTenantId} from phoneNumberId=${msgData.phoneNumberId}`);
+      // Step 1: Try business-identity resolution
+      try {
+        const { IdentityResolutionService } = await import('../business-identity/identity-resolution.service');
+        const { RoutingSelectionService } = await import('../business-identity/routing-selection.service');
+        const { SharedCommunicationAsset, AssetType } = await import('../../database/entities/shared-communication-asset.entity');
+        const { WorkspaceAssetLink } = await import('../../database/entities/workspace-asset-link.entity');
+        const { BusinessIdentityService } = await import('../business-identity/business-identity.service');
+        const { Business } = await import('../../database/entities/business.entity');
+        const { ProductWorkspace } = await import('../../database/entities/product-workspace.entity');
+
+        const biService = new BusinessIdentityService(
+          this.conversationRepo.manager.getRepository(Business),
+          this.conversationRepo.manager.getRepository(ProductWorkspace),
+          this.conversationRepo.manager.getRepository(SharedCommunicationAsset),
+          this.conversationRepo.manager.getRepository(WorkspaceAssetLink),
+        );
+        const identityService = new IdentityResolutionService(
+          this.conversationRepo.manager.getRepository(SharedCommunicationAsset),
+          this.conversationRepo.manager.getRepository(WorkspaceAssetLink),
+          biService,
+        );
+        const routingService = new RoutingSelectionService();
+
+        const { candidates } = await identityService.resolve({
+          asset_type: AssetType.PROVIDER_NUMBER,
+          normalized_value: msgData.phoneNumberId,
+          provider: 'openphone',
+          external_asset_id: msgData.phoneNumberId,
+        });
+
+        if (candidates.length > 0) {
+          const { selected } = routingService.select(candidates, {
+            channel: 'sms',
+            provider: 'openphone',
+          });
+          if (selected) {
+            // Find the tenant by external_workspace_id
+            const tenant = await this.conversationRepo.manager
+              .getRepository('Tenant')
+              .findOne({ where: { id: selected.workspace.externalWorkspaceId } }) as any;
+            if (tenant) {
+              resolvedTenantId = tenant.id;
+              this.logger.log(`[Routing] BI resolved tenantId=${resolvedTenantId} for phoneNumberId=${msgData.phoneNumberId} (score=${selected.score})`);
+            }
+          }
+        }
+      } catch (e) {
+        this.logger.debug(`[Routing] BI resolution not available: ${e.message}`);
+      }
+
+      // Step 2: Fallback to tenant_phone_numbers
+      if (!resolvedTenantId) {
+        const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
+          where: { workspaceId, providerId: msgData.phoneNumberId },
+        });
+        if (tenantPhone) {
+          resolvedTenantId = tenantPhone.tenantId;
+          this.logger.log(`[Routing] Fallback: tenantId=${resolvedTenantId} from phoneNumberId=${msgData.phoneNumberId}`);
+        }
       }
     }
 

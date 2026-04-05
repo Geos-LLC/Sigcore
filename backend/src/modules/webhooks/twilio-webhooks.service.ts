@@ -145,18 +145,80 @@ export class TwilioWebhooksService {
 
   /**
    * Resolve workspaceId from a Twilio phone number.
-   * Checks CC settings first, then tenant_phone_numbers.
+   * Two-step resolution via business-identity model, with fallback to legacy lookup.
    */
   async getWorkspaceIdByPhoneNumber(phoneNumber: string): Promise<string | null> {
+    // Step 1: Try business-identity resolution (asset → candidates → best match)
+    try {
+      const { IdentityResolutionService } = await import('../business-identity/identity-resolution.service');
+      const { RoutingSelectionService } = await import('../business-identity/routing-selection.service');
+      const { SharedCommunicationAsset, AssetType } = await import('../../database/entities/shared-communication-asset.entity');
+      const { WorkspaceAssetLink } = await import('../../database/entities/workspace-asset-link.entity');
+      const { BusinessIdentityService } = await import('../business-identity/business-identity.service');
+      const { Business } = await import('../../database/entities/business.entity');
+      const { ProductWorkspace } = await import('../../database/entities/product-workspace.entity');
+
+      const biService = new BusinessIdentityService(
+        this.tenantRepo.manager.getRepository(Business),
+        this.tenantRepo.manager.getRepository(ProductWorkspace),
+        this.tenantRepo.manager.getRepository(SharedCommunicationAsset),
+        this.tenantRepo.manager.getRepository(WorkspaceAssetLink),
+      );
+      const identityService = new IdentityResolutionService(
+        this.tenantRepo.manager.getRepository(SharedCommunicationAsset),
+        this.tenantRepo.manager.getRepository(WorkspaceAssetLink),
+        biService,
+      );
+      const routingService = new RoutingSelectionService();
+
+      const normalized = biService.normalizePhone(phoneNumber);
+      const { candidates } = await identityService.resolve({
+        asset_type: AssetType.PHONE,
+        normalized_value: normalized,
+        provider: 'twilio',
+      });
+
+      if (candidates.length > 0) {
+        const { selected } = routingService.select(candidates, {
+          channel: 'sms',
+          provider: 'twilio',
+        });
+
+        if (selected) {
+          // Map product_workspace back to Sigcore workspaceId
+          // The external_workspace_id for sigcore-type workspaces IS the tenant ID
+          // We need the workspace that the tenant belongs to
+          const tenant = await this.tenantRepo.findOne({
+            where: { id: selected.workspace.externalWorkspaceId },
+          });
+          if (tenant) {
+            this.logger.log(
+              `[Routing] Resolved ${phoneNumber} via business-identity: workspace=${tenant.workspaceId} (score=${selected.score})`,
+            );
+            return tenant.workspaceId;
+          }
+        }
+      }
+    } catch (e) {
+      this.logger.debug(`[Routing] Business-identity resolution not available: ${e.message}`);
+    }
+
+    // Step 2: Fallback to legacy routing
     // Check CC settings — prefer workspaceId (explicit), fall back to businessId (legacy rows)
     const cc = await this.ccSettingsRepo.findOne({
       where: { botNumberE164: phoneNumber },
       order: { updatedAt: 'DESC' },
     });
-    if (cc) return cc.workspaceId || cc.businessId;
+    if (cc) {
+      this.logger.debug(`[Routing] Fallback: CC settings for ${phoneNumber}`);
+      return cc.workspaceId || cc.businessId;
+    }
     // Fallback: tenant_phone_numbers
     const tpn = await this.tenantPhoneNumberRepo.findOne({ where: { phoneNumber } });
-    if (tpn) return tpn.workspaceId;
+    if (tpn) {
+      this.logger.debug(`[Routing] Fallback: tenant_phone_numbers for ${phoneNumber}`);
+      return tpn.workspaceId;
+    }
     return null;
   }
 
