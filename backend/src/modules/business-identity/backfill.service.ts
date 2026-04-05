@@ -6,7 +6,8 @@ import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.e
 import { Workspace } from '../../database/entities/workspace.entity';
 import { Business } from '../../database/entities/business.entity';
 import { ProductWorkspace, ProductType } from '../../database/entities/product-workspace.entity';
-import { AssetType } from '../../database/entities/shared-communication-asset.entity';
+import { SharedCommunicationAsset, AssetType } from '../../database/entities/shared-communication-asset.entity';
+import { WorkspaceAssetLink } from '../../database/entities/workspace-asset-link.entity';
 import { BusinessIdentityService } from './business-identity.service';
 
 // ═══ Types ═══
@@ -328,11 +329,24 @@ export class BackfillService {
       }
     }
 
-    // 2. Delete links, workspaces, assets, businesses (in order)
-    const { affected: links } = await this.tenantRepo.manager.getRepository('WorkspaceAssetLink').delete({});
-    const { affected: workspaces } = await this.productWsRepo.delete({});
-    const { affected: assets } = await this.tenantRepo.manager.getRepository('SharedCommunicationAsset').delete({});
-    const { affected: businesses } = await this.businessRepo.delete({});
+    // 2. Delete links, workspaces, assets, businesses (in dependency order)
+    const linkRepo = this.tenantRepo.manager.getRepository(WorkspaceAssetLink);
+    const assetRepo = this.tenantRepo.manager.getRepository(SharedCommunicationAsset);
+    const allLinks = await linkRepo.find();
+    for (const l of allLinks) await linkRepo.remove(l);
+    const links = allLinks.length;
+
+    const allWs = await this.productWsRepo.find();
+    for (const w of allWs) await this.productWsRepo.remove(w);
+    const workspaces = allWs.length;
+
+    const allAssets = await assetRepo.find();
+    for (const a of allAssets) await assetRepo.remove(a);
+    const assets = allAssets.length;
+
+    const allBiz = await this.businessRepo.find();
+    for (const b of allBiz) await this.businessRepo.remove(b);
+    const businesses = allBiz.length;
 
     this.logger.log(`[Reset] Cleared ${clearedTenants} tenants, deleted ${links} links, ${workspaces} workspaces, ${assets} assets, ${businesses} businesses`);
     return { cleared_tenants: clearedTenants, deleted_links: links || 0, deleted_workspaces: workspaces || 0, deleted_assets: assets || 0, deleted_businesses: businesses || 0 };
