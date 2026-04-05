@@ -322,9 +322,10 @@ export class BackfillService {
     let clearedTenants = 0;
     for (const t of tenants) {
       if (t.businessIdentityId || t.productWorkspaceId) {
-        t.businessIdentityId = undefined;
-        t.productWorkspaceId = undefined;
-        await this.tenantRepo.save(t);
+        await this.tenantRepo.update(t.id, {
+          businessIdentityId: null as any,
+          productWorkspaceId: null as any,
+        });
         clearedTenants++;
       }
     }
