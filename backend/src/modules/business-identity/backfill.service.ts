@@ -105,7 +105,7 @@ export class BackfillService {
 
   async preview(): Promise<BackfillPreview> {
     // 1. Load all tenants with their phone numbers
-    const tenants = await this.tenantRepo.find({ relations: ['phoneNumbers'] });
+    const tenants = await this.tenantRepo.find({ where: { status: 'active' as any }, relations: ['phoneNumbers'] });
     const candidates: BackfillCandidate[] = [];
 
     // Check which tenants are already registered
