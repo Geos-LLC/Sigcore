@@ -25,7 +25,7 @@ import { SelectRoutingDto } from './dto/select-routing.dto';
 import { ProductType } from '../../database/entities/product-workspace.entity';
 import { AssetType } from '../../database/entities/shared-communication-asset.entity';
 
-@Controller('api/v1')
+@Controller('v1')
 @UseGuards(SigcoreAuthGuard)
 export class BusinessIdentityController {
   constructor(
