@@ -48,6 +48,7 @@ just like any future external SaaS customer would be.
 | **Tenant** | Top-level Sigcore customer. The platform boundary. No sub-tenants — everything below is the customer's internal structure. | Auth key |
 | **Provider Connection** | OpenPhone, Twilio, WhatsApp integration | Per tenant |
 | **Communication Endpoint** | Phone number, email, messaging ID | Per tenant + provider |
+| **Endpoint Route** | Maps provider endpoint to tenant for deterministic routing | Per tenant + provider |
 | **Webhook Subscriber** | URL that receives events from the platform | Per tenant |
 | **Conversation** | Thread between endpoint and participant | Per tenant |
 | **Message** | Individual message in a conversation | Per conversation |
@@ -100,6 +101,15 @@ GET    /api/conversations/:id/messages
 POST   /api/messages
 ```
 
+### Endpoint Routes
+```
+POST   /api/v1/routes
+GET    /api/v1/routes
+GET    /api/v1/routes/resolve
+PATCH  /api/v1/routes/:id
+DELETE /api/v1/routes/:id
+```
+
 ### Webhook Subscriptions
 ```
 POST   /api/v1/webhook-subscriptions
@@ -139,10 +149,10 @@ POST   /api/webhooks/twilio/voice/:webhookId
 This is how messages actually get routed. Business identity is NOT involved.
 
 ```
-1. Inbound event arrives at Sigcore (via provider webhook)
-2. Sigcore resolves tenant via tenant_phone_numbers lookup
+1. Provider event arrives (OpenPhone webhook, Twilio webhook, etc.)
+2. Sigcore maps endpoint/phone to tenant (via registered phone numbers, webhook IDs, or provider account mapping)
 3. Sigcore fans out to webhook subscribers scoped to that tenant
-4. Each app receives the event and resolves internally:
+4. App receives the event and resolves internally:
    - SF: communication_endpoint_routes (5-step deterministic pipeline)
    - LB: SavedAccount(accountId) → userId
    - Callio: Sender(phone) → workspaceId
