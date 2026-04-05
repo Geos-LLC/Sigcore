@@ -141,54 +141,18 @@ export class BackfillService {
   }
 
   // ═══ Grouping algorithm ═══
+  //
+  // IMPORTANT: Backfill does NOT merge tenants across apps or within the same app.
+  // Each tenant becomes its own business + product_workspace.
+  //
+  // Cross-app linking (e.g., "SF workspace X and LB workspace Y belong to the same business")
+  // happens later when each app registers itself and explicitly declares its business_id.
+  // Name/phone/email matches are noted in metadata for future suggested linking, but never
+  // auto-merge at the backfill stage.
 
   private groupCandidates(candidates: BackfillCandidate[]): BackfillCandidate[][] {
-    // Union-Find approach: group candidates that share matching keys
-    const parent: Map<number, number> = new Map();
-    const find = (i: number): number => {
-      if (!parent.has(i)) parent.set(i, i);
-      if (parent.get(i) !== i) parent.set(i, find(parent.get(i)!));
-      return parent.get(i)!;
-    };
-    const union = (i: number, j: number) => {
-      parent.set(find(i), find(j));
-    };
-
-    for (let i = 0; i < candidates.length; i++) {
-      parent.set(i, i);
-    }
-
-    for (let i = 0; i < candidates.length; i++) {
-      for (let j = i + 1; j < candidates.length; j++) {
-        if (this.shouldGroup(candidates[i], candidates[j])) {
-          union(i, j);
-        }
-      }
-    }
-
-    // Collect groups
-    const groupMap = new Map<number, BackfillCandidate[]>();
-    for (let i = 0; i < candidates.length; i++) {
-      const root = find(i);
-      if (!groupMap.has(root)) groupMap.set(root, []);
-      groupMap.get(root)!.push(candidates[i]);
-    }
-
-    return Array.from(groupMap.values());
-  }
-
-  private shouldGroup(a: BackfillCandidate, b: BackfillCandidate): boolean {
-    // Same normalized name (strong signal)
-    if (a.normalizedName && b.normalizedName && a.normalizedName === b.normalizedName) return true;
-
-    // Shared phone number (strong signal)
-    const sharedPhones = a.phones.filter((p) => b.phones.includes(p));
-    if (sharedPhones.length > 0) return true;
-
-    // NOTE: Same workspace ID is NOT a grouping signal.
-    // Multi-tenant workspaces have many unrelated tenants sharing one workspaceId.
-
-    return false;
+    // Each tenant = its own group. No merging.
+    return candidates.map((c) => [c]);
   }
 
   // ═══ Confidence scoring ═══
@@ -199,52 +163,9 @@ export class BackfillService {
     needsReview: boolean;
     reviewReason?: string;
   } {
-    if (group.length === 1) {
-      // Single tenant — auto-create as its own business
-      return { confidence: 100, matchingKeys: ['single_tenant'], needsReview: false };
-    }
-
-    let confidence = 0;
-    const matchingKeys: string[] = [];
-
-    // Check name match
-    const names = new Set(group.map((c) => c.normalizedName).filter(Boolean));
-    if (names.size === 1) {
-      confidence += 40;
-      matchingKeys.push(`name_match: "${group[0].name}"`);
-    }
-
-    // Check phone overlap
-    const allPhones = group.flatMap((c) => c.phones);
-    const phoneSet = new Set(allPhones);
-    if (phoneSet.size < allPhones.length) {
-      // At least one shared phone
-      confidence += 30;
-      const shared = allPhones.filter((p, i) => allPhones.indexOf(p) !== i);
-      matchingKeys.push(`phone_match: ${[...new Set(shared)].join(', ')}`);
-    }
-
-    // NOTE: same workspace is NOT scored — multi-tenant workspaces are common
-
-    // Ambiguity checks
-    let needsReview = false;
-    let reviewReason: string | undefined;
-
-    // If only one weak signal
-    if (confidence < 40) {
-      needsReview = false; // Will be skipped entirely
-    } else if (confidence < 80) {
-      needsReview = true;
-      reviewReason = `Partial match (confidence ${confidence}): ${matchingKeys.join('; ')}`;
-    }
-
-    // If names don't match but phones do — suspicious
-    if (names.size > 1 && matchingKeys.some((k) => k.startsWith('phone_match'))) {
-      needsReview = true;
-      reviewReason = `Different names but shared phone: ${[...names].join(', ')}`;
-    }
-
-    return { confidence, matchingKeys, needsReview, reviewReason };
+    // Each group is always a single tenant (no merging).
+    // Confidence is always 100 — each tenant gets its own business.
+    return { confidence: 100, matchingKeys: ['single_tenant'], needsReview: false };
   }
 
   private pickBestName(group: BackfillCandidate[]): string {
@@ -365,5 +286,87 @@ export class BackfillService {
     );
 
     return result;
+  }
+
+  // ═══ Cross-app link suggestions (read-only) ═══
+
+  /**
+   * Suggest which existing businesses/workspaces might belong to the same real-world company.
+   * Based on name/phone/email similarity across DIFFERENT product_workspaces.
+   * Does NOT modify any records — returns suggestions for manual review.
+   */
+  async suggestCrossAppLinks(): Promise<{
+    suggestions: Array<{
+      business_a: { id: string; name: string; product_type: string };
+      business_b: { id: string; name: string; product_type: string };
+      matching_keys: string[];
+      confidence: number;
+    }>;
+  }> {
+    // Get all product workspaces with their businesses and linked assets
+    const workspaces = await this.productWsRepo.find({
+      relations: ['business', 'assetLinks', 'assetLinks.asset'],
+    });
+
+    const suggestions: Array<{
+      business_a: { id: string; name: string; product_type: string };
+      business_b: { id: string; name: string; product_type: string };
+      matching_keys: string[];
+      confidence: number;
+    }> = [];
+
+    // Compare each pair of workspaces from DIFFERENT products
+    for (let i = 0; i < workspaces.length; i++) {
+      for (let j = i + 1; j < workspaces.length; j++) {
+        const a = workspaces[i];
+        const b = workspaces[j];
+
+        // Skip if same product type (within-app matching is not our concern)
+        if (a.productType === b.productType) continue;
+        // Skip if already same business
+        if (a.businessId === b.businessId) continue;
+
+        const matchingKeys: string[] = [];
+        let confidence = 0;
+
+        // Name similarity
+        const nameA = this.normalizeName(a.business?.name || a.workspaceName);
+        const nameB = this.normalizeName(b.business?.name || b.workspaceName);
+        if (nameA && nameB && nameA === nameB) {
+          confidence += 40;
+          matchingKeys.push(`name: "${a.business?.name || a.workspaceName}"`);
+        }
+
+        // Shared phone assets
+        const phonesA = (a.assetLinks || []).filter(l => l.asset?.assetType === 'phone').map(l => l.asset.normalizedValue);
+        const phonesB = (b.assetLinks || []).filter(l => l.asset?.assetType === 'phone').map(l => l.asset.normalizedValue);
+        const sharedPhones = phonesA.filter(p => phonesB.includes(p));
+        if (sharedPhones.length > 0) {
+          confidence += 30;
+          matchingKeys.push(`phone: ${sharedPhones.join(', ')}`);
+        }
+
+        // Shared email assets
+        const emailsA = (a.assetLinks || []).filter(l => l.asset?.assetType === 'email').map(l => l.asset.normalizedValue);
+        const emailsB = (b.assetLinks || []).filter(l => l.asset?.assetType === 'email').map(l => l.asset.normalizedValue);
+        const sharedEmails = emailsA.filter(e => emailsB.includes(e));
+        if (sharedEmails.length > 0) {
+          confidence += 20;
+          matchingKeys.push(`email: ${sharedEmails.join(', ')}`);
+        }
+
+        if (confidence > 0) {
+          suggestions.push({
+            business_a: { id: a.businessId, name: a.business?.name || a.workspaceName, product_type: a.productType },
+            business_b: { id: b.businessId, name: b.business?.name || b.workspaceName, product_type: b.productType },
+            matching_keys: matchingKeys,
+            confidence,
+          });
+        }
+      }
+    }
+
+    suggestions.sort((a, b) => b.confidence - a.confidence);
+    return { suggestions };
   }
 }

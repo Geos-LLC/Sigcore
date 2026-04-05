@@ -185,4 +185,16 @@ export class BusinessIdentityController {
     });
     return { data: result };
   }
+
+  /**
+   * Suggest cross-app business links based on name/phone/email similarity.
+   * Read-only — does NOT create or modify any records.
+   * Returns suggested groupings that an admin can review and apply manually
+   * via the businesses/workspaces CRUD endpoints.
+   */
+  @Get('admin/suggest-links')
+  async suggestLinks() {
+    const suggestions = await this.backfillService.suggestCrossAppLinks();
+    return { data: suggestions };
+  }
 }
