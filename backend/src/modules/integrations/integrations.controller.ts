@@ -142,12 +142,14 @@ export class IntegrationsController {
     @Query('phoneNumberId') phoneNumberId?: string,
     @Query('includeMessages') includeMessages?: string,
     @Query('messageLimit') messageLimit?: string,
+    @Query('skipContactLookup') skipContactLookup?: string,
   ) {
     const daysNum = days ? Math.min(Math.max(parseInt(days, 10) || 1, 1), 30) : 1;
     const withMessages = includeMessages === 'true';
+    const skipLookup = skipContactLookup === 'true';
     const msgLimit = messageLimit ? Math.min(Math.max(parseInt(messageLimit, 10) || 50, 1), 100) : 50;
     const conversations = await this.integrationsService.getOpenPhoneConversations(
-      workspaceId, daysNum, phoneNumberId, withMessages, msgLimit, tenantId,
+      workspaceId, daysNum, phoneNumberId, withMessages, msgLimit, tenantId, skipLookup,
     );
     return { data: conversations };
   }

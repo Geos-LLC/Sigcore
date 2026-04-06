@@ -439,6 +439,7 @@ export class IntegrationsService {
     includeMessages: boolean = false,
     messageLimit: number = 50,
     tenantId?: string | null,
+    skipContactLookup: boolean = false,
   ): Promise<any> {
     // Try tenant-scoped integration first, fall back to workspace-scoped
     let integration = null;
@@ -461,19 +462,23 @@ export class IntegrationsService {
 
     const conversations = await this.openPhoneProvider.getRecentConversations(credentials, days, phoneNumberId);
 
-    // Only look up contact names for participants that DON'T already have a conversation name
-    const numbersNeedingLookup = conversations
-      .filter(c => c.participantPhone && !c.conversationName)
-      .map(c => c.participantPhone);
-
-    this.logger.log(`${conversations.length} conversations, ${numbersNeedingLookup.length} need contact name lookup`);
-
+    // Contact name lookup (skip when caller already has names or wants speed)
     let contactNames = new Map<string, string>();
-    if (numbersNeedingLookup.length > 0) {
-      contactNames = await this.openPhoneProvider.lookupContactNamesByPhone(
-        credentials,
-        numbersNeedingLookup,
-      );
+    if (!skipContactLookup) {
+      const numbersNeedingLookup = conversations
+        .filter(c => c.participantPhone && !c.conversationName)
+        .map(c => c.participantPhone);
+
+      this.logger.log(`${conversations.length} conversations, ${numbersNeedingLookup.length} need contact name lookup`);
+
+      if (numbersNeedingLookup.length > 0) {
+        contactNames = await this.openPhoneProvider.lookupContactNamesByPhone(
+          credentials,
+          numbersNeedingLookup,
+        );
+      }
+    } else {
+      this.logger.log(`${conversations.length} conversations (contact lookup skipped)`);
     }
 
     // Enrich: use conversationName first, then contact lookup, then null
