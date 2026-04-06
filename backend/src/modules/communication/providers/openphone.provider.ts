@@ -414,10 +414,15 @@ export class OpenPhoneProvider implements CommunicationProvider {
 
       this.logger.log(`Fetched ${messages.length} messages for conversation ${conversationId}`);
 
-      // Log any messages with media for debugging
-      const withMedia = messages.filter((m: Record<string, unknown>) => m.media && (m.media as unknown[]).length > 0);
-      if (withMedia.length > 0) {
-        this.logger.log(`Found ${withMedia.length} messages with media attachments`);
+      // Debug: log raw keys and sample message to understand actual OpenPhone response shape
+      if (messages.length > 0) {
+        const sample = messages[0];
+        this.logger.log(`[RAW] Message keys: ${Object.keys(sample).join(', ')}`);
+        // Log any message with empty text (potential MMS)
+        const emptyText = messages.filter((m: Record<string, unknown>) => !m.text && !m.content);
+        if (emptyText.length > 0) {
+          this.logger.log(`[RAW] ${emptyText.length} messages with no text. First one: ${JSON.stringify(emptyText[0]).substring(0, 500)}`);
+        }
       }
 
       return messages.map((msg: Record<string, unknown>) => {
