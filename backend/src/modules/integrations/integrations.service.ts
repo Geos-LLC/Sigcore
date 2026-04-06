@@ -463,7 +463,7 @@ export class IntegrationsService {
     }
 
     // Enrich: use conversationName first, then contact lookup, then null
-    const enriched = conversations.map(conv => {
+    const enriched: any[] = conversations.map(conv => {
       const contactName = conv.conversationName || contactNames.get(conv.participantPhone) || null;
       return { ...conv, contactName };
     });
@@ -500,9 +500,9 @@ export class IntegrationsService {
                       this.openPhoneProvider.getCallTranscript(credentials, call.providerCallId)
                         .catch(() => null),
                     ]);
-                    call.recordingUrl = recordings.recordingUrl || call.recordingUrl;
-                    call.voicemailUrl = recordings.voicemailUrl || call.voicemailUrl;
-                    call.transcription = transcriptResult?.transcript || null;
+                    (call as any).recordingUrl = recordings.recordingUrl || call.recordingUrl;
+                    (call as any).voicemailUrl = recordings.voicemailUrl || call.voicemailUrl;
+                    (call as any).transcription = transcriptResult?.transcript || null;
                   } catch (e) { /* non-fatal */ }
                 }),
               );
