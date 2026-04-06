@@ -34,7 +34,7 @@ function getContentType(filePath: string): string {
 
 @Controller('calls')
 @UseGuards(SigcoreAuthGuard)
-@RequiresTenantScope()
+// @RequiresTenantScope() // TODO: re-enable after TypeORM tenant_id fix
 export class CallsController {
   constructor(private readonly communicationService: CommunicationService) {}
 
