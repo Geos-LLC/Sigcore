@@ -15,6 +15,7 @@ import { extname } from 'path';
 import { CommunicationService } from './communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 
 // Map file extensions to MIME types
 const AUDIO_MIME_TYPES: Record<string, string> = {
@@ -33,6 +34,7 @@ function getContentType(filePath: string): string {
 
 @Controller('calls')
 @UseGuards(SigcoreAuthGuard)
+@RequiresTenantScope()
 export class CallsController {
   constructor(private readonly communicationService: CommunicationService) {}
 

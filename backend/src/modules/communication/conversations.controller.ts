@@ -14,10 +14,12 @@ import {
 import { CommunicationService } from './communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { SendMessageDto } from './dto';
 
 @Controller('conversations')
 @UseGuards(SigcoreAuthGuard)
+@RequiresTenantScope() // All conversation endpoints require tenant-scoped auth
 export class ConversationsController {
   constructor(private readonly communicationService: CommunicationService) {}
 

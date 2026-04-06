@@ -16,6 +16,7 @@ import { CommunicationService } from '../communication/communication.service';
 import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { ProviderType } from '../../database/entities/communication-integration.entity';
 
 export interface SyncOptions {
@@ -132,9 +133,11 @@ export class IntegrationsController {
    * When includeMessages=true, each conversation object includes a `messages` array
    * fetched in parallel (batch-of-5 concurrency). This avoids N+1 client roundtrips.
    */
+  @RequiresTenantScope()
   @Get('openphone/conversations')
   async getOpenPhoneConversations(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Query('days') days?: string,
     @Query('phoneNumberId') phoneNumberId?: string,
     @Query('includeMessages') includeMessages?: string,
@@ -144,7 +147,7 @@ export class IntegrationsController {
     const withMessages = includeMessages === 'true';
     const msgLimit = messageLimit ? Math.min(Math.max(parseInt(messageLimit, 10) || 50, 1), 100) : 50;
     const conversations = await this.integrationsService.getOpenPhoneConversations(
-      workspaceId, daysNum, phoneNumberId, withMessages, msgLimit,
+      workspaceId, daysNum, phoneNumberId, withMessages, msgLimit, tenantId,
     );
     return { data: conversations };
   }
@@ -153,16 +156,18 @@ export class IntegrationsController {
    * Get messages for a specific conversation from OpenPhone (live from API)
    * GET /integrations/openphone/messages?phoneNumberId=X&participant=+1234567890
    */
+  @RequiresTenantScope()
   @Get('openphone/messages')
   async getOpenPhoneMessages(
     @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
     @Query('phoneNumberId') phoneNumberId: string,
     @Query('participant') participant: string,
   ) {
     if (!phoneNumberId || !participant) {
       throw new NotFoundException('phoneNumberId and participant are required');
     }
-    const messages = await this.integrationsService.getOpenPhoneMessages(workspaceId, phoneNumberId, participant);
+    const messages = await this.integrationsService.getOpenPhoneMessages(workspaceId, phoneNumberId, participant, tenantId);
     return { data: messages };
   }
 
@@ -228,6 +233,7 @@ export class IntegrationsController {
 
   // ==================== SYNC ENDPOINTS ====================
 
+  @RequiresTenantScope()
   @Post('sync')
   @HttpCode(HttpStatus.ACCEPTED)
   async syncConversations(
@@ -259,6 +265,7 @@ export class IntegrationsController {
     return { data: { started: true, message: 'Sync started in background. Poll /sync/status for progress.' } };
   }
 
+  @RequiresTenantScope()
   @Post('sync/quick')
   @HttpCode(HttpStatus.OK)
   async quickSyncConversations(
@@ -272,6 +279,7 @@ export class IntegrationsController {
     return { data: result };
   }
 
+  @RequiresTenantScope()
   @Post('sync/contacts')
   @HttpCode(HttpStatus.OK)
   async syncContacts(
@@ -284,6 +292,7 @@ export class IntegrationsController {
     return { data: result };
   }
 
+  @RequiresTenantScope()
   @Post('sync/openphone-contacts')
   @HttpCode(HttpStatus.OK)
   async syncOpenPhoneContacts(

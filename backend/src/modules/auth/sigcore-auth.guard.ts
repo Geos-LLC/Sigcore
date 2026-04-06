@@ -37,6 +37,7 @@ export class SigcoreAuthGuard implements CanActivate {
       // Attach to request for downstream use
       request.workspaceId = workspaceId;
       request.authType = 'service';
+      request.authScopeType = 'workspace'; // service keys are workspace-scoped
       return true;
     }
 
@@ -59,6 +60,8 @@ export class SigcoreAuthGuard implements CanActivate {
       request.apiKeyScope = key.scope;
       request.tenantId = key.tenantId;
       request.authType = 'api_key';
+      // Tenant keys have tenantId set; workspace keys do not
+      request.authScopeType = key.tenantId ? 'tenant' : 'workspace';
       return true;
     }
 

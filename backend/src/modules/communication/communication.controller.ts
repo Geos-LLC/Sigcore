@@ -13,9 +13,11 @@ import { CommunicationService } from './communication.service';
 import { SendMessageDto, InitiateCallDto } from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 
 @Controller('contacts/:contactId')
 @UseGuards(SigcoreAuthGuard)
+@RequiresTenantScope()
 export class CommunicationController {
   constructor(private readonly communicationService: CommunicationService) {}
 

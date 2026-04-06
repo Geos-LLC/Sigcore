@@ -1,6 +1,7 @@
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { CommunicationService } from './communication.service';
 
 export interface AnalyticsQuery {
@@ -12,6 +13,7 @@ export interface AnalyticsQuery {
 
 @Controller('analytics')
 @UseGuards(SigcoreAuthGuard)
+@RequiresTenantScope()
 export class AnalyticsController {
   constructor(private readonly communicationService: CommunicationService) {}
 

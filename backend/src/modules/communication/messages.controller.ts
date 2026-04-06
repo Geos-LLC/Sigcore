@@ -10,6 +10,7 @@ import { CommunicationService } from './communication.service';
 import { CreateMessageDto } from './dto/create-message.dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 
 /**
  * New /messages endpoint that uses senderId instead of fromNumber
@@ -17,6 +18,7 @@ import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
  */
 @Controller('messages')
 @UseGuards(SigcoreAuthGuard)
+@RequiresTenantScope()
 export class MessagesController {
   constructor(private readonly communicationService: CommunicationService) {}
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import {
@@ -187,10 +187,12 @@ export class CommunicationService {
       )
       .where('conv.workspaceId = :workspaceId', { workspaceId });
 
-    // Tenant isolation: if request comes from a tenant-scoped API key, only return that tenant's conversations
-    if (tenantId) {
-      queryBuilder.andWhere('conv.tenantId = :tenantId', { tenantId });
+    // HARD GUARD: tenant isolation is mandatory for communication data
+    if (!tenantId) {
+      this.logger.error(`[SECURITY] getConversations called without tenantId for workspace ${workspaceId}`);
+      throw new ForbiddenException('Tenant scope required for conversation access');
     }
+    queryBuilder.andWhere('conv.tenantId = :tenantId', { tenantId });
 
     // Log total conversations before filtering for debugging
     const allConvsBeforeFilter = await this.conversationRepo.count({ where: { workspaceId } });
@@ -379,8 +381,11 @@ export class CommunicationService {
     conversationId: string,
     tenantId?: string | null,
   ): Promise<CommunicationMessage[]> {
-    const where: any = { id: conversationId, workspaceId };
-    if (tenantId) where.tenantId = tenantId;
+    if (!tenantId) {
+      this.logger.error(`[SECURITY] getMessagesForConversation called without tenantId for workspace ${workspaceId}`);
+      throw new ForbiddenException('Tenant scope required for message access');
+    }
+    const where: any = { id: conversationId, workspaceId, tenantId };
     const conversation = await this.conversationRepo.findOne({ where });
 
     if (!conversation) {
@@ -1119,8 +1124,11 @@ export class CommunicationService {
     conversationId: string,
     tenantId?: string | null,
   ): Promise<CommunicationCall[]> {
-    const where: any = { id: conversationId, workspaceId };
-    if (tenantId) where.tenantId = tenantId;
+    if (!tenantId) {
+      this.logger.error(`[SECURITY] getCallsForConversation called without tenantId for workspace ${workspaceId}`);
+      throw new ForbiddenException('Tenant scope required for call access');
+    }
+    const where: any = { id: conversationId, workspaceId, tenantId };
     const conversation = await this.conversationRepo.findOne({ where });
 
     if (!conversation) {
@@ -1235,6 +1243,12 @@ export class CommunicationService {
 
   async syncConversations(workspaceId: string, options: SyncOptions = {}): Promise<SyncResult> {
     const { limit, since, until, syncMessages = true, forceRefresh = false, phoneNumberId, onlySavedContacts = true, provider: providerType, tenantId } = options;
+
+    // HARD GUARD: tenant isolation is mandatory for sync
+    if (!tenantId) {
+      this.logger.error(`[SECURITY] syncConversations called without tenantId for workspace ${workspaceId}`);
+      throw new ForbiddenException('Tenant scope required for conversation sync');
+    }
 
     // Check if sync is already running
     const currentProgress = this.syncProgress.get(workspaceId);
@@ -1510,7 +1524,7 @@ export class CommunicationService {
           if (!conversation) {
             conversation = this.conversationRepo.create({
               workspaceId,
-              tenantId: tenantId || null,
+              tenantId, // Always set — hard guard above ensures tenantId is present
               externalId: convData.externalId,
               provider: integration.provider,
               phoneNumber: convData.phoneNumber,

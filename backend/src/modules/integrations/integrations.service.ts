@@ -434,10 +434,20 @@ export class IntegrationsService {
     phoneNumberId?: string,
     includeMessages: boolean = false,
     messageLimit: number = 50,
+    tenantId?: string | null,
   ): Promise<any> {
-    const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.OPENPHONE },
-    });
+    // Try tenant-scoped integration first, fall back to workspace-scoped
+    let integration = null;
+    if (tenantId) {
+      integration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+      });
+    }
+    if (!integration) {
+      integration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.OPENPHONE },
+      });
+    }
 
     if (!integration) {
       throw new NotFoundException('OpenPhone integration not found');
@@ -529,10 +539,19 @@ export class IntegrationsService {
   /**
    * Get messages for a specific conversation from OpenPhone (live from API)
    */
-  async getOpenPhoneMessages(workspaceId: string, phoneNumberId: string, participant: string): Promise<any[]> {
-    const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.OPENPHONE },
-    });
+  async getOpenPhoneMessages(workspaceId: string, phoneNumberId: string, participant: string, tenantId?: string | null): Promise<any[]> {
+    // Try tenant-scoped integration first, fall back to workspace-scoped
+    let integration = null;
+    if (tenantId) {
+      integration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+      });
+    }
+    if (!integration) {
+      integration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.OPENPHONE },
+      });
+    }
     if (!integration) {
       throw new NotFoundException('OpenPhone integration not found');
     }
