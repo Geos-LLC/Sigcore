@@ -19,13 +19,13 @@ export class ApiKey {
   @Index()
   workspaceId: string;
 
-  @Column({ name: 'tenant_id', nullable: true })
-  @Index()
-  tenantId: string | null;
-
-  @ManyToOne(() => Tenant, { onDelete: 'CASCADE', nullable: true })
+  @ManyToOne(() => Tenant, { onDelete: 'CASCADE', nullable: true, eager: false })
   @JoinColumn({ name: 'tenant_id' })
   tenant?: Tenant;
+
+  @Column({ name: 'tenant_id', nullable: true, insert: true, update: true })
+  @Index()
+  tenantId: string | null;
 
   @Column({ type: 'varchar', length: 20, default: 'workspace' })
   scope: 'workspace' | 'tenant';

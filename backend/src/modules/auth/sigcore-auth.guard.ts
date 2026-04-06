@@ -60,19 +60,34 @@ export class SigcoreAuthGuard implements CanActivate {
       request.apiKeyScope = key.scope;
       request.authType = 'api_key';
 
-      // Resolve tenantId: direct column first, then relation, then scope-based lookup
+      // Resolve tenantId: column value, or repair from tenant table if scope='tenant' but column is null
       let tenantId = key.tenantId;
       if (!tenantId && key.scope === 'tenant') {
-        // TypeORM ManyToOne relation may not populate tenantId column on findOne
-        // Reload with relation to get the actual tenant_id
-        const reloaded = await this.apiKeyRepo.findOne({
-          where: { id: key.id },
-          select: ['id', 'tenantId', 'workspaceId', 'scope'],
-          loadEagerRelations: false,
-        });
-        tenantId = reloaded?.tenantId || null;
-        if (!tenantId) {
-          console.warn(`[AUTH] Tenant-scoped key ${key.id} has null tenantId after reload`);
+        // TypeORM bug: ManyToOne + Column on same DB column can leave tenantId null after save
+        // Look up the correct tenantId from the tenant table by finding which tenant owns this key
+        try {
+          const result = await this.apiKeyRepo.query(
+            `SELECT tenant_id FROM api_keys WHERE id = $1`, [key.id]
+          );
+          tenantId = result?.[0]?.tenant_id || null;
+
+          // If still null, find tenant by checking the tenant_api_keys relationship
+          if (!tenantId) {
+            const tenantResult = await this.apiKeyRepo.query(
+              `SELECT t.id FROM tenants t JOIN api_keys ak ON ak.workspace_id = t.workspace_id WHERE ak.id = $1 AND ak.scope = 'tenant' LIMIT 1`,
+              [key.id]
+            );
+            if (tenantResult?.[0]?.id) {
+              tenantId = tenantResult[0].id;
+              // Repair the key for future requests
+              await this.apiKeyRepo.query(
+                `UPDATE api_keys SET tenant_id = $1 WHERE id = $2`, [tenantId, key.id]
+              );
+              console.log(`[AUTH] Repaired tenant_id on key ${key.id} → ${tenantId}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`[AUTH] Failed to resolve tenantId for key ${key.id}: ${e.message}`);
         }
       }
       request.tenantId = tenantId;

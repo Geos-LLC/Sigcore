@@ -79,9 +79,20 @@ export class ApiKeysService {
       active: true,
     });
 
-    await this.apiKeyRepository.save(apiKey);
+    const saved = await this.apiKeyRepository.save(apiKey);
 
-    return { apiKey, key };
+    // Ensure tenant_id is persisted (TypeORM ManyToOne can nullify the column)
+    if (tenantId && !saved.tenantId) {
+      await this.apiKeyRepository
+        .createQueryBuilder()
+        .update()
+        .set({ tenantId })
+        .where('id = :id', { id: saved.id })
+        .execute();
+      saved.tenantId = tenantId;
+    }
+
+    return { apiKey: saved, key };
   }
 
   async getTenantApiKeys(workspaceId: string, tenantId: string): Promise<ApiKey[]> {
