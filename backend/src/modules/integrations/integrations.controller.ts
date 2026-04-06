@@ -153,6 +153,26 @@ export class IntegrationsController {
   }
 
   /**
+   * Full sync: fetch ALL conversations from OpenPhone (paginated, parallel per phone number).
+   * Includes messages + calls when includeMessages=true.
+   * GET /integrations/openphone/conversations/all?includeMessages=true&messageLimit=50
+   */
+  @Get('openphone/conversations/all')
+  async getAllOpenPhoneConversations(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+    @Query('includeMessages') includeMessages?: string,
+    @Query('messageLimit') messageLimit?: string,
+  ) {
+    const withMessages = includeMessages === 'true';
+    const msgLimit = messageLimit ? Math.min(Math.max(parseInt(messageLimit, 10) || 50, 1), 100) : 50;
+    const conversations = await this.integrationsService.getAllOpenPhoneConversations(
+      workspaceId, withMessages, msgLimit, tenantId,
+    );
+    return { data: conversations };
+  }
+
+  /**
    * Get messages for a specific conversation from OpenPhone (live from API)
    * GET /integrations/openphone/messages?phoneNumberId=X&participant=+1234567890
    */

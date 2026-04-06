@@ -541,6 +541,138 @@ export class IntegrationsService {
   }
 
   /**
+   * Full sync: fetch ALL conversations from OpenPhone, parallel per phone number.
+   * Uses the paginated getConversations() which fetches all pages sequentially per number,
+   * but runs all phone numbers in parallel.
+   */
+  async getAllOpenPhoneConversations(
+    workspaceId: string,
+    includeMessages: boolean = false,
+    messageLimit: number = 50,
+    tenantId?: string | null,
+  ): Promise<any[]> {
+    // Resolve credentials
+    let integration = null;
+    if (tenantId) {
+      integration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+      });
+    }
+    if (!integration) {
+      integration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.OPENPHONE },
+      });
+    }
+    if (!integration) {
+      throw new NotFoundException('OpenPhone integration not found');
+    }
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+
+    // Get all phone numbers
+    const phoneNumberMap = await this.openPhoneProvider.getPhoneNumbersFromCredentials(credentials);
+    const phoneIds = Array.from(phoneNumberMap.keys());
+    this.logger.log(`Full sync: fetching ALL conversations for ${phoneIds.length} phone numbers in parallel`);
+
+    // Fetch conversations for all phone numbers in parallel
+    const results = await Promise.allSettled(
+      phoneIds.map(pnId =>
+        this.openPhoneProvider.getConversations(credentials, undefined, pnId)
+          .catch(e => { this.logger.warn(`Failed to fetch conversations for ${pnId}: ${e.message}`); return []; })
+      ),
+    );
+
+    // Merge all conversations
+    let allConvs: any[] = [];
+    for (const result of results) {
+      if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+        for (const conv of result.value) {
+          const meta = conv.metadata as Record<string, unknown> || {};
+          const phoneInfo = phoneNumberMap.get(meta.phoneNumberId as string);
+          allConvs.push({
+            participantPhone: conv.participantPhoneNumber,
+            phoneNumberId: conv.metadata?.phoneNumberId,
+            phoneNumber: conv.phoneNumber || phoneInfo?.number || '',
+            phoneNumberName: phoneInfo?.name || '',
+            lastMessageAt: conv.lastMessageAt,
+            conversationName: conv.metadata?.conversationName,
+            contactName: null, // Will be enriched below
+            externalId: conv.externalId,
+          });
+        }
+      }
+    }
+
+    // Deduplicate by participant+endpoint
+    const seen = new Set<string>();
+    allConvs = allConvs.filter(c => {
+      const key = `${c.phoneNumber}:${c.participantPhone}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    this.logger.log(`Full sync: ${allConvs.length} unique conversations across ${phoneIds.length} phone numbers`);
+
+    // Enrich with contact names (batch lookup from contacts)
+    const numbersToLookup = allConvs
+      .filter(c => c.participantPhone && !c.conversationName)
+      .map(c => c.participantPhone);
+
+    if (numbersToLookup.length > 0) {
+      try {
+        const contactNames = await this.openPhoneProvider.lookupContactNamesByPhone(credentials, numbersToLookup);
+        for (const conv of allConvs) {
+          const name = conv.conversationName || contactNames.get(conv.participantPhone) || null;
+          conv.contactName = name;
+        }
+        this.logger.log(`Full sync: enriched ${contactNames.size} contact names`);
+      } catch (e) {
+        this.logger.warn(`Full sync: contact name lookup failed: ${e.message}`);
+      }
+    }
+
+    // Sort by most recent first
+    allConvs.sort((a, b) => {
+      const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+      const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    // Include messages + calls if requested (parallel batch-of-5)
+    if (includeMessages) {
+      const BATCH_SIZE = 5;
+      this.logger.log(`Full sync: fetching messages+calls for ${allConvs.length} conversations (batch-of-${BATCH_SIZE})`);
+
+      for (let i = 0; i < allConvs.length; i += BATCH_SIZE) {
+        const batch = allConvs.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.allSettled(
+          batch.map(async (conv) => {
+            if (!conv.participantPhone || !conv.phoneNumberId) return { messages: [], calls: [] };
+            const [msgs, calls] = await Promise.all([
+              this.openPhoneProvider.getMessages(credentials, 'live', conv.phoneNumberId, conv.participantPhone)
+                .catch(() => []),
+              this.openPhoneProvider.getCallsForParticipant(credentials, conv.participantPhone, conv.phoneNumberId)
+                .catch(() => []),
+            ]);
+            return { messages: msgs.slice(0, messageLimit), calls };
+          }),
+        );
+        batchResults.forEach((result, idx) => {
+          const data = result.status === 'fulfilled' ? result.value : { messages: [], calls: [] };
+          batch[idx].messages = data.messages;
+          batch[idx].calls = data.calls;
+        });
+      }
+
+      const totalMsgs = allConvs.reduce((sum, c) => sum + (c.messages?.length || 0), 0);
+      const totalCalls = allConvs.reduce((sum, c) => sum + (c.calls?.length || 0), 0);
+      this.logger.log(`Full sync: ${totalMsgs} messages + ${totalCalls} calls`);
+    }
+
+    return allConvs;
+  }
+
+  /**
    * Get messages for a specific conversation from OpenPhone (live from API)
    */
   async getOpenPhoneMessages(workspaceId: string, phoneNumberId: string, participant: string, tenantId?: string | null): Promise<any[]> {
