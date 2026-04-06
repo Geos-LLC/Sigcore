@@ -7,7 +7,9 @@ export const REQUIRES_TENANT_SCOPE_KEY = 'requiresTenantScope';
  * Guard that enforces tenant-scoped auth for communication data APIs.
  * Blocks workspace-scoped keys from accessing tenant-isolated data.
  *
- * Use with @RequiresTenantScope() decorator on controller methods.
+ * IMPORTANT: This guard must run AFTER SigcoreAuthGuard (which sets request.tenantId).
+ * It is registered as a global guard via APP_GUARD to ensure correct ordering.
+ * Use @RequiresTenantScope() decorator to mark endpoints that need tenant scope.
  */
 @Injectable()
 export class RequireTenantScopeGuard implements CanActivate {
@@ -29,7 +31,6 @@ export class RequireTenantScopeGuard implements CanActivate {
       const method = request.method;
       const url = request.url;
       const workspaceId = request.workspaceId;
-      // Audit log: blocked workspace-scoped access to tenant data
       console.warn(
         `[TENANT_SCOPE_BLOCKED] ${method} ${url} | workspaceId=${workspaceId} | tenantId=${tenantId || 'null'} | authScopeType=${authScopeType || 'unknown'}`,
       );
