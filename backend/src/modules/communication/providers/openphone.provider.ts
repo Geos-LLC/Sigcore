@@ -31,6 +31,7 @@ interface PhoneNumberInfo {
   id: string;
   number: string;
   name?: string;
+  symbol?: string | null;
   capabilities?: { sms: boolean; voice: boolean; mms: boolean };
 }
 
@@ -152,6 +153,7 @@ export class OpenPhoneProvider implements CommunicationProvider {
           id: pn.id,
           number: pn.number || pn.phoneNumber,
           name: name,
+          symbol: pn.symbol || null,
           capabilities: { sms: smsEnabled, voice: voiceEnabled, mms: false },
         });
         this.logger.log(`Phone number: ${pn.id} -> ${name} (${pn.number}) sms=${smsEnabled} voice=${voiceEnabled}`);

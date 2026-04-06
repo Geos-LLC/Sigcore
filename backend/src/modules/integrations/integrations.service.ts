@@ -427,6 +427,7 @@ export class IntegrationsService {
       id: pn.id,
       number: pn.number,
       name: pn.name,
+      symbol: pn.symbol || null,
       capabilities: pn.capabilities,
     }));
   }
@@ -953,6 +954,7 @@ export class IntegrationsService {
       id: pn.id,
       number: pn.number,
       name: pn.name,
+      symbol: pn.symbol || null,
       capabilities: pn.capabilities,
     }));
   }
