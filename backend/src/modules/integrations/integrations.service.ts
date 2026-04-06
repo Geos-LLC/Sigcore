@@ -486,6 +486,28 @@ export class IntegrationsService {
                 credentials, conv.participantPhone, conv.phoneNumberId,
               ).catch(e => { this.logger.warn(`Calls error for ${conv.participantPhone}: ${e.message}`); return []; }),
             ]);
+
+            // Enrich calls with recordings + transcripts (parallel, batch-of-3)
+            for (let ci = 0; ci < calls.length; ci += 3) {
+              const callBatch = calls.slice(ci, ci + 3);
+              await Promise.allSettled(
+                callBatch.map(async (call) => {
+                  if (!call.providerCallId) return;
+                  try {
+                    const [recordings, transcriptResult] = await Promise.all([
+                      this.openPhoneProvider.getCallRecordings(credentials, call.providerCallId)
+                        .catch(() => ({ recordingUrl: null, voicemailUrl: null })),
+                      this.openPhoneProvider.getCallTranscript(credentials, call.providerCallId)
+                        .catch(() => null),
+                    ]);
+                    call.recordingUrl = recordings.recordingUrl || call.recordingUrl;
+                    call.voicemailUrl = recordings.voicemailUrl || call.voicemailUrl;
+                    call.transcription = transcriptResult?.transcript || null;
+                  } catch (e) { /* non-fatal */ }
+                }),
+              );
+            }
+
             return { messages: msgs.slice(0, messageLimit), calls };
           }),
         );
