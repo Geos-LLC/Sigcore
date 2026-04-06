@@ -58,10 +58,25 @@ export class SigcoreAuthGuard implements CanActivate {
 
       request.workspaceId = key.workspaceId;
       request.apiKeyScope = key.scope;
-      request.tenantId = key.tenantId;
       request.authType = 'api_key';
-      // Tenant keys have tenantId set; workspace keys do not
-      request.authScopeType = key.tenantId ? 'tenant' : 'workspace';
+
+      // Resolve tenantId: direct column first, then relation, then scope-based lookup
+      let tenantId = key.tenantId;
+      if (!tenantId && key.scope === 'tenant') {
+        // TypeORM ManyToOne relation may not populate tenantId column on findOne
+        // Reload with relation to get the actual tenant_id
+        const reloaded = await this.apiKeyRepo.findOne({
+          where: { id: key.id },
+          select: ['id', 'tenantId', 'workspaceId', 'scope'],
+          loadEagerRelations: false,
+        });
+        tenantId = reloaded?.tenantId || null;
+        if (!tenantId) {
+          console.warn(`[AUTH] Tenant-scoped key ${key.id} has null tenantId after reload`);
+        }
+      }
+      request.tenantId = tenantId;
+      request.authScopeType = (tenantId || key.scope === 'tenant') ? 'tenant' : 'workspace';
       return true;
     }
 
