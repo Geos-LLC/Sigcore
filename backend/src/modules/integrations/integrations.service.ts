@@ -10,6 +10,7 @@ import {
 } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
+import { ContactIdentity } from '../../database/entities/contact-identity.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
@@ -56,6 +57,8 @@ export class IntegrationsService {
     private tenantIntegrationRepo: Repository<TenantIntegration>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
+    @InjectRepository(ContactIdentity)
+    private contactIdentityRepo: Repository<ContactIdentity>,
     private encryptionService: EncryptionService,
     private openPhoneProvider: OpenPhoneProvider,
     private twilioProvider: TwilioProvider,
@@ -558,6 +561,67 @@ export class IntegrationsService {
     const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
     const messages = await this.openPhoneProvider.getMessages(credentials, 'live', phoneNumberId, participant);
     return messages;
+  }
+
+  /**
+   * Bulk lookup contact names by phone numbers using Sigcore's stored contact_identities.
+   * Fast DB query — no OpenPhone API pagination needed.
+   */
+  async lookupContactNamesByPhone(
+    workspaceId: string,
+    phoneNumbers: string[],
+  ): Promise<Record<string, string>> {
+    const result: Record<string, string> = {};
+    if (!phoneNumbers.length) return result;
+
+    // Normalize to last 10 digits for matching
+    const normalize = (ph: string) => ph.replace(/\D/g, '').slice(-10);
+    const normalizedMap = new Map<string, string>(); // normalized → original
+    for (const ph of phoneNumbers) {
+      normalizedMap.set(normalize(ph), ph);
+    }
+
+    // Query contact_identities by workspace + channel=sms + identity LIKE patterns
+    try {
+      const identities = await this.contactIdentityRepo
+        .createQueryBuilder('ci')
+        .where('ci.workspaceId = :workspaceId', { workspaceId })
+        .andWhere('ci.display IS NOT NULL')
+        .getMany();
+
+      for (const ci of identities) {
+        const normalized = normalize(ci.identity);
+        const original = normalizedMap.get(normalized);
+        if (original && ci.display) {
+          result[original] = ci.display;
+        }
+      }
+      this.logger.log(`Contact identity lookup: ${Object.keys(result).length} names from ${identities.length} identities for ${phoneNumbers.length} phones`);
+    } catch (e) {
+      this.logger.warn(`Contact identity lookup failed: ${e.message}`);
+    }
+
+    // Fallback: for phones not found in contact_identities, try OpenPhone live lookup
+    const missing = phoneNumbers.filter(ph => !result[ph]);
+    if (missing.length > 0) {
+      try {
+        const integration = await this.integrationRepo.findOne({
+          where: { workspaceId, provider: ProviderType.OPENPHONE },
+        });
+        if (integration) {
+          const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+          const liveNames = await this.openPhoneProvider.lookupContactNamesByPhone(credentials, missing);
+          for (const [phone, name] of liveNames) {
+            result[phone] = name;
+          }
+          this.logger.log(`OpenPhone live lookup: ${liveNames.size} additional names for ${missing.length} phones`);
+        }
+      } catch (e) {
+        this.logger.warn(`OpenPhone live lookup failed: ${e.message}`);
+      }
+    }
+
+    return result;
   }
 
   /**

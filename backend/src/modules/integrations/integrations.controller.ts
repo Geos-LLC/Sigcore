@@ -172,6 +172,22 @@ export class IntegrationsController {
   }
 
   /**
+   * Bulk lookup contact names by phone numbers.
+   * Uses Sigcore's stored contact_identities table (fast DB lookup, no OpenPhone API pagination).
+   * POST /integrations/openphone/contact-names
+   * Body: { phoneNumbers: ["+14159186116", "+12105510387"] }
+   */
+  @Post('openphone/contact-names')
+  @HttpCode(HttpStatus.OK)
+  async lookupContactNames(
+    @WorkspaceId() workspaceId: string,
+    @Body() dto: { phoneNumbers: string[] },
+  ) {
+    const names = await this.integrationsService.lookupContactNamesByPhone(workspaceId, dto.phoneNumbers || []);
+    return { data: names };
+  }
+
+  /**
    * Disconnect OpenPhone integration.
    * When called with a tenant API key, removes the TenantIntegration record.
    * DELETE /integrations/openphone/disconnect
