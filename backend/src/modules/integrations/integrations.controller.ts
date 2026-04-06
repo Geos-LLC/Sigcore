@@ -127,16 +127,25 @@ export class IntegrationsController {
 
   /**
    * Get recent conversations from OpenPhone (live from API, not stored in DB)
-   * GET /integrations/openphone/conversations?days=1
+   * GET /integrations/openphone/conversations?days=1&includeMessages=true&messageLimit=50
+   *
+   * When includeMessages=true, each conversation object includes a `messages` array
+   * fetched in parallel (batch-of-5 concurrency). This avoids N+1 client roundtrips.
    */
   @Get('openphone/conversations')
   async getOpenPhoneConversations(
     @WorkspaceId() workspaceId: string,
     @Query('days') days?: string,
     @Query('phoneNumberId') phoneNumberId?: string,
+    @Query('includeMessages') includeMessages?: string,
+    @Query('messageLimit') messageLimit?: string,
   ) {
     const daysNum = days ? Math.min(Math.max(parseInt(days, 10) || 1, 1), 30) : 1;
-    const conversations = await this.integrationsService.getOpenPhoneConversations(workspaceId, daysNum, phoneNumberId);
+    const withMessages = includeMessages === 'true';
+    const msgLimit = messageLimit ? Math.min(Math.max(parseInt(messageLimit, 10) || 50, 1), 100) : 50;
+    const conversations = await this.integrationsService.getOpenPhoneConversations(
+      workspaceId, daysNum, phoneNumberId, withMessages, msgLimit,
+    );
     return { data: conversations };
   }
 

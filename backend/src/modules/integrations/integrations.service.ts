@@ -428,7 +428,13 @@ export class IntegrationsService {
     }));
   }
 
-  async getOpenPhoneConversations(workspaceId: string, days: number = 1, phoneNumberId?: string): Promise<any> {
+  async getOpenPhoneConversations(
+    workspaceId: string,
+    days: number = 1,
+    phoneNumberId?: string,
+    includeMessages: boolean = false,
+    messageLimit: number = 50,
+  ): Promise<any> {
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.OPENPHONE },
     });
@@ -457,14 +463,42 @@ export class IntegrationsService {
     }
 
     // Enrich: use conversationName first, then contact lookup, then null
-    return conversations.map(conv => {
+    const enriched = conversations.map(conv => {
       const contactName = conv.conversationName || contactNames.get(conv.participantPhone) || null;
-      this.logger.log(`Contact mapping: ${conv.participantPhone} -> "${contactName}" (convName: "${conv.conversationName || 'none'}", lookup: "${contactNames.get(conv.participantPhone) || 'none'}")`);
-      return {
-        ...conv,
-        contactName,
-      };
+      return { ...conv, contactName };
     });
+
+    // If includeMessages requested, fetch messages for each conversation in parallel batches
+    if (includeMessages) {
+      const BATCH_SIZE = 5;
+      this.logger.log(`Fetching messages for ${enriched.length} conversations (batch-of-${BATCH_SIZE}, limit ${messageLimit})`);
+
+      for (let i = 0; i < enriched.length; i += BATCH_SIZE) {
+        const batch = enriched.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(async (conv) => {
+            if (!conv.participantPhone || !conv.phoneNumberId) return [];
+            try {
+              const msgs = await this.openPhoneProvider.getMessages(
+                credentials, 'live', conv.phoneNumberId, conv.participantPhone,
+              );
+              return msgs.slice(0, messageLimit);
+            } catch (e) {
+              this.logger.warn(`Failed to fetch messages for ${conv.participantPhone}: ${e.message}`);
+              return [];
+            }
+          }),
+        );
+        results.forEach((result, idx) => {
+          batch[idx].messages = result.status === 'fulfilled' ? result.value : [];
+        });
+      }
+
+      const totalMsgs = enriched.reduce((sum, c) => sum + (c.messages?.length || 0), 0);
+      this.logger.log(`Fetched ${totalMsgs} total messages across ${enriched.length} conversations`);
+    }
+
+    return enriched;
   }
 
   /**
