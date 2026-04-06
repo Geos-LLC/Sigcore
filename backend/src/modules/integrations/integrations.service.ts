@@ -468,34 +468,37 @@ export class IntegrationsService {
       return { ...conv, contactName };
     });
 
-    // If includeMessages requested, fetch messages for each conversation in parallel batches
+    // If includeMessages requested, fetch messages + calls for each conversation in parallel batches
     if (includeMessages) {
       const BATCH_SIZE = 5;
-      this.logger.log(`Fetching messages for ${enriched.length} conversations (batch-of-${BATCH_SIZE}, limit ${messageLimit})`);
+      this.logger.log(`Fetching messages+calls for ${enriched.length} conversations (batch-of-${BATCH_SIZE}, limit ${messageLimit})`);
 
       for (let i = 0; i < enriched.length; i += BATCH_SIZE) {
         const batch = enriched.slice(i, i + BATCH_SIZE);
         const results = await Promise.allSettled(
           batch.map(async (conv) => {
-            if (!conv.participantPhone || !conv.phoneNumberId) return [];
-            try {
-              const msgs = await this.openPhoneProvider.getMessages(
+            if (!conv.participantPhone || !conv.phoneNumberId) return { messages: [], calls: [] };
+            const [msgs, calls] = await Promise.all([
+              this.openPhoneProvider.getMessages(
                 credentials, 'live', conv.phoneNumberId, conv.participantPhone,
-              );
-              return msgs.slice(0, messageLimit);
-            } catch (e) {
-              this.logger.warn(`Failed to fetch messages for ${conv.participantPhone}: ${e.message}`);
-              return [];
-            }
+              ).catch(e => { this.logger.warn(`Messages error for ${conv.participantPhone}: ${e.message}`); return []; }),
+              this.openPhoneProvider.getCallsForParticipant(
+                credentials, conv.participantPhone, conv.phoneNumberId,
+              ).catch(e => { this.logger.warn(`Calls error for ${conv.participantPhone}: ${e.message}`); return []; }),
+            ]);
+            return { messages: msgs.slice(0, messageLimit), calls };
           }),
         );
         results.forEach((result, idx) => {
-          batch[idx].messages = result.status === 'fulfilled' ? result.value : [];
+          const data = result.status === 'fulfilled' ? result.value : { messages: [], calls: [] };
+          batch[idx].messages = data.messages;
+          batch[idx].calls = data.calls;
         });
       }
 
       const totalMsgs = enriched.reduce((sum, c) => sum + (c.messages?.length || 0), 0);
-      this.logger.log(`Fetched ${totalMsgs} total messages across ${enriched.length} conversations`);
+      const totalCalls = enriched.reduce((sum, c) => sum + (c.calls?.length || 0), 0);
+      this.logger.log(`Fetched ${totalMsgs} messages + ${totalCalls} calls across ${enriched.length} conversations`);
     }
 
     return enriched;

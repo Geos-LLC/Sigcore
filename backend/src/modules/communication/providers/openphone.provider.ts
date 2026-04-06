@@ -414,6 +414,12 @@ export class OpenPhoneProvider implements CommunicationProvider {
 
       this.logger.log(`Fetched ${messages.length} messages for conversation ${conversationId}`);
 
+      // Log any messages with media for debugging
+      const withMedia = messages.filter((m: Record<string, unknown>) => m.media && (m.media as unknown[]).length > 0);
+      if (withMedia.length > 0) {
+        this.logger.log(`Found ${withMedia.length} messages with media attachments`);
+      }
+
       return messages.map((msg: Record<string, unknown>) => {
         // Extract media URLs if present (MMS messages)
         const media = msg.media as Array<{ url: string; type?: string }> | undefined;
