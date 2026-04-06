@@ -610,6 +610,27 @@ export class WebhooksService {
     await this.callRepo.save(call);
     this.logger.log(`Saved call ${callData.id} to conversation ${conversation.id}`);
 
+    // Emit outbound webhook to subscriptions (fire and forget)
+    const callWebhookType = WebhookEventType.CALL_COMPLETED;
+    this.outboundWebhooksService
+      .emitEvent(workspaceId, callWebhookType, {
+        callId: call.id,
+        providerCallId: call.providerCallId,
+        conversationId: conversation.id,
+        direction: call.direction,
+        duration: call.duration,
+        fromNumber: call.fromNumber,
+        toNumber: call.toNumber,
+        status: call.status,
+        recordingUrl: call.recordingUrl || null,
+        voicemailUrl: call.voicemailUrl || null,
+        phoneNumberId: callData.phoneNumberId,
+        createdAt: call.createdAt?.toISOString(),
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to emit call webhook: ${err.message}`);
+      });
+
     // Emit real-time event to connected clients
     this.eventsGateway.emitNewCall(workspaceId, {
       id: call.id,
