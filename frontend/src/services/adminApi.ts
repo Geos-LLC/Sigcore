@@ -247,9 +247,9 @@ class AdminApiService {
     return response.data.data;
   }
 
-  async sendWhatsAppMessage(to: string, body: string): Promise<any> {
-    const response = await this.client.post<any>('/v1/messages', { to, body, channel: 'whatsapp' });
-    return response.data;
+  async sendWhatsAppMessage(to: string, message: string): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>('/integrations/whatsapp/send', { to, message });
+    return response.data.data;
   }
 
   async startSync(options?: { provider?: string; limit?: number }): Promise<any> {

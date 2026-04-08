@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Delete,
+  Body,
   UseGuards,
   Res,
   HttpStatus,
@@ -161,29 +162,30 @@ export class WhatsAppController {
   }
 
   /**
-   * Send a test message (for debugging)
+   * Send a WhatsApp message directly via the WhatsApp service.
    */
-  @Post('test-message')
-  async sendTestMessage(
+  @Post('send')
+  async sendMessage(
     @WorkspaceId() workspaceId: string,
+    @Body() body: { to: string; message: string },
     @Res() res: Response,
   ) {
-    const connected = await this.whatsappProvider.isConnected(workspaceId);
-
-    if (!connected) {
+    if (!body.to || !body.message) {
       return res.status(HttpStatus.BAD_REQUEST).json({
-        data: { error: 'WhatsApp not connected' },
+        data: { error: 'Missing required fields: to, message' },
       });
     }
 
-    const session = await this.whatsappProvider.getSession(workspaceId);
+    const connected = await this.whatsappProvider.isConnected(workspaceId);
+    if (!connected) {
+      return res.status(HttpStatus.BAD_REQUEST).json({
+        data: { error: 'WhatsApp not connected. Connect first and scan the QR code.' },
+      });
+    }
 
-    return res.status(HttpStatus.OK).json({
-      data: {
-        connected: true,
-        phoneNumber: session?.phoneNumber,
-        message: 'WhatsApp is ready to send messages',
-      },
+    const result = await this.whatsappProvider.sendMessage(workspaceId, body.to, body.message);
+    return res.status(result.success ? HttpStatus.OK : HttpStatus.BAD_REQUEST).json({
+      data: result,
     });
   }
 }
