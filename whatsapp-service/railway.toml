@@ -1,0 +1,7 @@
+[build]
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "node dist/main.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
