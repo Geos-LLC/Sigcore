@@ -221,6 +221,37 @@ class AdminApiService {
     return response.data.data;
   }
 
+  // WhatsApp integration
+  async getWhatsAppStatus(): Promise<any> {
+    const response = await this.client.get<ApiResponse<any>>('/integrations/whatsapp/status');
+    return response.data.data;
+  }
+
+  async connectWhatsApp(): Promise<any> {
+    const response = await this.client.post<ApiResponse<any>>('/integrations/whatsapp/connect');
+    return response.data.data;
+  }
+
+  async getWhatsAppQR(): Promise<any> {
+    const response = await this.client.get<ApiResponse<any>>('/integrations/whatsapp/qr');
+    return response.data.data;
+  }
+
+  async disconnectWhatsApp(): Promise<any> {
+    const response = await this.client.delete<ApiResponse<any>>('/integrations/whatsapp/disconnect');
+    return response.data.data;
+  }
+
+  async getWhatsAppHealth(): Promise<any> {
+    const response = await this.client.get<ApiResponse<any>>('/integrations/whatsapp/health');
+    return response.data.data;
+  }
+
+  async sendWhatsAppMessage(to: string, body: string): Promise<any> {
+    const response = await this.client.post<any>('/v1/messages', { to, body, channel: 'whatsapp' });
+    return response.data;
+  }
+
   async startSync(options?: { provider?: string; limit?: number }): Promise<any> {
     const response = await this.client.post<ApiResponse<any>>('/integrations/sync', options);
     return response.data.data;

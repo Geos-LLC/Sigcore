@@ -82,6 +82,10 @@ export default function AdminLayout() {
                 <MessageSquare className="h-4 w-4" />
                 SMS Tester
               </Link>
+              <Link to="/admin/whatsapp" className={navLinkClass('/admin/whatsapp')}>
+                <MessageSquare className="h-4 w-4" />
+                WhatsApp
+              </Link>
               <Link to="/admin/provisioning" className={navLinkClass('/admin/provisioning')}>
                 <PhoneIncoming className="h-4 w-4" />
                 Provisioning
