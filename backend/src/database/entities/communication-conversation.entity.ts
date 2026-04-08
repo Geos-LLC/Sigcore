@@ -64,6 +64,18 @@ export class CommunicationConversation {
   @Column({ name: 'participant_phone_numbers', type: 'jsonb', nullable: true })
   participantPhoneNumbers?: string[];
 
+  @Column({ name: 'external_chat_id', nullable: true })
+  externalChatId?: string;
+
+  @Column({ name: 'integration_id', type: 'uuid', nullable: true })
+  integrationId?: string;
+
+  @Column({ name: 'external_lead_id', nullable: true })
+  externalLeadId?: string;
+
+  @Column({ name: 'external_customer_id', nullable: true })
+  externalCustomerId?: string;
+
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 

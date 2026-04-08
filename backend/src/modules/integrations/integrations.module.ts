@@ -12,6 +12,8 @@ import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioVoiceService } from '../communication/twilio-voice.service';
 import { WhatsAppWebProvider } from '../communication/providers/whatsapp-web.provider';
 import { WhatsAppController } from './whatsapp.controller';
+import { SfWhatsAppController } from './sf-whatsapp.controller';
+import { SfAuthGuard } from '../auth/sf-auth.guard';
 import { CommunicationModule } from '../communication/communication.module';
 
 @Module({
@@ -19,8 +21,8 @@ import { CommunicationModule } from '../communication/communication.module';
     TypeOrmModule.forFeature([CommunicationIntegration, TenantIntegration, Workspace, ContactIdentity]),
     forwardRef(() => CommunicationModule),
   ],
-  controllers: [IntegrationsController, WhatsAppController],
-  providers: [IntegrationsService, EncryptionService, OpenPhoneProvider, TwilioProvider, TwilioVoiceService, WhatsAppWebProvider],
+  controllers: [IntegrationsController, WhatsAppController, SfWhatsAppController],
+  providers: [IntegrationsService, EncryptionService, OpenPhoneProvider, TwilioProvider, TwilioVoiceService, WhatsAppWebProvider, SfAuthGuard],
   exports: [IntegrationsService, WhatsAppWebProvider],
 })
 export class IntegrationsModule {}
