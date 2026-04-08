@@ -29,6 +29,11 @@ export enum WebhookEventType {
   SMS_MESSAGE_RECEIVED = 'sms.message.received',
   SMS_MESSAGE_DELIVERED = 'sms.message.delivered',
   SMS_MESSAGE_FAILED = 'sms.message.failed',
+  // WhatsApp events
+  WHATSAPP_MESSAGE_INBOUND = 'whatsapp.message.inbound',
+  WHATSAPP_MESSAGE_OUTBOUND = 'whatsapp.message.outbound',
+  WHATSAPP_MESSAGE_DELIVERED = 'whatsapp.message.delivered',
+  WHATSAPP_STATUS_CHANGE = 'whatsapp.status.change',
 }
 
 export enum WebhookSubscriptionStatus {

@@ -232,6 +232,10 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.SMS_MESSAGE_RECEIVED]: 'Triggered when an inbound SMS is received',
       [WebhookEventType.SMS_MESSAGE_DELIVERED]: 'Triggered when an outbound SMS is delivered',
       [WebhookEventType.SMS_MESSAGE_FAILED]: 'Triggered when an outbound SMS fails to deliver',
+      [WebhookEventType.WHATSAPP_MESSAGE_INBOUND]: 'Triggered when an inbound WhatsApp message is received',
+      [WebhookEventType.WHATSAPP_MESSAGE_OUTBOUND]: 'Triggered when an outbound WhatsApp message is sent',
+      [WebhookEventType.WHATSAPP_MESSAGE_DELIVERED]: 'Triggered when a WhatsApp message is delivered/read',
+      [WebhookEventType.WHATSAPP_STATUS_CHANGE]: 'Triggered when WhatsApp connection status changes',
     };
     return descriptions[event] || 'No description available';
   }

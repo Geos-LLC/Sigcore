@@ -719,6 +719,167 @@ export class WebhooksService {
     return statusMap[status || ''] || MessageStatus.PENDING;
   }
 
+  // ==================== WHATSAPP WEBHOOK HANDLER ====================
+
+  async handleWhatsAppWebhook(
+    workspaceId: string,
+    eventType: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    this.logger.log(`[WhatsApp] Processing ${eventType} for workspace ${workspaceId}`);
+
+    switch (eventType) {
+      case 'message_inbound':
+        await this.handleWhatsAppInboundMessage(workspaceId, data);
+        break;
+      case 'message_outbound':
+        // Outbound messages are already tracked when sent via Sigcore API
+        // This callback confirms delivery from the WhatsApp service
+        this.logger.debug(`[WhatsApp] Outbound message confirmed: ${data.externalMessageId}`);
+        break;
+      case 'message_ack':
+        await this.handleWhatsAppMessageAck(workspaceId, data);
+        break;
+      case 'status_change':
+        this.logger.log(`[WhatsApp] Status change for workspace ${workspaceId}: ${data.status}`);
+        await this.outboundWebhooksService.emitEvent(
+          workspaceId,
+          WebhookEventType.WHATSAPP_STATUS_CHANGE,
+          { workspaceId, provider: 'whatsapp', ...data },
+        );
+        break;
+      default:
+        this.logger.debug(`[WhatsApp] Unhandled event type: ${eventType}`);
+    }
+  }
+
+  private async handleWhatsAppInboundMessage(
+    workspaceId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const from = data.from as string;
+    const to = data.to as string;
+    const body = data.body as string;
+    const externalMessageId = data.externalMessageId as string;
+    const externalChatId = data.externalChatId as string;
+
+    if (!from || !body) {
+      this.logger.warn('[WhatsApp] Missing from or body in inbound message');
+      return;
+    }
+
+    // Normalize phone numbers
+    const normalizedFrom = from.startsWith('+') ? from : `+${from}`;
+    const normalizedTo = to?.startsWith('+') ? to : (to ? `+${to}` : '');
+
+    // Find or create conversation
+    let conversation = await this.conversationRepo.findOne({
+      where: {
+        workspaceId,
+        phoneNumber: normalizedTo || undefined,
+        participantPhoneNumber: normalizedFrom,
+        provider: ProviderType.WHATSAPP,
+      },
+    });
+
+    if (!conversation) {
+      conversation = this.conversationRepo.create({
+        workspaceId,
+        tenantId: null,
+        externalId: externalChatId || `wa_conv_${Date.now()}`,
+        provider: ProviderType.WHATSAPP,
+        channel: 'whatsapp' as any,
+        phoneNumber: normalizedTo,
+        participantPhoneNumber: normalizedFrom,
+        metadata: { externalChatId },
+      });
+      await this.conversationRepo.save(conversation);
+      this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom}`);
+    }
+
+    // Create message record
+    const message = this.messageRepo.create({
+      conversationId: conversation.id,
+      direction: MessageDirection.IN,
+      channel: 'whatsapp' as any,
+      body,
+      fromNumber: normalizedFrom,
+      toNumber: normalizedTo,
+      providerMessageId: externalMessageId || `wa_${Date.now()}`,
+      status: MessageStatus.DELIVERED,
+      metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type },
+    });
+    await this.messageRepo.save(message);
+
+    // Emit WebSocket event for real-time UI updates
+    this.eventsGateway.emitNewMessage(workspaceId, {
+      conversationId: conversation.id,
+      message: {
+        id: message.id,
+        direction: message.direction,
+        body: message.body,
+        fromNumber: message.fromNumber,
+        toNumber: message.toNumber,
+        createdAt: message.createdAt,
+        channel: 'whatsapp',
+        provider: 'whatsapp',
+      },
+    });
+
+    // Fan out to tenant webhook subscribers
+    await this.outboundWebhooksService.emitEvent(
+      workspaceId,
+      WebhookEventType.WHATSAPP_MESSAGE_INBOUND,
+      {
+        provider: 'whatsapp',
+        conversation: {
+          id: conversation.id,
+          externalChatId,
+          participantPhone: normalizedFrom,
+        },
+        message: {
+          id: message.id,
+          externalMessageId,
+          text: body,
+          direction: 'in',
+          timestamp: data.timestamp || new Date().toISOString(),
+        },
+      },
+    );
+  }
+
+  private async handleWhatsAppMessageAck(
+    workspaceId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const externalMessageId = data.externalMessageId as string;
+    const status = data.status as string;
+
+    if (!externalMessageId) return;
+
+    // Find the message by provider message ID
+    const message = await this.messageRepo.findOne({
+      where: { providerMessageId: externalMessageId },
+    });
+
+    if (message) {
+      const newStatus = status === 'delivered' ? MessageStatus.DELIVERED
+        : status === 'read' ? MessageStatus.DELIVERED
+        : message.status;
+
+      if (newStatus !== message.status) {
+        message.status = newStatus;
+        await this.messageRepo.save(message);
+      }
+
+      await this.outboundWebhooksService.emitEvent(
+        workspaceId,
+        WebhookEventType.WHATSAPP_MESSAGE_DELIVERED,
+        { provider: 'whatsapp', messageId: message.id, externalMessageId, status },
+      );
+    }
+  }
+
   private mapCallStatus(status?: string, voicemailUrl?: string): CallStatus {
     if (voicemailUrl) {
       return CallStatus.VOICEMAIL;

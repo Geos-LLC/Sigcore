@@ -923,7 +923,7 @@ export class CommunicationService {
         workspaceId,
         contactId: null,
         externalId: `whatsapp_conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        provider: ProviderType.TWILIO, // We use a placeholder provider for WhatsApp Web
+        provider: ProviderType.WHATSAPP,
         phoneNumber: whatsappFromNumber,
         participantPhoneNumber: toNumber,
         channel: ChannelType.WHATSAPP,

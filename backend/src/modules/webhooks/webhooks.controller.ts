@@ -511,4 +511,39 @@ export class WebhooksController {
     await this.twilioWebhooksService.handleRecordingComplete(payload);
     return '';
   }
+
+  // ==================== WHATSAPP WEBHOOKS ====================
+
+  /**
+   * Receive inbound events from the WhatsApp microservice.
+   * Auth: x-webhook-key header must match SIGCORE_WEBHOOK_KEY env var.
+   */
+  @Post('whatsapp/inbound')
+  @HttpCode(HttpStatus.OK)
+  async handleWhatsAppInbound(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() payload: {
+      workspaceId: string;
+      eventType: string;
+      data: Record<string, unknown>;
+      timestamp: string;
+    },
+  ) {
+    // Validate webhook key
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid WhatsApp webhook key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+
+    this.logger.log(`WhatsApp webhook: ${payload.eventType} for workspace ${payload.workspaceId}`);
+
+    await this.webhooksService.handleWhatsAppWebhook(
+      payload.workspaceId,
+      payload.eventType,
+      payload.data,
+    );
+
+    return { received: true };
+  }
 }

@@ -16,6 +16,7 @@ export enum IntegrationStatus {
 export enum ProviderType {
   OPENPHONE = 'openphone',
   TWILIO = 'twilio',
+  WHATSAPP = 'whatsapp',
   TELEGRAM = 'telegram',
 }
 
