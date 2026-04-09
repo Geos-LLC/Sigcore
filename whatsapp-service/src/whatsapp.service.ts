@@ -194,11 +194,15 @@ export class WhatsAppService implements OnModuleDestroy {
     const forwardMessage = async (message: WAMessage) => {
       session.lastActivity = new Date();
 
+      this.logger.log(`[MSG] Raw event: from=${message.from} to=${message.to} type=${message.type} fromMe=${message.fromMe} hasBody=${!!message.body} hasMedia=${message.hasMedia}`);
+
       // Filter: only individual chat messages (not groups, broadcasts, or status updates)
       if (!message.from || !message.from.endsWith('@c.us')) {
+        this.logger.log(`[MSG] Filtered: not @c.us (from=${message.from})`);
         return;
       }
       if (!message.body && !message.hasMedia) {
+        this.logger.log(`[MSG] Filtered: no body and no media`);
         return;
       }
 
@@ -220,9 +224,15 @@ export class WhatsAppService implements OnModuleDestroy {
     };
 
     // message_create fires for all messages (incoming + synced history + sent)
-    client.on('message_create', forwardMessage);
-    // message fires for incoming only (backup)
-    client.on('message', forwardMessage);
+    client.on('message_create', (msg) => {
+      this.logger.log(`[EVENT] message_create fired: from=${msg.from} type=${msg.type}`);
+      forwardMessage(msg);
+    });
+    // message fires for incoming only (backup — dedup handled by Sigcore)
+    client.on('message', (msg) => {
+      this.logger.log(`[EVENT] message fired: from=${msg.from} type=${msg.type}`);
+      forwardMessage(msg);
+    });
 
     // Forward message acknowledgement (delivery/read receipts)
     client.on('message_ack', async (message: WAMessage, ack: number) => {
