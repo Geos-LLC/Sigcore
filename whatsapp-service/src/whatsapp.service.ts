@@ -370,6 +370,76 @@ export class WhatsAppService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Fetch all individual chats with recent messages (aggregated batch response).
+   * Filters out group chats. Normalizes phone numbers.
+   */
+  async getChatsWithMessages(
+    workspaceId: string,
+    messageLimit: number = 50,
+  ): Promise<{ chats: any[] }> {
+    const session = this.sessions.get(workspaceId);
+    if (!session || session.status !== 'ready') {
+      return { chats: [] };
+    }
+
+    const allChats = await session.client.getChats();
+    // Individual chats only — exclude groups (@g.us)
+    const individualChats = allChats.filter(
+      (chat) => chat.id.server === 'c.us',
+    );
+
+    this.logger.log(
+      `[Backfill] ${individualChats.length} individual chats for workspace ${workspaceId}`,
+    );
+
+    const result: any[] = [];
+
+    for (const chat of individualChats) {
+      try {
+        const messages = await chat.fetchMessages({ limit: messageLimit });
+        const phone = chat.id.user.startsWith('+')
+          ? chat.id.user
+          : `+${chat.id.user}`;
+
+        result.push({
+          id: chat.id._serialized,
+          name: chat.name || null,
+          phone,
+          lastMessageAt: chat.timestamp
+            ? new Date(chat.timestamp * 1000).toISOString()
+            : null,
+          unreadCount: chat.unreadCount || 0,
+          messages: messages.map((msg) => {
+            const fromUser = msg.from?.replace('@c.us', '').replace('@g.us', '') || '';
+            const toUser = msg.to?.replace('@c.us', '').replace('@g.us', '') || '';
+            return {
+              id: msg.id._serialized,
+              from: fromUser.startsWith('+') ? fromUser : `+${fromUser}`,
+              to: toUser.startsWith('+') ? toUser : `+${toUser}`,
+              body: msg.body || '',
+              timestamp: msg.timestamp
+                ? new Date(msg.timestamp * 1000).toISOString()
+                : new Date().toISOString(),
+              fromMe: msg.fromMe || false,
+              hasMedia: msg.hasMedia || false,
+              type: msg.type || 'chat',
+            };
+          }),
+        });
+      } catch (e) {
+        this.logger.warn(
+          `[Backfill] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `[Backfill] Returning ${result.length} chats with messages for workspace ${workspaceId}`,
+    );
+    return { chats: result };
+  }
+
   getConnectedSessions(): Array<{ workspaceId: string; phoneNumber?: string; status: string }> {
     const result: Array<{ workspaceId: string; phoneNumber?: string; status: string }> = [];
     for (const [workspaceId, session] of this.sessions) {

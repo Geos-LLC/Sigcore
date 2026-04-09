@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Body, Param, Headers, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Param, Query, Headers, HttpException, HttpStatus } from '@nestjs/common';
 import { WhatsAppService } from './whatsapp.service';
 
 @Controller()
@@ -93,6 +93,22 @@ export class WhatsAppController {
     }
 
     return { status: session.status, message: this.getStatusMessage(session.status) };
+  }
+
+  @Get(':workspaceId/chats')
+  async getChats(
+    @Param('workspaceId') workspaceId: string,
+    @Headers('x-api-key') apiKey: string,
+    @Query('includeMessages') includeMessages?: string,
+    @Query('messageLimit') messageLimit?: string,
+  ) {
+    this.validateApiKey(apiKey);
+    const limit = parseInt(messageLimit || '50', 10) || 50;
+    if (includeMessages === 'true') {
+      return this.whatsAppService.getChatsWithMessages(workspaceId, limit);
+    }
+    // Without messages — just list chats (could implement separately if needed)
+    return this.whatsAppService.getChatsWithMessages(workspaceId, 0);
   }
 
   @Post(':workspaceId/send')

@@ -212,6 +212,25 @@ export class WhatsAppWebProvider {
   /**
    * Check if WhatsApp service is available
    */
+  /**
+   * Fetch all individual chats with recent messages (aggregated batch).
+   * Used for backfill/sync — one call returns all data.
+   */
+  async getChatsWithMessages(
+    workspaceId: string,
+    messageLimit: number = 50,
+  ): Promise<{ chats: any[] }> {
+    try {
+      const result = await this.fetch(
+        `/${workspaceId}/chats?includeMessages=true&messageLimit=${messageLimit}`,
+      );
+      return { chats: result.chats || [] };
+    } catch (error) {
+      this.logger.error(`Failed to fetch WhatsApp chats for workspace ${workspaceId}`, error);
+      return { chats: [] };
+    }
+  }
+
   async isServiceAvailable(): Promise<boolean> {
     try {
       const result = await this.fetch('/health');

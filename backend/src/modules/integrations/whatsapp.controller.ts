@@ -4,6 +4,7 @@ import {
   Post,
   Delete,
   Body,
+  Query,
   UseGuards,
   Res,
   HttpStatus,
@@ -67,6 +68,24 @@ export class WhatsAppController {
       default:
         return 'Unknown status';
     }
+  }
+
+  /**
+   * Fetch all individual chats with recent messages (backfill/sync).
+   * Single aggregated response — no N+1 from caller.
+   */
+  @Get('chats')
+  async getChats(
+    @WorkspaceId() workspaceId: string,
+    @Query('includeMessages') includeMessages?: string,
+    @Query('messageLimit') messageLimit?: string,
+  ) {
+    const limit = parseInt(messageLimit || '50', 10) || 50;
+    const result = await this.whatsappProvider.getChatsWithMessages(
+      workspaceId,
+      includeMessages === 'true' ? limit : 0,
+    );
+    return { data: result };
   }
 
   /**
