@@ -188,32 +188,41 @@ export class WhatsAppService implements OnModuleDestroy {
       session.error = message;
     });
 
-    // Forward incoming messages to Sigcore main API
-    client.on('message', async (message: WAMessage) => {
+    // Forward messages to Sigcore main API
+    // Use message_create instead of message — fires for ALL messages including
+    // history synced from WhatsApp servers on connect, not just new incoming
+    const forwardMessage = async (message: WAMessage) => {
       session.lastActivity = new Date();
 
-      // Filter: only forward individual chat messages (not groups, broadcasts, or status updates)
+      // Filter: only individual chat messages (not groups, broadcasts, or status updates)
       if (!message.from || !message.from.endsWith('@c.us')) {
-        return; // Skip groups (@g.us), broadcasts (@broadcast), status updates
+        return;
       }
       if (!message.body && !message.hasMedia) {
-        return; // Skip empty messages (notifications, etc.)
+        return;
       }
 
       const fromPhone = message.from.replace('@c.us', '');
-      this.logger.log(`Incoming WhatsApp message for workspace ${workspaceId}: from=${fromPhone}`);
+      const toPhone = message.to?.replace('@c.us', '') || '';
+      const isFromMe = message.fromMe || false;
 
       this.forwardToSigcore(workspaceId, 'message_inbound', {
         externalMessageId: message.id._serialized,
-        externalChatId: message.from,
+        externalChatId: isFromMe ? message.to : message.from,
         from: fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`,
-        to: session.phoneNumber || '',
+        to: toPhone.startsWith('+') ? toPhone : (toPhone ? `+${toPhone}` : session.phoneNumber || ''),
         body: message.body || '',
         timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia,
         type: message.type,
+        fromMe: isFromMe,
       });
-    });
+    };
+
+    // message_create fires for all messages (incoming + synced history + sent)
+    client.on('message_create', forwardMessage);
+    // message fires for incoming only (backup)
+    client.on('message', forwardMessage);
 
     // Forward message acknowledgement (delivery/read receipts)
     client.on('message_ack', async (message: WAMessage, ack: number) => {
