@@ -165,6 +165,10 @@ export class WhatsAppService implements OnModuleDestroy {
         status: 'ready',
         phoneNumber: session.phoneNumber,
       });
+
+      // Auto-sync: wait for WhatsApp to load chats, then forward them
+      // WhatsApp multi-device needs 15-30s after 'ready' to populate the chat store
+      this.scheduleAutoSync(workspaceId, session);
     });
 
     client.on('disconnected', (reason: string) => {
@@ -495,6 +499,67 @@ export class WhatsAppService implements OnModuleDestroy {
       `[Backfill] Returning ${result.length} chats with messages for workspace ${workspaceId}`,
     );
     return { chats: result };
+  }
+
+  /**
+   * Auto-sync chats after WhatsApp is ready.
+   * Retries every 15s (up to 4 times) waiting for chats to populate.
+   */
+  private scheduleAutoSync(workspaceId: string, session: WhatsAppSession): void {
+    let attempt = 0;
+    const maxAttempts = 4;
+    const delayMs = 15000;
+
+    const trySync = async () => {
+      attempt++;
+      if (session.status !== 'ready') {
+        this.logger.log(`[AutoSync] Session no longer ready, stopping (attempt ${attempt})`);
+        return;
+      }
+
+      this.logger.log(`[AutoSync] Attempt ${attempt}/${maxAttempts} — fetching chats for workspace ${workspaceId}`);
+      const allChats = await session.client.getChats();
+      const individualChats = allChats.filter((c) => c.id.server === 'c.us');
+      this.logger.log(`[AutoSync] Found ${individualChats.length} individual chats (${allChats.length} total)`);
+
+      if (individualChats.length === 0 && attempt < maxAttempts) {
+        this.logger.log(`[AutoSync] No chats yet, retrying in ${delayMs / 1000}s...`);
+        setTimeout(trySync, delayMs);
+        return;
+      }
+
+      // Forward each chat's recent messages to Sigcore
+      let totalMessages = 0;
+      for (const chat of individualChats) {
+        try {
+          const messages = await chat.fetchMessages({ limit: 20 });
+          for (const msg of messages) {
+            if (!msg.body && !msg.hasMedia) continue;
+            const fromUser = msg.from?.replace('@c.us', '').replace('@g.us', '') || '';
+            const toUser = msg.to?.replace('@c.us', '').replace('@g.us', '') || '';
+            this.forwardToSigcore(workspaceId, 'message_inbound', {
+              externalMessageId: msg.id._serialized,
+              externalChatId: msg.fromMe ? msg.to : msg.from,
+              from: fromUser.startsWith('+') ? fromUser : `+${fromUser}`,
+              to: toUser.startsWith('+') ? toUser : (toUser ? `+${toUser}` : session.phoneNumber || ''),
+              body: msg.body || '',
+              timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+              hasMedia: msg.hasMedia,
+              type: msg.type,
+              fromMe: msg.fromMe || false,
+              contactName: chat.name || null,
+            });
+            totalMessages++;
+          }
+        } catch (e) {
+          this.logger.warn(`[AutoSync] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`);
+        }
+      }
+      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${totalMessages} messages forwarded`);
+    };
+
+    // First attempt after 15s delay
+    setTimeout(trySync, delayMs);
   }
 
   getConnectedSessions(): Array<{ workspaceId: string; phoneNumber?: string; status: string }> {
