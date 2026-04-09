@@ -190,17 +190,25 @@ export class WhatsAppService implements OnModuleDestroy {
 
     // Forward incoming messages to Sigcore main API
     client.on('message', async (message: WAMessage) => {
-      this.logger.log(`Incoming WhatsApp message for workspace ${workspaceId}: from=${message.from}`);
       session.lastActivity = new Date();
 
-      const fromPhone = message.from.replace('@c.us', '').replace('@g.us', '');
+      // Filter: only forward individual chat messages (not groups, broadcasts, or status updates)
+      if (!message.from || !message.from.endsWith('@c.us')) {
+        return; // Skip groups (@g.us), broadcasts (@broadcast), status updates
+      }
+      if (!message.body && !message.hasMedia) {
+        return; // Skip empty messages (notifications, etc.)
+      }
+
+      const fromPhone = message.from.replace('@c.us', '');
+      this.logger.log(`Incoming WhatsApp message for workspace ${workspaceId}: from=${fromPhone}`);
 
       this.forwardToSigcore(workspaceId, 'message_inbound', {
         externalMessageId: message.id._serialized,
         externalChatId: message.from,
         from: fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`,
         to: session.phoneNumber || '',
-        body: message.body,
+        body: message.body || '',
         timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia,
         type: message.type,
