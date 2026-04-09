@@ -383,7 +383,37 @@ export class WhatsAppService implements OnModuleDestroy {
       return { chats: [] };
     }
 
-    const allChats = await session.client.getChats();
+    let allChats = await session.client.getChats();
+
+    // If getChats() returns empty (common after session restore), try forcing chat load
+    if (allChats.length === 0) {
+      this.logger.log(`[Backfill] getChats() returned 0, attempting store-based fetch...`);
+      try {
+        // Use WhatsApp Web internal store via Puppeteer to get chat list
+        const pupPage = (session.client as any).pupPage;
+        if (pupPage) {
+          const chatIds: string[] = await pupPage.evaluate(() => {
+            const store = (window as any).Store;
+            if (!store?.Chat?._models) return [];
+            return store.Chat._models
+              .filter((c: any) => !c.isGroup && c.id?.server === 'c.us')
+              .map((c: any) => c.id?._serialized)
+              .filter(Boolean);
+          });
+          this.logger.log(`[Backfill] Store returned ${chatIds.length} chat IDs`);
+          if (chatIds.length > 0) {
+            const chatPromises = chatIds.map(id =>
+              session.client.getChatById(id).catch(() => null)
+            );
+            const chats = await Promise.all(chatPromises);
+            allChats = chats.filter(Boolean) as any[];
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`[Backfill] Store-based fetch failed: ${e instanceof Error ? e.message : 'unknown'}`);
+      }
+    }
+
     // Individual chats only — exclude groups (@g.us)
     const individualChats = allChats.filter(
       (chat) => chat.id.server === 'c.us',
