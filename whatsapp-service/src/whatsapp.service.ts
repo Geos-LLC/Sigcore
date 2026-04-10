@@ -220,8 +220,7 @@ export class WhatsAppService implements OnModuleDestroy {
           groupName = chat?.name || null;
         } catch {}
 
-        this.forwardToSigcore(workspaceId, 'message_inbound', {
-          // Build display body for media/special types
+        // Build display body for media/special types
           let groupBody = message.body || '';
           if (!groupBody) {
             const typeLabels: Record<string, string> = {
@@ -802,7 +801,7 @@ export class WhatsAppService implements OnModuleDestroy {
       }
 
       // Step 2: Send contacts_sync batch event (names + avatars arrive before messages)
-      const contacts = individualChats.map(chat => {
+      const contacts: Array<{ phone: string | null; externalChatId: string; name: string | null; avatarUrl: string | null; isGroup?: boolean }> = individualChats.map(chat => {
         const info = contactInfo.get(chat.id._serialized);
         return {
           phone: info?.phone || null,
@@ -810,7 +809,7 @@ export class WhatsAppService implements OnModuleDestroy {
           name: info?.name || null,
           avatarUrl: info?.avatarUrl || null,
         };
-      }).filter(c => c.phone && (c.name || c.avatarUrl)); // only contacts with a resolved phone + name/avatar
+      }).filter(c => c.phone && (c.name || c.avatarUrl));
 
       // Add group chats to contacts
       for (const chat of groupChats) {
