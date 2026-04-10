@@ -307,14 +307,9 @@ export class WhatsAppService implements OnModuleDestroy {
       });
     };
 
-    // message_create fires for all messages (incoming + synced history + sent)
+    // message_create fires for ALL messages (incoming + synced history + sent by me)
+    // Only use this one — NOT 'message' event — to avoid duplicates
     client.on('message_create', (msg) => {
-      this.logger.log(`[EVENT] message_create fired: from=${msg.from} type=${msg.type}`);
-      forwardMessage(msg);
-    });
-    // message fires for incoming only (backup — dedup handled by Sigcore)
-    client.on('message', (msg) => {
-      this.logger.log(`[EVENT] message fired: from=${msg.from} type=${msg.type}`);
       forwardMessage(msg);
     });
 

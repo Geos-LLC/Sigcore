@@ -947,18 +947,29 @@ export class WebhooksService {
 
     // Create message record with original timestamp if provided
     const originalTimestamp = data.timestamp ? new Date(data.timestamp as string) : null;
-    const message = this.messageRepo.create({
-      conversationId: conversation.id,
-      direction: isFromMe ? MessageDirection.OUT : MessageDirection.IN,
-      channel: 'whatsapp' as any,
-      body,
-      fromNumber: normalizedFrom,
-      toNumber: normalizedTo,
-      providerMessageId: externalMessageId || `wa_${Date.now()}`,
-      status: MessageStatus.DELIVERED,
-      metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type },
-    });
-    await this.messageRepo.save(message);
+    const msgProviderMessageId = externalMessageId || `wa_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    let message: any;
+    try {
+      message = this.messageRepo.create({
+        conversationId: conversation.id,
+        direction: isFromMe ? MessageDirection.OUT : MessageDirection.IN,
+        channel: 'whatsapp' as any,
+        body,
+        fromNumber: normalizedFrom,
+        toNumber: normalizedTo,
+        providerMessageId: msgProviderMessageId,
+        status: MessageStatus.DELIVERED,
+        metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type },
+      });
+      await this.messageRepo.save(message);
+    } catch (e: any) {
+      // Race condition: message_create + message events fire simultaneously with same ID
+      if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
+        this.logger.debug(`[WhatsApp] Dedup (insert): message ${msgProviderMessageId} already exists`);
+        return;
+      }
+      throw e;
+    }
 
     // Override createdAt with original message timestamp if available
     if (originalTimestamp && !isNaN(originalTimestamp.getTime()) && originalTimestamp.getFullYear() > 2020) {
