@@ -873,13 +873,24 @@ export class WebhooksService {
     // Normalize phone numbers
     const normalizedFrom = from.startsWith('+') ? from : `+${from}`;
     const normalizedTo = to?.startsWith('+') ? to : (to ? `+${to}` : '');
+    const isFromMe = data.fromMe === true;
 
-    // Find or create conversation
+    // For WhatsApp: participant is the OTHER person in the chat, not "me"
+    // fromMe=true: from=myPhone, to=contactPhone → participant=to, ownPhone=from
+    // fromMe=false: from=contactPhone, to=myPhone → participant=from, ownPhone=to
+    const participantPhone = isFromMe ? normalizedTo : normalizedFrom;
+    const ownPhone = isFromMe ? normalizedFrom : normalizedTo;
+
+    if (!participantPhone) {
+      this.logger.warn('[WhatsApp] Could not determine participant phone');
+      return;
+    }
+
+    // Find or create conversation by participant (the contact), not by "from"
     let conversation = await this.conversationRepo.findOne({
       where: {
         workspaceId,
-        phoneNumber: normalizedTo || undefined,
-        participantPhoneNumber: normalizedFrom,
+        participantPhoneNumber: participantPhone,
         provider: ProviderType.WHATSAPP,
       },
     });
@@ -894,8 +905,8 @@ export class WebhooksService {
           externalId: externalChatId || `wa_conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           provider: ProviderType.WHATSAPP,
           channel: 'whatsapp' as any,
-          phoneNumber: normalizedTo,
-          participantPhoneNumber: normalizedFrom,
+          phoneNumber: ownPhone,
+          participantPhoneNumber: participantPhone,
           metadata: { externalChatId, ...(contactName && { contactName }) },
         });
         await this.conversationRepo.save(conversation);
@@ -928,7 +939,7 @@ export class WebhooksService {
     const originalTimestamp = data.timestamp ? new Date(data.timestamp as string) : null;
     const message = this.messageRepo.create({
       conversationId: conversation.id,
-      direction: MessageDirection.IN,
+      direction: isFromMe ? MessageDirection.OUT : MessageDirection.IN,
       channel: 'whatsapp' as any,
       body,
       fromNumber: normalizedFrom,
