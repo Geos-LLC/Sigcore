@@ -770,6 +770,8 @@ export class WebhooksService {
       name: string | null;
       avatarUrl: string | null;
       isGroup?: boolean;
+      lastActivityAt?: string | null;
+      lastMessagePreview?: string | null;
     }>;
     const sessionPhone = data.sessionPhone as string || '';
 
@@ -796,6 +798,8 @@ export class WebhooksService {
         ...(contact.name && { contactName: contact.name }),
         ...(contact.avatarUrl && { avatarUrl: contact.avatarUrl }),
         ...(contact.isGroup && { isGroup: true }),
+        ...(contact.lastActivityAt && { lastActivityAt: contact.lastActivityAt }),
+        ...(contact.lastMessagePreview && { lastMessagePreview: contact.lastMessagePreview }),
       };
 
       if (!conversation) {
@@ -820,20 +824,26 @@ export class WebhooksService {
           if (!conversation) continue;
         }
       } else {
-        // Update existing conversation with name/avatar/phoneNumber
+        // Update existing conversation with all metadata
         const existingMeta = (conversation.metadata as Record<string, unknown>) || {};
         let changed = false;
         if (contact.name && existingMeta.contactName !== contact.name) {
-          existingMeta.contactName = contact.name;
-          changed = true;
+          existingMeta.contactName = contact.name; changed = true;
         }
-        if (contact.avatarUrl && !existingMeta.avatarUrl) {
-          existingMeta.avatarUrl = contact.avatarUrl;
-          changed = true;
+        if (contact.avatarUrl) {
+          existingMeta.avatarUrl = contact.avatarUrl; changed = true;
         }
-        if (sessionPhone && conversation.phoneNumber !== sessionPhone) {
-          conversation.phoneNumber = sessionPhone;
-          changed = true;
+        if (contact.lastActivityAt) {
+          existingMeta.lastActivityAt = contact.lastActivityAt; changed = true;
+        }
+        if (contact.lastMessagePreview) {
+          existingMeta.lastMessagePreview = contact.lastMessagePreview; changed = true;
+        }
+        if (contact.isGroup) {
+          existingMeta.isGroup = true; changed = true;
+        }
+        if (sessionPhone && !contact.isGroup && conversation.phoneNumber !== sessionPhone) {
+          conversation.phoneNumber = sessionPhone; changed = true;
         }
         if (changed) {
           conversation.metadata = existingMeta;

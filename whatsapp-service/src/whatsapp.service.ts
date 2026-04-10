@@ -28,6 +28,8 @@ export class WhatsAppService implements OnModuleDestroy {
   private sessions: Map<string, WhatsAppSession> = new Map();
   private readonly sessionsPath: string;
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
+  // LID→phone map built from getContacts() — reused across sync + real-time
+  private contactPhoneMap: Map<string, { phone: string; name: string | null }> = new Map();
 
   constructor() {
     this.sessionsPath = path.join(process.cwd(), 'data', 'whatsapp-sessions');
@@ -42,84 +44,48 @@ export class WhatsAppService implements OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    // Clear all reconnect timers
-    for (const [, timer] of this.reconnectTimers) {
-      clearTimeout(timer);
-    }
+    for (const [, timer] of this.reconnectTimers) clearTimeout(timer);
     this.reconnectTimers.clear();
-
     for (const [workspaceId, session] of this.sessions) {
-      try {
-        await session.client.destroy();
-        this.logger.log(`Destroyed WhatsApp client for workspace ${workspaceId}`);
-      } catch (error) {
-        this.logger.warn(`Error destroying client for workspace ${workspaceId}`, error);
-      }
+      try { await session.client.destroy(); } catch {}
     }
     this.sessions.clear();
   }
 
+  // =========================================================================
+  // Session lifecycle
+  // =========================================================================
+
   async initializeClient(workspaceId: string): Promise<WhatsAppSession> {
-    const existingSession = this.sessions.get(workspaceId);
-    if (existingSession && existingSession.status === 'ready') {
-      return existingSession;
-    }
+    const existing = this.sessions.get(workspaceId);
+    if (existing?.status === 'ready') return existing;
+    if (existing) { try { await existing.client.destroy(); } catch {} }
 
-    if (existingSession) {
-      try {
-        await existingSession.client.destroy();
-      } catch (e) {
-        // Ignore
-      }
-    }
-
-    // Clear any pending reconnect timer
-    const reconnectTimer = this.reconnectTimers.get(workspaceId);
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      this.reconnectTimers.delete(workspaceId);
-    }
+    const timer = this.reconnectTimers.get(workspaceId);
+    if (timer) { clearTimeout(timer); this.reconnectTimers.delete(workspaceId); }
 
     this.logger.log(`Initializing WhatsApp client for workspace ${workspaceId}`);
-
-    const session: WhatsAppSession = {
-      workspaceId,
-      client: null as any,
-      status: 'initializing',
-    };
-
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    const session: WhatsAppSession = { workspaceId, client: null as any, status: 'initializing' };
 
     const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: workspaceId,
-        dataPath: this.sessionsPath,
-      }),
+      authStrategy: new LocalAuth({ clientId: workspaceId, dataPath: this.sessionsPath }),
       puppeteer: {
         headless: true,
-        executablePath: executablePath || undefined,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu',
-          '--single-process',
-        ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+               '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
+               '--disable-gpu', '--single-process'],
       },
     });
 
     session.client = client;
     this.sessions.set(workspaceId, session);
-
     this.setupEventHandlers(workspaceId, client, session);
 
     try {
       await client.initialize();
     } catch (error) {
-      this.logger.error(`Failed to initialize WhatsApp client for workspace ${workspaceId}`, error);
+      this.logger.error(`Failed to initialize for workspace ${workspaceId}`, error);
       session.status = 'error';
       session.error = error instanceof Error ? error.message : 'Failed to initialize';
     }
@@ -132,16 +98,11 @@ export class WhatsAppService implements OnModuleDestroy {
       this.logger.log(`QR code received for workspace ${workspaceId}`);
       session.status = 'qr_ready';
       session.qrCode = qr;
-
-      try {
-        session.qrCodeDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
-      } catch (e) {
-        this.logger.warn('Failed to generate QR code data URL', e);
-      }
+      try { session.qrCodeDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 }); } catch {}
     });
 
     client.on('authenticated', () => {
-      this.logger.log(`WhatsApp authenticated for workspace ${workspaceId}`);
+      this.logger.log(`Authenticated for workspace ${workspaceId}`);
       session.status = 'authenticated';
       session.qrCode = undefined;
       session.qrCodeDataUrl = undefined;
@@ -151,385 +112,430 @@ export class WhatsAppService implements OnModuleDestroy {
       this.logger.log(`WhatsApp ready for workspace ${workspaceId}`);
       session.status = 'ready';
       session.lastActivity = new Date();
-
       try {
-        const info = client.info;
-        session.phoneNumber = info?.wid?.user ? `+${info.wid.user}` : undefined;
-        this.logger.log(`Connected WhatsApp number: ${session.phoneNumber}`);
-      } catch (e) {
-        this.logger.warn('Failed to get WhatsApp info', e);
-      }
+        session.phoneNumber = client.info?.wid?.user ? `+${client.info.wid.user}` : undefined;
+        this.logger.log(`Connected number: ${session.phoneNumber}`);
+      } catch {}
 
-      // Notify Sigcore main API that WhatsApp is connected
-      this.forwardToSigcore(workspaceId, 'status_change', {
-        status: 'ready',
-        phoneNumber: session.phoneNumber,
-      });
+      this.forwardToSigcore(workspaceId, 'status_change', { status: 'ready', phoneNumber: session.phoneNumber });
 
-      // Auto-sync: wait for WhatsApp to load chats, then forward them
-      // WhatsApp multi-device needs 15-30s after 'ready' to populate the chat store
+      // Build contact map + auto-sync (with delay for WhatsApp to load)
       this.scheduleAutoSync(workspaceId, session);
     });
 
     client.on('disconnected', (reason: string) => {
-      this.logger.warn(`WhatsApp disconnected for workspace ${workspaceId}: ${reason}`);
+      this.logger.warn(`Disconnected for workspace ${workspaceId}: ${reason}`);
       session.status = 'disconnected';
       session.error = reason;
-
-      // Notify Sigcore
-      this.forwardToSigcore(workspaceId, 'status_change', {
-        status: 'disconnected',
-        reason,
-      });
-
-      // Attempt reconnection with exponential backoff
+      this.forwardToSigcore(workspaceId, 'status_change', { status: 'disconnected', reason });
       this.scheduleReconnect(workspaceId, 1);
     });
 
     client.on('auth_failure', (message: string) => {
-      this.logger.error(`WhatsApp auth failure for workspace ${workspaceId}: ${message}`);
+      this.logger.error(`Auth failure for workspace ${workspaceId}: ${message}`);
       session.status = 'error';
       session.error = message;
     });
 
-    // Forward messages to Sigcore main API
-    // Use message_create instead of message — fires for ALL messages including
-    // history synced from WhatsApp servers on connect, not just new incoming
-    const forwardMessage = async (message: WAMessage) => {
-      session.lastActivity = new Date();
+    // Single event listener for ALL messages (incoming + sent + synced history)
+    client.on('message_create', (msg) => this.handleRealTimeMessage(workspaceId, session, msg));
 
-      // Filter: only individual + group chats (not broadcasts or status updates)
-      if (!message.from) return;
-      const isGroup = message.from.endsWith('@g.us') || (message.to && message.to.endsWith('@g.us'));
-      if (!isGroup && !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
-        return;
-      }
-      // Skip empty messages (no body, no media, no special type)
-      const hasContent = message.body || message.hasMedia || message.type === 'sticker'
-        || message.type === 'location' || message.type === 'vcard' || message.type === 'call_log';
-      if (!hasContent) return;
-
-      const isFromMe = message.fromMe || false;
-
-      // For groups: chatId is the group ID
-      if (isGroup) {
-        const groupId = message.from.endsWith('@g.us') ? message.from : message.to;
-        let groupName: string | null = null;
-        try {
-          const chat = await session.client.getChatById(groupId);
-          groupName = chat?.name || null;
-        } catch {}
-
-        // Build display body for media/special types
-          let groupBody = message.body || '';
-          if (!groupBody) {
-            const typeLabels: Record<string, string> = {
-              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
-              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
-              location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
-            };
-            groupBody = typeLabels[message.type] || (message.hasMedia ? '📎 Attachment' : '');
-          }
-
-          this.forwardToSigcore(workspaceId, 'message_inbound', {
-          externalMessageId: message.id._serialized,
-          externalChatId: groupId,
-          from: isFromMe ? (session.phoneNumber || '') : groupId,
-          to: isFromMe ? groupId : (session.phoneNumber || ''),
-          body: groupBody,
-          timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
-          hasMedia: message.hasMedia,
-          type: message.type,
-          fromMe: isFromMe,
-          contactName: groupName,
-          isGroup: true,
-        });
-        return;
-      }
-
-      const chatId = isFromMe ? message.to : message.from;
-
-      // Resolve real phone number from contact (LID IDs are NOT phone numbers)
-      let contactPhone: string | null = null;
-      let contactName: string | null = null;
-      try {
-        const contact = await session.client.getContactById(chatId);
-        if (contact?.number) {
-          contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
-        }
-        contactName = contact?.name || contact?.pushname || null;
-      } catch {
-        // fallback
-      }
-
-      // For c.us chats, use the user ID as phone if contact.number not available
-      if (!contactPhone && chatId?.endsWith('@c.us')) {
-        const user = chatId.replace('@c.us', '');
-        if (user && user !== '0') {
-          contactPhone = user.startsWith('+') ? user : `+${user}`;
-        }
-      }
-
-      if (!contactPhone) {
-        this.logger.debug(`[MSG] Skipped: can't resolve phone for ${chatId}`);
-        return;
-      }
-
-      // Build display body for media/special types
-      let displayBody = message.body || '';
-      if (!displayBody) {
-        const typeLabels: Record<string, string> = {
-          image: '📷 Photo',
-          video: '🎥 Video',
-          audio: '🎵 Audio',
-          ptt: '🎤 Voice message',
-          document: '📄 Document',
-          sticker: '🏷️ Sticker',
-          location: '📍 Location',
-          vcard: '👤 Contact',
-          call_log: '📞 Call',
-        };
-        displayBody = typeLabels[message.type] || (message.hasMedia ? '📎 Attachment' : '');
-      }
-
-      this.forwardToSigcore(workspaceId, 'message_inbound', {
-        externalMessageId: message.id._serialized,
-        externalChatId: chatId,
-        from: isFromMe ? (session.phoneNumber || '') : contactPhone,
-        to: isFromMe ? contactPhone : (session.phoneNumber || ''),
-        body: displayBody,
-        timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
-        hasMedia: message.hasMedia,
-        type: message.type,
-        fromMe: isFromMe,
-        contactName,
-      });
-    };
-
-    // message_create fires for ALL messages (incoming + synced history + sent by me)
-    // Only use this one — NOT 'message' event — to avoid duplicates
-    client.on('message_create', (msg) => {
-      forwardMessage(msg);
-    });
-
-    // Forward message acknowledgement (delivery/read receipts)
-    client.on('message_ack', async (message: WAMessage, ack: number) => {
-      // ack: 0=pending, 1=sent, 2=delivered, 3=read
-      if (ack >= 2) {
-        this.forwardToSigcore(workspaceId, 'message_ack', {
-          externalMessageId: message.id._serialized,
-          ack,
-          status: ack === 2 ? 'delivered' : ack === 3 ? 'read' : 'sent',
-        });
-      }
-    });
-
-    // Forward message reactions — WhatsApp shows reactions as conversation activity
+    // Reactions
     client.on('message_reaction', async (reaction: any) => {
-      session.lastActivity = new Date();
       if (!reaction.msgId || !reaction.reaction) return;
-
-      const reactorId = reaction.senderId || reaction.id?.participant;
-      let contactPhone: string | null = null;
-      let contactName: string | null = null;
-
-      if (reactorId) {
-        try {
-          const contact = await session.client.getContactById(reactorId);
-          if (contact?.number) contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
-          contactName = contact?.name || contact?.pushname || null;
-        } catch {}
-      }
-
-      if (!contactPhone) return;
+      session.lastActivity = new Date();
+      const senderId = reaction.senderId || reaction.id?.participant;
+      const resolved = senderId ? this.resolvePhone(senderId) : null;
+      if (!resolved) return;
 
       await this.forwardToSigcore(workspaceId, 'message_inbound', {
-        externalMessageId: `react_${reaction.msgId._serialized || Date.now()}_${Math.random().toString(36).substring(7)}`,
-        externalChatId: reactorId,
-        from: contactPhone,
+        externalMessageId: `react_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+        externalChatId: senderId,
+        from: resolved.phone,
         to: session.phoneNumber || '',
         body: `Reacted ${reaction.reaction}`,
         timestamp: new Date().toISOString(),
-        hasMedia: false,
-        type: 'reaction',
-        fromMe: false,
-        contactName,
+        type: 'reaction', fromMe: false,
+        contactName: resolved.name,
       });
     });
 
-    // Forward call events — WhatsApp sorts conversations by ANY activity including calls
+    // Calls
     client.on('call', async (call: any) => {
       session.lastActivity = new Date();
+      const peerId = call.peerJid || call.from || call.peer;
+      if (!peerId) return;
+      const resolved = this.resolvePhone(peerId);
+      if (!resolved) return;
       const isFromMe = call.fromMe || false;
-      const peerJid = call.peerJid || call.from || call.peer;
+      const callType = call.isVideo ? '📞 Video call' : '📞 Voice call';
 
-      if (!peerJid) return;
-
-      // Resolve contact phone + name
-      let contactPhone: string | null = null;
-      let contactName: string | null = null;
-      try {
-        const contact = await session.client.getContactById(peerJid);
-        if (contact?.number) {
-          contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
-        }
-        contactName = contact?.name || contact?.pushname || null;
-      } catch {}
-
-      if (!contactPhone && peerJid.endsWith('@c.us')) {
-        const user = peerJid.replace('@c.us', '');
-        if (user && user !== '0') contactPhone = user.startsWith('+') ? user : `+${user}`;
-      }
-
-      if (!contactPhone) return;
-
-      const callType = call.isVideo ? 'Video call' : 'Voice call';
-      this.logger.log(`[CALL] ${callType} ${isFromMe ? 'to' : 'from'} ${contactPhone} (${contactName || 'unknown'})`);
-
-      // Forward as a special message so it updates conversation lastActivity
       await this.forwardToSigcore(workspaceId, 'message_inbound', {
-        externalMessageId: `call_${call.id || Date.now()}_${Math.random().toString(36).substring(7)}`,
-        externalChatId: peerJid,
-        from: isFromMe ? (session.phoneNumber || '') : contactPhone,
-        to: isFromMe ? contactPhone : (session.phoneNumber || ''),
-        body: `📞 ${callType}`,
+        externalMessageId: `call_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+        externalChatId: peerId,
+        from: isFromMe ? (session.phoneNumber || '') : resolved.phone,
+        to: isFromMe ? resolved.phone : (session.phoneNumber || ''),
+        body: callType,
         timestamp: new Date().toISOString(),
-        hasMedia: false,
-        type: 'call',
-        fromMe: isFromMe,
-        contactName,
+        type: 'call', fromMe: isFromMe,
+        contactName: resolved.name,
       });
     });
   }
 
-  /**
-   * Forward events to Sigcore main API via webhook
-   */
-  private async forwardToSigcore(
-    workspaceId: string,
-    eventType: string,
-    data: Record<string, unknown>,
-  ): Promise<void> {
-    const sigcoreUrl = process.env.SIGCORE_API_URL;
-    const webhookKey = process.env.SIGCORE_WEBHOOK_KEY;
+  // =========================================================================
+  // Contact map: LID→phone resolution (BATCH)
+  // =========================================================================
 
-    if (!sigcoreUrl || !webhookKey) {
-      this.logger.debug(`SIGCORE_API_URL or SIGCORE_WEBHOOK_KEY not set, skipping webhook for ${eventType}`);
+  private resolvePhone(chatId: string): { phone: string; name: string | null } | null {
+    // Check map first
+    const cached = this.contactPhoneMap.get(chatId);
+    if (cached) return cached;
+
+    // For c.us, extract phone from ID
+    if (chatId.endsWith('@c.us')) {
+      const user = chatId.replace('@c.us', '');
+      if (user && user !== '0') {
+        const phone = user.startsWith('+') ? user : `+${user}`;
+        return { phone, name: null };
+      }
+    }
+
+    // For groups, use the group ID as identifier
+    if (chatId.endsWith('@g.us')) {
+      return { phone: chatId, name: null };
+    }
+
+    return null;
+  }
+
+  private async buildContactMap(client: Client): Promise<void> {
+    this.logger.log('[ContactMap] Building contact map from getContacts()...');
+    try {
+      const allContacts = await client.getContacts();
+      let mapped = 0;
+
+      for (const contact of allContacts) {
+        if (contact.isGroup) continue;
+
+        let phone: string | null = null;
+        const name = contact.name || contact.pushname || null;
+
+        // Method 1: contact.number (most reliable in v1.34.6)
+        if (contact.number && !contact.number.includes('@')) {
+          phone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+        }
+
+        // Method 2: For c.us contacts, extract from ID
+        if (!phone && contact.id?._serialized?.endsWith('@c.us')) {
+          const user = contact.id.user;
+          if (user && user !== '0') {
+            phone = user.startsWith('+') ? user : `+${user}`;
+          }
+        }
+
+        // Method 3: getFormattedNumber() as fallback
+        if (!phone) {
+          try {
+            const formatted = await contact.getFormattedNumber();
+            if (formatted) {
+              phone = formatted.replace(/[\s\-()]/g, '');
+              if (!phone.startsWith('+')) phone = `+${phone}`;
+            }
+          } catch {}
+        }
+
+        if (phone && phone.length <= 16) {
+          this.contactPhoneMap.set(contact.id._serialized, { phone, name });
+          mapped++;
+        }
+      }
+
+      this.logger.log(`[ContactMap] Mapped ${mapped} contacts out of ${allContacts.length}`);
+    } catch (e) {
+      this.logger.error(`[ContactMap] Failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+  }
+
+  // =========================================================================
+  // Real-time message handler
+  // =========================================================================
+
+  private async handleRealTimeMessage(workspaceId: string, session: WhatsAppSession, message: WAMessage): Promise<void> {
+    session.lastActivity = new Date();
+
+    if (!message.from) return;
+
+    const isGroup = message.from.endsWith('@g.us') || (message.to && message.to.endsWith('@g.us'));
+    if (!isGroup && !message.from.endsWith('@c.us') && !message.from.endsWith('@lid')) return;
+
+    // Build display body
+    const body = this.buildDisplayBody(message.body, message.type, message.hasMedia);
+    if (!body) return;
+
+    const isFromMe = message.fromMe || false;
+
+    if (isGroup) {
+      const groupId = message.from.endsWith('@g.us') ? message.from : message.to;
+      let groupName: string | null = null;
+      try { const chat = await session.client.getChatById(groupId); groupName = chat?.name || null; } catch {}
+
+      await this.forwardToSigcore(workspaceId, 'message_inbound', {
+        externalMessageId: message.id._serialized,
+        externalChatId: groupId,
+        from: isFromMe ? (session.phoneNumber || '') : groupId,
+        to: isFromMe ? groupId : (session.phoneNumber || ''),
+        body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
+        hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
+        contactName: groupName, isGroup: true,
+      });
       return;
     }
+
+    // Individual chat: resolve phone from contact map
+    const chatId = isFromMe ? message.to : message.from;
+    const resolved = this.resolvePhone(chatId);
+    if (!resolved) return;
+
+    await this.forwardToSigcore(workspaceId, 'message_inbound', {
+      externalMessageId: message.id._serialized,
+      externalChatId: chatId,
+      from: isFromMe ? (session.phoneNumber || '') : resolved.phone,
+      to: isFromMe ? resolved.phone : (session.phoneNumber || ''),
+      body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
+      hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
+      contactName: resolved.name,
+    });
+  }
+
+  private buildDisplayBody(body: string | undefined, type: string, hasMedia: boolean): string {
+    if (body) return body;
+    const labels: Record<string, string> = {
+      image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
+      ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
+      location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
+    };
+    return labels[type] || (hasMedia ? '📎 Attachment' : '');
+  }
+
+  // =========================================================================
+  // Auto-sync: runs after WhatsApp connects
+  // =========================================================================
+
+  private scheduleAutoSync(workspaceId: string, session: WhatsAppSession): void {
+    // Wait 15s for WhatsApp to load chats, then sync
+    setTimeout(() => this.runAutoSync(workspaceId, session), 15000);
+  }
+
+  private async runAutoSync(workspaceId: string, session: WhatsAppSession): Promise<void> {
+    if (session.status !== 'ready') return;
+    this.logger.log(`[AutoSync] Starting for workspace ${workspaceId}`);
+
+    // Step 1: Build contact map (BATCH — one API call)
+    await this.buildContactMap(session.client);
+
+    // Step 2: Get all chats, sorted by WhatsApp's own timestamp (most recent first)
+    let allChats = await session.client.getChats();
+    allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    this.logger.log(`[AutoSync] Got ${allChats.length} chats`);
+
+    // Step 3: Build contacts list with metadata from chat objects
+    const contacts: Array<{
+      phone: string; externalChatId: string; name: string | null;
+      avatarUrl: string | null; isGroup?: boolean;
+      lastActivityAt: string | null; lastMessagePreview: string | null;
+    }> = [];
+
+    // Resolve avatars in batch
+    const avatarMap = new Map<string, string | null>();
+    for (const chat of allChats) {
+      try {
+        const url = await session.client.getProfilePicUrl(chat.id._serialized);
+        if (url) avatarMap.set(chat.id._serialized, url);
+      } catch {}
+    }
+
+    for (const chat of allChats) {
+      const isGroup = chat.isGroup;
+      const lastActivityAt = chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null;
+      const lastMsg = chat.lastMessage;
+      const lastMessagePreview = lastMsg ? this.buildDisplayBody(lastMsg.body, lastMsg.type, lastMsg.hasMedia) : null;
+      const avatar = avatarMap.get(chat.id._serialized) || null;
+
+      if (isGroup) {
+        if (!chat.name) continue;
+        contacts.push({
+          phone: chat.id._serialized,
+          externalChatId: chat.id._serialized,
+          name: chat.name,
+          avatarUrl: avatar,
+          isGroup: true,
+          lastActivityAt,
+          lastMessagePreview,
+        });
+      } else {
+        const resolved = this.resolvePhone(chat.id._serialized);
+        if (!resolved) continue;
+        const contactInfo = this.contactPhoneMap.get(chat.id._serialized);
+        contacts.push({
+          phone: resolved.phone,
+          externalChatId: chat.id._serialized,
+          name: contactInfo?.name || resolved.name || chat.name || null,
+          avatarUrl: avatar,
+          lastActivityAt,
+          lastMessagePreview,
+        });
+      }
+    }
+
+    // Step 4: Send contacts_sync (names + order arrive BEFORE messages)
+    if (contacts.length > 0) {
+      this.logger.log(`[AutoSync] Sending contacts_sync: ${contacts.length} contacts`);
+      await this.forwardToSigcore(workspaceId, 'contacts_sync', {
+        contacts,
+        sessionPhone: session.phoneNumber || '',
+      });
+    }
+
+    // Step 5: Sync messages for each chat
+    let totalMessages = 0;
+    let syncedChats = 0;
+
+    for (const chat of allChats) {
+      if (session.status !== 'ready') break;
+
+      const isGroup = chat.isGroup;
+      let chatPhone: string | null = null;
+      let chatName: string | null = null;
+
+      if (isGroup) {
+        if (!chat.name) continue;
+        chatPhone = chat.id._serialized;
+        chatName = chat.name;
+      } else {
+        const resolved = this.resolvePhone(chat.id._serialized);
+        if (!resolved) continue;
+        chatPhone = resolved.phone;
+        chatName = this.contactPhoneMap.get(chat.id._serialized)?.name || resolved.name;
+      }
+
+      // Sync history from server, then fetch messages
+      try { await chat.syncHistory(); } catch {}
+
+      let messages: WAMessage[] = [];
+      try {
+        messages = await chat.fetchMessages({ limit: 20 });
+      } catch (e) {
+        this.logger.debug(`[AutoSync] fetchMessages failed for ${chatPhone}: ${e instanceof Error ? e.message : 'unknown'}`);
+        continue;
+      }
+
+      for (const msg of messages) {
+        const body = this.buildDisplayBody(msg.body, msg.type, msg.hasMedia);
+        if (!body) continue;
+
+        const isFromMe = msg.fromMe || false;
+        const ts = msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString();
+
+        await this.forwardToSigcore(workspaceId, 'message_inbound', {
+          externalMessageId: msg.id._serialized,
+          externalChatId: chat.id._serialized,
+          from: isFromMe ? (session.phoneNumber || '') : (isGroup ? chat.id._serialized : chatPhone),
+          to: isFromMe ? (isGroup ? chat.id._serialized : chatPhone) : (session.phoneNumber || ''),
+          body, timestamp: ts,
+          hasMedia: msg.hasMedia, type: msg.type,
+          fromMe: isFromMe, contactName: chatName,
+          ...(isGroup && { isGroup: true }),
+        });
+        totalMessages++;
+      }
+      syncedChats++;
+    }
+
+    this.logger.log(`[AutoSync] Done: ${syncedChats} chats synced, ${totalMessages} messages forwarded`);
+  }
+
+  // =========================================================================
+  // Forwarding to Sigcore
+  // =========================================================================
+
+  private async forwardToSigcore(workspaceId: string, eventType: string, data: Record<string, unknown>): Promise<void> {
+    const sigcoreUrl = process.env.SIGCORE_API_URL;
+    const webhookKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (!sigcoreUrl || !webhookKey) return;
 
     try {
       await axios.post(
         `${sigcoreUrl}/webhooks/whatsapp/inbound`,
         { workspaceId, eventType, data, timestamp: new Date().toISOString() },
-        {
-          headers: { 'x-webhook-key': webhookKey, 'Content-Type': 'application/json' },
-          timeout: 30000,
-        },
+        { headers: { 'x-webhook-key': webhookKey, 'Content-Type': 'application/json' }, timeout: 30000 },
       );
-      this.logger.debug(`Forwarded ${eventType} to Sigcore for workspace ${workspaceId}`);
     } catch (error) {
-      this.logger.warn(
-        `Failed to forward ${eventType} to Sigcore: ${error instanceof Error ? error.message : 'unknown error'}`,
-      );
+      this.logger.warn(`Failed to forward ${eventType}: ${error instanceof Error ? error.message : 'unknown'}`);
     }
   }
 
-  /**
-   * Reconnect with exponential backoff (max 5 attempts, delays: 5s, 10s, 20s, 40s, 80s)
-   */
-  private scheduleReconnect(workspaceId: string, attempt: number): void {
-    if (attempt > 5) {
-      this.logger.warn(`Max reconnection attempts reached for workspace ${workspaceId}`);
-      return;
-    }
+  // =========================================================================
+  // Reconnection
+  // =========================================================================
 
+  private scheduleReconnect(workspaceId: string, attempt: number): void {
+    if (attempt > 5) return;
     const delayMs = Math.min(5000 * Math.pow(2, attempt - 1), 80000);
-    this.logger.log(`Scheduling reconnect for workspace ${workspaceId} in ${delayMs}ms (attempt ${attempt})`);
+    this.logger.log(`Reconnect scheduled for workspace ${workspaceId} in ${delayMs}ms (attempt ${attempt})`);
 
     const timer = setTimeout(async () => {
       this.reconnectTimers.delete(workspaceId);
       const session = this.sessions.get(workspaceId);
-
-      // Only reconnect if still disconnected (user didn't manually reconnect or disconnect)
-      if (session && session.status === 'disconnected') {
-        this.logger.log(`Attempting reconnect for workspace ${workspaceId} (attempt ${attempt})`);
-        try {
-          await this.initializeClient(workspaceId);
-        } catch (e) {
-          this.logger.warn(`Reconnect attempt ${attempt} failed for workspace ${workspaceId}`);
+      if (session?.status === 'disconnected') {
+        try { await this.initializeClient(workspaceId); } catch {
           this.scheduleReconnect(workspaceId, attempt + 1);
         }
       }
     }, delayMs);
-
     this.reconnectTimers.set(workspaceId, timer);
   }
+
+  // =========================================================================
+  // Public API (used by controller)
+  // =========================================================================
 
   getSession(workspaceId: string): WhatsAppSession | null {
     return this.sessions.get(workspaceId) || null;
   }
 
   isConnected(workspaceId: string): boolean {
-    const session = this.sessions.get(workspaceId);
-    return session?.status === 'ready';
+    return this.sessions.get(workspaceId)?.status === 'ready';
   }
 
   getQRCode(workspaceId: string): string | null {
     const session = this.sessions.get(workspaceId);
-    if (session?.status === 'qr_ready' && session.qrCodeDataUrl) {
-      return session.qrCodeDataUrl;
-    }
-    return null;
+    return session?.status === 'qr_ready' && session.qrCodeDataUrl ? session.qrCodeDataUrl : null;
   }
 
   async sendMessage(workspaceId: string, to: string, body: string): Promise<WhatsAppSendResult> {
     const session = this.sessions.get(workspaceId);
-
     if (!session || session.status !== 'ready') {
-      return { success: false, error: 'WhatsApp not connected. Please scan the QR code first.' };
+      return { success: false, error: 'WhatsApp not connected.' };
     }
 
     try {
-      let phoneNumber = to.replace(/\D/g, '');
-      this.logger.log(`Checking if ${phoneNumber} is registered on WhatsApp`);
-
+      const phoneNumber = to.replace(/\D/g, '');
       const numberId = await session.client.getNumberId(phoneNumber);
-      if (!numberId) {
-        this.logger.warn(`Number ${phoneNumber} is not registered on WhatsApp`);
-        return { success: false, error: `The number ${to} is not registered on WhatsApp` };
-      }
+      if (!numberId) return { success: false, error: `${to} is not on WhatsApp` };
 
       const chatId = numberId._serialized;
-      this.logger.log(`Sending WhatsApp message to ${chatId}`);
-
       const message = await session.client.sendMessage(chatId, body, { sendSeen: false });
       session.lastActivity = new Date();
-
-      // Forward outbound message to Sigcore
-      this.forwardToSigcore(workspaceId, 'message_outbound', {
-        externalMessageId: message.id._serialized,
-        externalChatId: chatId,
-        from: session.phoneNumber || '',
-        to: phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`,
-        body,
-        timestamp: new Date().toISOString(),
-      });
-
       return { success: true, messageId: message.id._serialized };
     } catch (error) {
-      this.logger.error(`Failed to send WhatsApp message for workspace ${workspaceId}`, error);
-      return { success: false, error: error instanceof Error ? error.message : 'Failed to send message' };
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to send' };
     }
   }
 
   async disconnect(workspaceId: string): Promise<boolean> {
-    // Cancel any pending reconnect
-    const reconnectTimer = this.reconnectTimers.get(workspaceId);
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      this.reconnectTimers.delete(workspaceId);
-    }
+    const timer = this.reconnectTimers.get(workspaceId);
+    if (timer) { clearTimeout(timer); this.reconnectTimers.delete(workspaceId); }
 
     const session = this.sessions.get(workspaceId);
     if (!session) return true;
@@ -538,494 +544,79 @@ export class WhatsAppService implements OnModuleDestroy {
       await session.client.logout();
       await session.client.destroy();
       this.sessions.delete(workspaceId);
-
       const sessionPath = path.join(this.sessionsPath, `session-${workspaceId}`);
-      if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true, force: true });
-      }
-
-      this.logger.log(`Disconnected WhatsApp for workspace ${workspaceId}`);
+      if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
       return true;
-    } catch (error) {
-      this.logger.error(`Failed to disconnect WhatsApp for workspace ${workspaceId}`, error);
+    } catch {
       return false;
     }
   }
 
-  /**
-   * Fetch all individual chats with recent messages (aggregated batch response).
-   * Filters out group chats. Normalizes phone numbers.
-   */
-  async getChatsWithMessages(
-    workspaceId: string,
-    messageLimit: number = 50,
-  ): Promise<{ chats: any[] }> {
+  getConnectedSessions(): Array<{ workspaceId: string; phoneNumber?: string; status: string }> {
+    return Array.from(this.sessions.entries()).map(([workspaceId, session]) => ({
+      workspaceId, phoneNumber: session.phoneNumber, status: session.status,
+    }));
+  }
+
+  async getChatsWithMessages(workspaceId: string, messageLimit = 50): Promise<{ chats: any[] }> {
     const session = this.sessions.get(workspaceId);
-    if (!session || session.status !== 'ready') {
-      return { chats: [] };
-    }
+    if (!session || session.status !== 'ready') return { chats: [] };
 
-    let allChats = await session.client.getChats();
-    this.logger.log(`[getChatsWithMessages] Total chats from getChats(): ${allChats.length}`);
-
-    // Debug: log server types
-    const serverCounts: Record<string, number> = {};
-    for (const chat of allChats) {
-      const server = chat.id?.server || 'unknown';
-      serverCounts[server] = (serverCounts[server] || 0) + 1;
-    }
-    this.logger.log(`[getChatsWithMessages] Chat server types: ${JSON.stringify(serverCounts)}`);
-
-    // If getChats() returns empty (common after session restore), try forcing chat load
-    if (allChats.length === 0) {
-      this.logger.log(`[Backfill] getChats() returned 0, attempting store-based fetch...`);
-      try {
-        // Use WhatsApp Web internal store via Puppeteer to get chat list
-        const pupPage = (session.client as any).pupPage;
-        if (pupPage) {
-          const chatIds: string[] = await pupPage.evaluate(() => {
-            const store = (window as any).Store;
-            if (!store?.Chat?._models) return [];
-            return store.Chat._models
-              .filter((c: any) => !c.isGroup && (c.id?.server === 'c.us' || c.id?.server === 'lid'))
-              .map((c: any) => c.id?._serialized)
-              .filter(Boolean);
-          });
-          this.logger.log(`[Backfill] Store returned ${chatIds.length} chat IDs`);
-          if (chatIds.length > 0) {
-            const chatPromises = chatIds.map(id =>
-              session.client.getChatById(id).catch(() => null)
-            );
-            const chats = await Promise.all(chatPromises);
-            allChats = chats.filter(Boolean) as any[];
-          }
-        }
-      } catch (e) {
-        this.logger.warn(`[Backfill] Store-based fetch failed: ${e instanceof Error ? e.message : 'unknown'}`);
-      }
-    }
-
-    // Individual + group chats
-    const individualChats = allChats.filter(
-      (chat) => !chat.isGroup && (chat.id.server === 'c.us' || chat.id.server === 'lid'),
-    );
-    const groupChats = allChats.filter(
-      (chat) => chat.isGroup && chat.id.server === 'g.us',
-    );
-
-    this.logger.log(
-      `[getChatsWithMessages] ${individualChats.length} individual + ${groupChats.length} group chats for workspace ${workspaceId}`,
-    );
+    const allChats = await session.client.getChats();
+    allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
     const result: any[] = [];
-
-    for (const chat of individualChats) {
-      // Resolve real phone number + name via contact
-      const info = await this.resolveContactInfo(session, chat);
-      const phone = info.phone;
-
-      // Skip contacts without a resolvable phone number
-      if (!phone) continue;
-
-      let messages: any[] = [];
-      if (messageLimit > 0) {
-        try {
-          const fetched = await chat.fetchMessages({ limit: messageLimit });
-          messages = fetched.map((msg) => ({
-            id: msg.id._serialized,
-            from: msg.fromMe ? (session.phoneNumber || '') : phone,
-            to: msg.fromMe ? phone : (session.phoneNumber || ''),
-            body: msg.body || '',
-            timestamp: msg.timestamp
-              ? new Date(msg.timestamp * 1000).toISOString()
-              : new Date().toISOString(),
-            fromMe: msg.fromMe || false,
-            hasMedia: msg.hasMedia || false,
-            type: msg.type || 'chat',
-          }));
-        } catch (e) {
-          this.logger.warn(
-            `[getChatsWithMessages] Failed to fetch messages for ${phone}: ${e instanceof Error ? e.message : 'unknown'}`,
-          );
+    for (const chat of allChats) {
+      if (chat.isGroup) {
+        if (!chat.name) continue;
+        let messages: any[] = [];
+        if (messageLimit > 0) {
+          try {
+            const fetched = await chat.fetchMessages({ limit: messageLimit });
+            messages = fetched.map(msg => ({
+              id: msg.id._serialized,
+              from: msg.fromMe ? (session.phoneNumber || '') : chat.id._serialized,
+              to: msg.fromMe ? chat.id._serialized : (session.phoneNumber || ''),
+              body: this.buildDisplayBody(msg.body, msg.type, msg.hasMedia),
+              timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+              fromMe: msg.fromMe || false, hasMedia: msg.hasMedia || false, type: msg.type || 'chat',
+            }));
+          } catch {}
         }
-      }
+        result.push({
+          id: chat.id._serialized, name: chat.name, phone: chat.id._serialized,
+          avatarUrl: null, isGroup: true,
+          lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
+          unreadCount: chat.unreadCount || 0, messages,
+        });
+      } else {
+        const resolved = this.resolvePhone(chat.id._serialized);
+        if (!resolved) continue;
+        const contactInfo = this.contactPhoneMap.get(chat.id._serialized);
 
-      result.push({
-        id: chat.id._serialized,
-        name: info.name || null,
-        phone,
-        avatarUrl: info.avatarUrl || null,
-        lastMessageAt: chat.timestamp
-          ? new Date(chat.timestamp * 1000).toISOString()
-          : null,
-        unreadCount: chat.unreadCount || 0,
-        messages,
-      });
-    }
-
-    // Add group chats
-    for (const chat of groupChats) {
-      if (!chat.name) continue;
-      let messages: any[] = [];
-      if (messageLimit > 0) {
-        try {
-          const fetched = await chat.fetchMessages({ limit: messageLimit });
-          messages = fetched.map((msg) => ({
-            id: msg.id._serialized,
-            from: msg.fromMe ? (session.phoneNumber || '') : chat.id._serialized,
-            to: msg.fromMe ? chat.id._serialized : (session.phoneNumber || ''),
-            body: msg.body || '',
-            timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
-            fromMe: msg.fromMe || false,
-            hasMedia: msg.hasMedia || false,
-            type: msg.type || 'chat',
-          }));
-        } catch {
-          // ignore fetch errors for groups
+        let messages: any[] = [];
+        if (messageLimit > 0) {
+          try {
+            const fetched = await chat.fetchMessages({ limit: messageLimit });
+            messages = fetched.map(msg => ({
+              id: msg.id._serialized,
+              from: msg.fromMe ? (session.phoneNumber || '') : resolved.phone,
+              to: msg.fromMe ? resolved.phone : (session.phoneNumber || ''),
+              body: this.buildDisplayBody(msg.body, msg.type, msg.hasMedia),
+              timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+              fromMe: msg.fromMe || false, hasMedia: msg.hasMedia || false, type: msg.type || 'chat',
+            }));
+          } catch {}
         }
-      }
-      result.push({
-        id: chat.id._serialized,
-        name: chat.name,
-        phone: chat.id._serialized,
-        avatarUrl: null,
-        isGroup: true,
-        lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
-        unreadCount: chat.unreadCount || 0,
-        messages,
-      });
-    }
-
-    this.logger.log(
-      `[getChatsWithMessages] Returning ${result.length} chats (${groupChats.length} groups) for workspace ${workspaceId}`,
-    );
-    return { chats: result };
-  }
-
-  /**
-   * Resolve the display name, avatar, and real phone number for a chat contact.
-   * LID (Linked ID) chats don't expose the phone number directly —
-   * we need to look it up via contact.number or contact.id.user.
-   */
-  private async resolveContactInfo(
-    session: WhatsAppSession,
-    chat: any,
-  ): Promise<{ name: string | null; avatarUrl: string | null; phone: string | null }> {
-    const chatId = chat.id._serialized;
-    const chatName = chat.name || null;
-
-    try {
-      const contact = await session.client.getContactById(chatId);
-      const name = contact?.name || contact?.pushname || chatName || null;
-
-      // Resolve real phone number:
-      // - contact.number is the actual phone number (available for saved contacts)
-      // - For LID chats, chat.id.user is an opaque ID, NOT a phone number
-      let phone: string | null = null;
-      if (contact?.number) {
-        phone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
-      } else if (chat.id.server === 'c.us' && chat.id.user && chat.id.user !== '0') {
-        // Traditional c.us chats — user IS the phone number
-        phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
-      }
-      // For LID chats without contact.number, phone stays null (we can't resolve it)
-
-      let avatarUrl: string | null = null;
-      try {
-        avatarUrl = await contact?.getProfilePicUrl() || null;
-      } catch {
-        // Privacy settings may block profile pic
-      }
-
-      return { name, avatarUrl, phone };
-    } catch {
-      // Fallback: use chat.id.user only for c.us chats
-      let phone: string | null = null;
-      if (chat.id.server === 'c.us' && chat.id.user && chat.id.user !== '0') {
-        phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
-      }
-      return { name: chatName || null, avatarUrl: null, phone };
-    }
-  }
-
-  /**
-   * Auto-sync chats after WhatsApp is ready.
-   * Flow: 1) fetch chats, 2) resolve contact names, 3) send contacts_sync, 4) sync messages
-   * Retries every 15s (up to 4 times) waiting for chats to populate.
-   */
-  private scheduleAutoSync(workspaceId: string, session: WhatsAppSession): void {
-    let attempt = 0;
-    const maxAttempts = 5;
-    const delayMs = 20000; // 20s between attempts — gives WhatsApp Web time to load chats
-
-    const trySync = async () => {
-      attempt++;
-      if (session.status !== 'ready') {
-        this.logger.log(`[AutoSync] Session no longer ready, stopping (attempt ${attempt})`);
-        return;
-      }
-
-      this.logger.log(`[AutoSync] Attempt ${attempt}/${maxAttempts} — fetching chats for workspace ${workspaceId}`);
-      const allChats = await session.client.getChats();
-
-      // Debug: log server types to diagnose filtering
-      const serverCounts: Record<string, number> = {};
-      for (const chat of allChats) {
-        const server = chat.id?.server || 'unknown';
-        serverCounts[server] = (serverCounts[server] || 0) + 1;
-      }
-      this.logger.log(`[AutoSync] Chat server types: ${JSON.stringify(serverCounts)}`);
-
-      // Log first 5 chats for debugging
-      for (const chat of allChats.slice(0, 5)) {
-        this.logger.log(`[AutoSync] Sample chat: id=${chat.id._serialized} server=${chat.id.server} name=${chat.name} isGroup=${chat.isGroup}`);
-      }
-
-      const individualChats = allChats.filter((c) => !c.isGroup && (c.id.server === 'c.us' || c.id.server === 'lid'));
-      const groupChats = allChats.filter((c) => c.isGroup && c.id.server === 'g.us');
-      this.logger.log(`[AutoSync] Found ${individualChats.length} individual + ${groupChats.length} group chats (${allChats.length} total)`);
-
-      if (individualChats.length === 0 && groupChats.length === 0 && attempt < maxAttempts) {
-        this.logger.log(`[AutoSync] No chats yet, retrying in ${delayMs / 1000}s...`);
-        setTimeout(trySync, delayMs);
-        return;
-      }
-
-      // Step 1: Resolve all contact names, avatars, and real phone numbers
-      const contactInfo = new Map<string, { name: string | null; avatarUrl: string | null; phone: string | null }>();
-      this.logger.log(`[AutoSync] Resolving contact info for ${individualChats.length} chats...`);
-      for (const chat of individualChats) {
-        const info = await this.resolveContactInfo(session, chat);
-        contactInfo.set(chat.id._serialized, info);
-        this.logger.log(`[AutoSync] Contact: ${info.phone || chat.id._serialized} → name=${info.name || 'none'} server=${chat.id.server}${info.avatarUrl ? ' (has avatar)' : ''}`);
-      }
-
-      // Step 2: Send contacts_sync batch event (names + avatars arrive before messages)
-      const contacts: Array<{ phone: string | null; externalChatId: string; name: string | null; avatarUrl: string | null; isGroup?: boolean }> = individualChats.map(chat => {
-        const info = contactInfo.get(chat.id._serialized);
-        return {
-          phone: info?.phone || null,
-          externalChatId: chat.id._serialized,
-          name: info?.name || null,
-          avatarUrl: info?.avatarUrl || null,
-        };
-      }).filter(c => c.phone && (c.name || c.avatarUrl));
-
-      // Add group chats to contacts
-      for (const chat of groupChats) {
-        if (chat.name) {
-          contacts.push({
-            phone: chat.id._serialized, // group ID as identifier
-            externalChatId: chat.id._serialized,
-            name: chat.name,
-            avatarUrl: null,
-            isGroup: true,
-          });
-        }
-      }
-
-      if (contacts.length > 0) {
-        this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} contacts (${groupChats.length} groups)`);
-        await this.forwardToSigcore(workspaceId, 'contacts_sync', {
-          contacts,
-          sessionPhone: session.phoneNumber || '',
+        result.push({
+          id: chat.id._serialized, name: contactInfo?.name || resolved.name || chat.name || null,
+          phone: resolved.phone, avatarUrl: null,
+          lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
+          unreadCount: chat.unreadCount || 0, messages,
         });
       }
-
-      // Step 3: Forward each chat's recent messages with resolved phone + contact names
-      // fetchMessages() crashes on LID chats (waitForChatLoading bug).
-      // Fallback: use Puppeteer to read messages directly from WhatsApp Web's internal store.
-      let totalMessages = 0;
-      let skippedChats = 0;
-      const pupPage = (session.client as any).pupPage;
-
-      for (const chat of individualChats) {
-        const chatInfo = contactInfo.get(chat.id._serialized);
-        const contactPhone = chatInfo?.phone;
-
-        if (!contactPhone) {
-          skippedChats++;
-          continue;
-        }
-
-        let rawMessages: any[] = [];
-
-        // Try standard fetchMessages first
-        try {
-          const fetched = await chat.fetchMessages({ limit: 20 });
-          rawMessages = fetched;
-        } catch {
-          // Fallback: read messages from WhatsApp Web store via Puppeteer.
-          // First, force-load the chat to populate msgs._models in memory.
-          if (pupPage) {
-            try {
-              const storeMessages = await pupPage.evaluate(async (chatId: string) => {
-                const store = (window as any).Store;
-                if (!store?.Chat) return [];
-                const chat = store.Chat.get(chatId);
-                if (!chat) return [];
-
-                // Force-load message history if not already loaded
-                if (!chat.msgs?._models?.length) {
-                  try {
-                    // loadEarlierMsgs triggers WhatsApp to fetch message history from server
-                    await chat.loadEarlierMsgs?.();
-                  } catch {
-                    // Some chats don't support this — proceed with what we have
-                  }
-                }
-
-                const msgs = chat.msgs?._models || [];
-                return msgs.slice(-20).map((m: any) => ({
-                  id: m.id?._serialized || '',
-                  body: m.body || '',
-                  fromMe: m.id?.fromMe || false,
-                  timestamp: m.t || 0,
-                  type: m.type || 'chat',
-                  hasMedia: !!(m.mediaData || m.isMedia || m.type === 'image' || m.type === 'video' || m.type === 'audio' || m.type === 'ptt' || m.type === 'document' || m.type === 'sticker'),
-                })).filter((m: any) => m.body || m.hasMedia || m.type === 'sticker' || m.type === 'location' || m.type === 'vcard' || m.type === 'call_log');
-              }, chat.id._serialized);
-              rawMessages = storeMessages;
-              if (storeMessages.length > 0) {
-                this.logger.log(`[AutoSync] Store fallback: got ${storeMessages.length} messages for ${contactPhone}`);
-              }
-            } catch (storeErr) {
-              this.logger.debug(`[AutoSync] Store fallback also failed for ${contactPhone}`);
-            }
-          }
-        }
-
-        for (const msg of rawMessages) {
-          let body = msg.body || '';
-          const msgType = msg.type || 'chat';
-          const msgHasMedia = msg.hasMedia || false;
-          // Skip truly empty messages
-          if (!body && !msgHasMedia && !['sticker','location','vcard','call_log'].includes(msgType)) continue;
-
-          // Add display labels for media/special types
-          if (!body) {
-            const typeLabels: Record<string, string> = {
-              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
-              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
-              location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
-            };
-            body = typeLabels[msgType] || (msgHasMedia ? '📎 Attachment' : '');
-          }
-          if (!body) continue;
-
-          const isFromMe = msg.fromMe || false;
-          const msgId = msg.id?._serialized || msg.id || `wa_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-          const ts = msg.timestamp;
-          let isoTimestamp: string;
-          if (ts instanceof Date) {
-            isoTimestamp = ts.toISOString();
-          } else if (typeof ts === 'number' && ts > 1000000000) {
-            isoTimestamp = new Date(ts > 9999999999 ? ts : ts * 1000).toISOString();
-          } else {
-            isoTimestamp = new Date().toISOString();
-          }
-          await this.forwardToSigcore(workspaceId, 'message_inbound', {
-            externalMessageId: msgId,
-            externalChatId: chat.id._serialized,
-            from: isFromMe ? (session.phoneNumber || '') : contactPhone,
-            to: isFromMe ? contactPhone : (session.phoneNumber || ''),
-            body,
-            timestamp: isoTimestamp,
-            hasMedia: msgHasMedia,
-            type: msgType,
-            fromMe: isFromMe,
-            contactName: chatInfo?.name || null,
-          });
-          totalMessages++;
-        }
-      }
-      // Step 4: Sync group chat messages
-      let groupMessages = 0;
-      for (const chat of groupChats) {
-        if (!chat.name) continue;
-        let rawMessages: any[] = [];
-        try {
-          const fetched = await chat.fetchMessages({ limit: 20 });
-          rawMessages = fetched;
-        } catch {
-          if (pupPage) {
-            try {
-              rawMessages = await pupPage.evaluate(async (chatId: string) => {
-                const store = (window as any).Store;
-                if (!store?.Chat) return [];
-                const chat = store.Chat.get(chatId);
-                if (!chat) return [];
-                if (!chat.msgs?._models?.length) {
-                  try { await chat.loadEarlierMsgs?.(); } catch {}
-                }
-                return (chat.msgs?._models || []).slice(-20).map((m: any) => ({
-                  id: m.id?._serialized || '',
-                  body: m.body || '',
-                  fromMe: m.id?.fromMe || false,
-                  timestamp: m.t || 0,
-                  type: m.type || 'chat',
-                  hasMedia: !!(m.mediaData || m.isMedia || m.type === 'image' || m.type === 'video' || m.type === 'audio' || m.type === 'ptt' || m.type === 'document' || m.type === 'sticker'),
-                  sender: m.author || m.from || '',
-                })).filter((m: any) => m.body || m.hasMedia || m.type === 'sticker' || m.type === 'location' || m.type === 'vcard');
-              }, chat.id._serialized);
-            } catch {}
-          }
-        }
-
-        for (const msg of rawMessages) {
-          let body = msg.body || '';
-          const msgType = msg.type || 'chat';
-          const msgHasMedia = msg.hasMedia || false;
-          if (!body && !msgHasMedia && !['sticker','location','vcard'].includes(msgType)) continue;
-          if (!body) {
-            const typeLabels: Record<string, string> = {
-              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
-              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
-              location: '📍 Location', vcard: '👤 Contact',
-            };
-            body = typeLabels[msgType] || (msgHasMedia ? '📎 Attachment' : '');
-          }
-          if (!body) continue;
-          const isFromMe = msg.fromMe || false;
-          const msgId = msg.id?._serialized || msg.id || `wa_grp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-          const ts = msg.timestamp;
-          let isoTimestamp: string;
-          if (ts instanceof Date) {
-            isoTimestamp = ts.toISOString();
-          } else if (typeof ts === 'number' && ts > 1000000000) {
-            isoTimestamp = new Date(ts > 9999999999 ? ts : ts * 1000).toISOString();
-          } else {
-            isoTimestamp = new Date().toISOString();
-          }
-          await this.forwardToSigcore(workspaceId, 'message_inbound', {
-            externalMessageId: msgId,
-            externalChatId: chat.id._serialized,
-            from: isFromMe ? (session.phoneNumber || '') : (chat.id._serialized),
-            to: isFromMe ? chat.id._serialized : (session.phoneNumber || ''),
-            body,
-            timestamp: isoTimestamp,
-            hasMedia: msg.hasMedia || false,
-            type: msg.type || 'chat',
-            fromMe: isFromMe,
-            contactName: chat.name,
-            isGroup: true,
-          });
-          groupMessages++;
-        }
-      }
-
-      this.logger.log(`[AutoSync] Done: ${individualChats.length} individual + ${groupChats.length} groups, ${contacts.length} contacts, ${skippedChats} skipped, ${totalMessages + groupMessages} messages forwarded`);
-    };
-
-    // First attempt after 15s delay
-    setTimeout(trySync, delayMs);
-  }
-
-  getConnectedSessions(): Array<{ workspaceId: string; phoneNumber?: string; status: string }> {
-    const result: Array<{ workspaceId: string; phoneNumber?: string; status: string }> = [];
-    for (const [workspaceId, session] of this.sessions) {
-      result.push({ workspaceId, phoneNumber: session.phoneNumber, status: session.status });
     }
-    return result;
+
+    return { chats: result };
   }
 }
