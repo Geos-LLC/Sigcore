@@ -299,6 +299,83 @@ export class WhatsAppService implements OnModuleDestroy {
         });
       }
     });
+
+    // Forward message reactions — WhatsApp shows reactions as conversation activity
+    client.on('message_reaction', async (reaction: any) => {
+      session.lastActivity = new Date();
+      if (!reaction.msgId || !reaction.reaction) return;
+
+      const reactorId = reaction.senderId || reaction.id?.participant;
+      let contactPhone: string | null = null;
+      let contactName: string | null = null;
+
+      if (reactorId) {
+        try {
+          const contact = await session.client.getContactById(reactorId);
+          if (contact?.number) contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+          contactName = contact?.name || contact?.pushname || null;
+        } catch {}
+      }
+
+      if (!contactPhone) return;
+
+      await this.forwardToSigcore(workspaceId, 'message_inbound', {
+        externalMessageId: `react_${reaction.msgId._serialized || Date.now()}_${Math.random().toString(36).substring(7)}`,
+        externalChatId: reactorId,
+        from: contactPhone,
+        to: session.phoneNumber || '',
+        body: `Reacted ${reaction.reaction}`,
+        timestamp: new Date().toISOString(),
+        hasMedia: false,
+        type: 'reaction',
+        fromMe: false,
+        contactName,
+      });
+    });
+
+    // Forward call events — WhatsApp sorts conversations by ANY activity including calls
+    client.on('call', async (call: any) => {
+      session.lastActivity = new Date();
+      const isFromMe = call.fromMe || false;
+      const peerJid = call.peerJid || call.from || call.peer;
+
+      if (!peerJid) return;
+
+      // Resolve contact phone + name
+      let contactPhone: string | null = null;
+      let contactName: string | null = null;
+      try {
+        const contact = await session.client.getContactById(peerJid);
+        if (contact?.number) {
+          contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+        }
+        contactName = contact?.name || contact?.pushname || null;
+      } catch {}
+
+      if (!contactPhone && peerJid.endsWith('@c.us')) {
+        const user = peerJid.replace('@c.us', '');
+        if (user && user !== '0') contactPhone = user.startsWith('+') ? user : `+${user}`;
+      }
+
+      if (!contactPhone) return;
+
+      const callType = call.isVideo ? 'Video call' : 'Voice call';
+      this.logger.log(`[CALL] ${callType} ${isFromMe ? 'to' : 'from'} ${contactPhone} (${contactName || 'unknown'})`);
+
+      // Forward as a special message so it updates conversation lastActivity
+      await this.forwardToSigcore(workspaceId, 'message_inbound', {
+        externalMessageId: `call_${call.id || Date.now()}_${Math.random().toString(36).substring(7)}`,
+        externalChatId: peerJid,
+        from: isFromMe ? (session.phoneNumber || '') : contactPhone,
+        to: isFromMe ? contactPhone : (session.phoneNumber || ''),
+        body: `📞 ${callType}`,
+        timestamp: new Date().toISOString(),
+        hasMedia: false,
+        type: 'call',
+        fromMe: isFromMe,
+        contactName,
+      });
+    });
   }
 
   /**
