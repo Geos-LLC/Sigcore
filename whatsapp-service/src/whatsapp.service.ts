@@ -204,9 +204,10 @@ export class WhatsAppService implements OnModuleDestroy {
       if (!isGroup && !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
         return;
       }
-      if (!message.body && !message.hasMedia) {
-        return;
-      }
+      // Skip empty messages (no body, no media, no special type)
+      const hasContent = message.body || message.hasMedia || message.type === 'sticker'
+        || message.type === 'location' || message.type === 'vcard' || message.type === 'call_log';
+      if (!hasContent) return;
 
       const isFromMe = message.fromMe || false;
 
@@ -220,11 +221,23 @@ export class WhatsAppService implements OnModuleDestroy {
         } catch {}
 
         this.forwardToSigcore(workspaceId, 'message_inbound', {
+          // Build display body for media/special types
+          let groupBody = message.body || '';
+          if (!groupBody) {
+            const typeLabels: Record<string, string> = {
+              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
+              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
+              location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
+            };
+            groupBody = typeLabels[message.type] || (message.hasMedia ? '📎 Attachment' : '');
+          }
+
+          this.forwardToSigcore(workspaceId, 'message_inbound', {
           externalMessageId: message.id._serialized,
           externalChatId: groupId,
           from: isFromMe ? (session.phoneNumber || '') : groupId,
           to: isFromMe ? groupId : (session.phoneNumber || ''),
-          body: message.body || '',
+          body: groupBody,
           timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
           hasMedia: message.hasMedia,
           type: message.type,
@@ -263,12 +276,29 @@ export class WhatsAppService implements OnModuleDestroy {
         return;
       }
 
+      // Build display body for media/special types
+      let displayBody = message.body || '';
+      if (!displayBody) {
+        const typeLabels: Record<string, string> = {
+          image: '📷 Photo',
+          video: '🎥 Video',
+          audio: '🎵 Audio',
+          ptt: '🎤 Voice message',
+          document: '📄 Document',
+          sticker: '🏷️ Sticker',
+          location: '📍 Location',
+          vcard: '👤 Contact',
+          call_log: '📞 Call',
+        };
+        displayBody = typeLabels[message.type] || (message.hasMedia ? '📎 Attachment' : '');
+      }
+
       this.forwardToSigcore(workspaceId, 'message_inbound', {
         externalMessageId: message.id._serialized,
         externalChatId: chatId,
         from: isFromMe ? (session.phoneNumber || '') : contactPhone,
         to: isFromMe ? contactPhone : (session.phoneNumber || ''),
-        body: message.body || '',
+        body: displayBody,
         timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia,
         type: message.type,
@@ -858,8 +888,8 @@ export class WhatsAppService implements OnModuleDestroy {
                   fromMe: m.id?.fromMe || false,
                   timestamp: m.t || 0,
                   type: m.type || 'chat',
-                  hasMedia: !!(m.mediaData || m.isMedia),
-                })).filter((m: any) => m.body || m.hasMedia);
+                  hasMedia: !!(m.mediaData || m.isMedia || m.type === 'image' || m.type === 'video' || m.type === 'audio' || m.type === 'ptt' || m.type === 'document' || m.type === 'sticker'),
+                })).filter((m: any) => m.body || m.hasMedia || m.type === 'sticker' || m.type === 'location' || m.type === 'vcard' || m.type === 'call_log');
               }, chat.id._serialized);
               rawMessages = storeMessages;
               if (storeMessages.length > 0) {
@@ -872,17 +902,30 @@ export class WhatsAppService implements OnModuleDestroy {
         }
 
         for (const msg of rawMessages) {
-          const body = msg.body || '';
-          if (!body && !msg.hasMedia) continue;
+          let body = msg.body || '';
+          const msgType = msg.type || 'chat';
+          const msgHasMedia = msg.hasMedia || false;
+          // Skip truly empty messages
+          if (!body && !msgHasMedia && !['sticker','location','vcard','call_log'].includes(msgType)) continue;
+
+          // Add display labels for media/special types
+          if (!body) {
+            const typeLabels: Record<string, string> = {
+              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
+              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
+              location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
+            };
+            body = typeLabels[msgType] || (msgHasMedia ? '📎 Attachment' : '');
+          }
+          if (!body) continue;
+
           const isFromMe = msg.fromMe || false;
           const msgId = msg.id?._serialized || msg.id || `wa_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-          // msg.timestamp can be unix seconds (from store) or already a Date (from fetchMessages)
           const ts = msg.timestamp;
           let isoTimestamp: string;
           if (ts instanceof Date) {
             isoTimestamp = ts.toISOString();
           } else if (typeof ts === 'number' && ts > 1000000000) {
-            // Unix seconds (>2001) — convert to ms
             isoTimestamp = new Date(ts > 9999999999 ? ts : ts * 1000).toISOString();
           } else {
             isoTimestamp = new Date().toISOString();
@@ -894,8 +937,8 @@ export class WhatsAppService implements OnModuleDestroy {
             to: isFromMe ? contactPhone : (session.phoneNumber || ''),
             body,
             timestamp: isoTimestamp,
-            hasMedia: msg.hasMedia || false,
-            type: msg.type || 'chat',
+            hasMedia: msgHasMedia,
+            type: msgType,
             fromMe: isFromMe,
             contactName: chatInfo?.name || null,
           });
@@ -927,17 +970,28 @@ export class WhatsAppService implements OnModuleDestroy {
                   fromMe: m.id?.fromMe || false,
                   timestamp: m.t || 0,
                   type: m.type || 'chat',
-                  hasMedia: !!(m.mediaData || m.isMedia),
+                  hasMedia: !!(m.mediaData || m.isMedia || m.type === 'image' || m.type === 'video' || m.type === 'audio' || m.type === 'ptt' || m.type === 'document' || m.type === 'sticker'),
                   sender: m.author || m.from || '',
-                })).filter((m: any) => m.body || m.hasMedia);
+                })).filter((m: any) => m.body || m.hasMedia || m.type === 'sticker' || m.type === 'location' || m.type === 'vcard');
               }, chat.id._serialized);
             } catch {}
           }
         }
 
         for (const msg of rawMessages) {
-          const body = msg.body || '';
-          if (!body && !msg.hasMedia) continue;
+          let body = msg.body || '';
+          const msgType = msg.type || 'chat';
+          const msgHasMedia = msg.hasMedia || false;
+          if (!body && !msgHasMedia && !['sticker','location','vcard'].includes(msgType)) continue;
+          if (!body) {
+            const typeLabels: Record<string, string> = {
+              image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
+              ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
+              location: '📍 Location', vcard: '👤 Contact',
+            };
+            body = typeLabels[msgType] || (msgHasMedia ? '📎 Attachment' : '');
+          }
+          if (!body) continue;
           const isFromMe = msg.fromMe || false;
           const msgId = msg.id?._serialized || msg.id || `wa_grp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
           const ts = msg.timestamp;
