@@ -654,39 +654,74 @@ export class WhatsAppService implements OnModuleDestroy {
       }
 
       // Step 3: Forward each chat's recent messages with resolved phone + contact names
+      // fetchMessages() crashes on LID chats (waitForChatLoading bug).
+      // Fallback: use Puppeteer to read messages directly from WhatsApp Web's internal store.
       let totalMessages = 0;
       let skippedChats = 0;
+      const pupPage = (session.client as any).pupPage;
+
       for (const chat of individualChats) {
         const chatInfo = contactInfo.get(chat.id._serialized);
         const contactPhone = chatInfo?.phone;
 
-        // Skip chats where we couldn't resolve a real phone number
         if (!contactPhone) {
           skippedChats++;
           continue;
         }
 
+        let rawMessages: any[] = [];
+
+        // Try standard fetchMessages first
         try {
-          const messages = await chat.fetchMessages({ limit: 20 });
-          for (const msg of messages) {
-            if (!msg.body && !msg.hasMedia) continue;
-            const isFromMe = msg.fromMe || false;
-            this.forwardToSigcore(workspaceId, 'message_inbound', {
-              externalMessageId: msg.id._serialized,
-              externalChatId: chat.id._serialized,
-              from: isFromMe ? (session.phoneNumber || '') : contactPhone,
-              to: isFromMe ? contactPhone : (session.phoneNumber || ''),
-              body: msg.body || '',
-              timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
-              hasMedia: msg.hasMedia,
-              type: msg.type,
-              fromMe: isFromMe,
-              contactName: chatInfo?.name || null,
-            });
-            totalMessages++;
+          const fetched = await chat.fetchMessages({ limit: 20 });
+          rawMessages = fetched;
+        } catch {
+          // Fallback: read messages from WhatsApp Web store via Puppeteer
+          if (pupPage) {
+            try {
+              const storeMessages = await pupPage.evaluate((chatId: string) => {
+                const store = (window as any).Store;
+                if (!store?.Msg) return [];
+                const chat = store.Chat.get(chatId);
+                if (!chat) return [];
+                const msgs = chat.msgs?._models || [];
+                return msgs.slice(-20).map((m: any) => ({
+                  id: m.id?._serialized || '',
+                  body: m.body || '',
+                  fromMe: m.id?.fromMe || false,
+                  timestamp: m.t || 0,
+                  type: m.type || 'chat',
+                  hasMedia: !!(m.mediaData || m.isMedia),
+                })).filter((m: any) => m.body || m.hasMedia);
+              }, chat.id._serialized);
+              rawMessages = storeMessages;
+              if (storeMessages.length > 0) {
+                this.logger.log(`[AutoSync] Store fallback: got ${storeMessages.length} messages for ${contactPhone}`);
+              }
+            } catch (storeErr) {
+              this.logger.debug(`[AutoSync] Store fallback also failed for ${contactPhone}`);
+            }
           }
-        } catch (e) {
-          this.logger.warn(`[AutoSync] Failed to fetch messages for ${contactPhone} (${chat.id._serialized}): ${e instanceof Error ? e.message : 'unknown'}`);
+        }
+
+        for (const msg of rawMessages) {
+          const body = msg.body || '';
+          if (!body && !msg.hasMedia) continue;
+          const isFromMe = msg.fromMe || false;
+          const msgId = msg.id?._serialized || msg.id || `wa_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+          this.forwardToSigcore(workspaceId, 'message_inbound', {
+            externalMessageId: msgId,
+            externalChatId: chat.id._serialized,
+            from: isFromMe ? (session.phoneNumber || '') : contactPhone,
+            to: isFromMe ? contactPhone : (session.phoneNumber || ''),
+            body,
+            timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+            hasMedia: msg.hasMedia || false,
+            type: msg.type || 'chat',
+            fromMe: isFromMe,
+            contactName: chatInfo?.name || null,
+          });
+          totalMessages++;
         }
       }
       this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${contacts.length} with names, ${skippedChats} skipped (no phone), ${totalMessages} messages forwarded`);
