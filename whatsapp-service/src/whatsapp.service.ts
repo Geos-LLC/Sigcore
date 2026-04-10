@@ -647,7 +647,10 @@ export class WhatsAppService implements OnModuleDestroy {
 
       if (contacts.length > 0) {
         this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} named contacts`);
-        await this.forwardToSigcore(workspaceId, 'contacts_sync', { contacts });
+        await this.forwardToSigcore(workspaceId, 'contacts_sync', {
+          contacts,
+          sessionPhone: session.phoneNumber || '',
+        });
       }
 
       // Step 3: Forward each chat's recent messages with resolved phone + contact names

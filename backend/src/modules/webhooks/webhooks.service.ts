@@ -770,10 +770,11 @@ export class WebhooksService {
       name: string | null;
       avatarUrl: string | null;
     }>;
+    const sessionPhone = data.sessionPhone as string || '';
 
     if (!contacts || !Array.isArray(contacts)) return;
 
-    this.logger.log(`[WhatsApp] Syncing ${contacts.length} contacts for workspace ${workspaceId}`);
+    this.logger.log(`[WhatsApp] Syncing ${contacts.length} contacts for workspace ${workspaceId} (session: ${sessionPhone})`);
 
     for (const contact of contacts) {
       if (!contact.phone) continue;
@@ -796,28 +797,31 @@ export class WebhooksService {
       };
 
       if (!conversation) {
-        // Pre-create conversation with name + avatar before messages arrive
         conversation = this.conversationRepo.create({
           workspaceId,
           tenantId: null,
           externalId: contact.externalChatId || `wa_conv_${Date.now()}`,
           provider: ProviderType.WHATSAPP,
           channel: 'whatsapp' as any,
-          phoneNumber: normalizedPhone, // use participant phone as phoneNumber too (WhatsApp is 1:1)
+          phoneNumber: sessionPhone || normalizedPhone,
           participantPhoneNumber: normalizedPhone,
           metadata: meta,
         });
         await this.conversationRepo.save(conversation);
       } else {
-        // Update existing conversation with name/avatar
+        // Update existing conversation with name/avatar/phoneNumber
         const existingMeta = (conversation.metadata as Record<string, unknown>) || {};
         let changed = false;
-        if (contact.name && !existingMeta.contactName) {
+        if (contact.name && existingMeta.contactName !== contact.name) {
           existingMeta.contactName = contact.name;
           changed = true;
         }
         if (contact.avatarUrl && !existingMeta.avatarUrl) {
           existingMeta.avatarUrl = contact.avatarUrl;
+          changed = true;
+        }
+        if (sessionPhone && conversation.phoneNumber !== sessionPhone) {
+          conversation.phoneNumber = sessionPhone;
           changed = true;
         }
         if (changed) {
