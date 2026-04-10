@@ -288,31 +288,103 @@ describe('WhatsApp Sync — Conversation Handling', () => {
     );
   });
 
-  it('stores fromMe messages with correct direction', async () => {
+  it('fromMe=true: participant is "to" (contact), direction is OUT', async () => {
     const { service, messageRepo, conversationRepo } = buildService();
     messageRepo.findOne.mockResolvedValue(null);
-    conversationRepo.findOne.mockResolvedValue({
-      id: 'conv-me',
-      workspaceId: WS_ID,
-    });
+    // No existing conversation — will create
+    conversationRepo.findOne.mockResolvedValue(null);
 
+    // fromMe: from=myPhone(+19047164356), to=contactPhone(+15551234567)
     await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
-      from: '+15559876543',
+      from: '+19047164356',
       to: '+15551234567',
       body: 'I sent this',
-      externalMessageId: 'wa_fromme',
-      externalChatId: '15551234567@c.us',
+      externalMessageId: 'wa_fromme_1',
+      externalChatId: '15551234567@lid',
       fromMe: true,
     });
 
-    // Even "fromMe" messages come through as message_inbound from the WhatsApp service
-    // They get stored as direction=IN because the handler doesn't differentiate
-    // (dedup will prevent double-storage if also sent via Sigcore API)
+    // Conversation should have contact as participant, not my phone
+    expect(conversationRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        participantPhoneNumber: '+15551234567', // contact, not me
+        phoneNumber: '+19047164356',            // my phone
+      }),
+    );
+
+    // Message direction should be OUT
     expect(messageRepo.create).toHaveBeenCalledWith(
       expect.objectContaining({
+        direction: 'out',
         body: 'I sent this',
-        providerMessageId: 'wa_fromme',
       }),
+    );
+  });
+
+  it('fromMe=false: participant is "from" (contact), direction is IN', async () => {
+    const { service, messageRepo, conversationRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    // Incoming: from=contactPhone, to=myPhone
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+15551234567',
+      to: '+19047164356',
+      body: 'They sent this',
+      externalMessageId: 'wa_fromthem_1',
+      externalChatId: '15551234567@lid',
+      fromMe: false,
+    });
+
+    expect(conversationRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        participantPhoneNumber: '+15551234567', // contact
+        phoneNumber: '+19047164356',            // my phone
+      }),
+    );
+
+    expect(messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        direction: 'in',
+        body: 'They sent this',
+      }),
+    );
+  });
+
+  it('fromMe messages reuse same conversation as incoming messages from same contact', async () => {
+    const { service, messageRepo, conversationRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+
+    const existingConv = {
+      id: 'conv-contact',
+      workspaceId: WS_ID,
+      participantPhoneNumber: '+15551234567',
+      provider: ProviderType.WHATSAPP,
+    };
+    // Both incoming and fromMe find the same conversation by participantPhone
+    conversationRepo.findOne.mockResolvedValue(existingConv);
+
+    // Incoming message
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+15551234567', to: '+19047164356', body: 'Hey',
+      externalMessageId: 'wa_in_1', externalChatId: '15551234567@lid', fromMe: false,
+    });
+
+    // My reply
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+19047164356', to: '+15551234567', body: 'Hi back',
+      externalMessageId: 'wa_out_1', externalChatId: '15551234567@lid', fromMe: true,
+    });
+
+    // Both should use the same conversation
+    expect(conversationRepo.create).not.toHaveBeenCalled();
+    expect(messageRepo.create).toHaveBeenCalledTimes(2);
+    // Both messages linked to same conversation
+    expect(messageRepo.create).toHaveBeenNthCalledWith(1,
+      expect.objectContaining({ conversationId: 'conv-contact', direction: 'in' }),
+    );
+    expect(messageRepo.create).toHaveBeenNthCalledWith(2,
+      expect.objectContaining({ conversationId: 'conv-contact', direction: 'out' }),
     );
   });
 });
