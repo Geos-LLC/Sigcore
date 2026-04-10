@@ -768,6 +768,18 @@ export class WebhooksService {
       return;
     }
 
+    // Dedup: skip if we already have this message (message_create + message events fire for same msg,
+    // and auto-sync can re-forward messages already received in real-time)
+    if (externalMessageId) {
+      const existing = await this.messageRepo.findOne({
+        where: { providerMessageId: externalMessageId },
+      });
+      if (existing) {
+        this.logger.debug(`[WhatsApp] Dedup: message ${externalMessageId} already exists, skipping`);
+        return;
+      }
+    }
+
     // Normalize phone numbers
     const normalizedFrom = from.startsWith('+') ? from : `+${from}`;
     const normalizedTo = to?.startsWith('+') ? to : (to ? `+${to}` : '');
