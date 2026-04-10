@@ -198,8 +198,10 @@ export class WhatsAppService implements OnModuleDestroy {
     const forwardMessage = async (message: WAMessage) => {
       session.lastActivity = new Date();
 
-      // Filter: only individual chat messages (not groups, broadcasts, or status updates)
-      if (!message.from || !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
+      // Filter: only individual + group chats (not broadcasts or status updates)
+      if (!message.from) return;
+      const isGroup = message.from.endsWith('@g.us') || (message.to && message.to.endsWith('@g.us'));
+      if (!isGroup && !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
         return;
       }
       if (!message.body && !message.hasMedia) {
@@ -207,6 +209,32 @@ export class WhatsAppService implements OnModuleDestroy {
       }
 
       const isFromMe = message.fromMe || false;
+
+      // For groups: chatId is the group ID
+      if (isGroup) {
+        const groupId = message.from.endsWith('@g.us') ? message.from : message.to;
+        let groupName: string | null = null;
+        try {
+          const chat = await session.client.getChatById(groupId);
+          groupName = chat?.name || null;
+        } catch {}
+
+        this.forwardToSigcore(workspaceId, 'message_inbound', {
+          externalMessageId: message.id._serialized,
+          externalChatId: groupId,
+          from: isFromMe ? (session.phoneNumber || '') : groupId,
+          to: isFromMe ? groupId : (session.phoneNumber || ''),
+          body: message.body || '',
+          timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
+          hasMedia: message.hasMedia,
+          type: message.type,
+          fromMe: isFromMe,
+          contactName: groupName,
+          isGroup: true,
+        });
+        return;
+      }
+
       const chatId = isFromMe ? message.to : message.from;
 
       // Resolve real phone number from contact (LID IDs are NOT phone numbers)
@@ -476,13 +504,16 @@ export class WhatsAppService implements OnModuleDestroy {
       }
     }
 
-    // Individual chats only — include c.us (traditional) and lid (multi-device linked IDs)
+    // Individual + group chats
     const individualChats = allChats.filter(
       (chat) => !chat.isGroup && (chat.id.server === 'c.us' || chat.id.server === 'lid'),
     );
+    const groupChats = allChats.filter(
+      (chat) => chat.isGroup && chat.id.server === 'g.us',
+    );
 
     this.logger.log(
-      `[Backfill] ${individualChats.length} individual chats for workspace ${workspaceId}`,
+      `[getChatsWithMessages] ${individualChats.length} individual + ${groupChats.length} group chats for workspace ${workspaceId}`,
     );
 
     const result: any[] = [];
@@ -531,8 +562,41 @@ export class WhatsAppService implements OnModuleDestroy {
       });
     }
 
+    // Add group chats
+    for (const chat of groupChats) {
+      if (!chat.name) continue;
+      let messages: any[] = [];
+      if (messageLimit > 0) {
+        try {
+          const fetched = await chat.fetchMessages({ limit: messageLimit });
+          messages = fetched.map((msg) => ({
+            id: msg.id._serialized,
+            from: msg.fromMe ? (session.phoneNumber || '') : chat.id._serialized,
+            to: msg.fromMe ? chat.id._serialized : (session.phoneNumber || ''),
+            body: msg.body || '',
+            timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+            fromMe: msg.fromMe || false,
+            hasMedia: msg.hasMedia || false,
+            type: msg.type || 'chat',
+          }));
+        } catch {
+          // ignore fetch errors for groups
+        }
+      }
+      result.push({
+        id: chat.id._serialized,
+        name: chat.name,
+        phone: chat.id._serialized,
+        avatarUrl: null,
+        isGroup: true,
+        lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
+        unreadCount: chat.unreadCount || 0,
+        messages,
+      });
+    }
+
     this.logger.log(
-      `[Backfill] Returning ${result.length} chats with messages for workspace ${workspaceId}`,
+      `[getChatsWithMessages] Returning ${result.length} chats (${groupChats.length} groups) for workspace ${workspaceId}`,
     );
     return { chats: result };
   }
@@ -617,9 +681,10 @@ export class WhatsAppService implements OnModuleDestroy {
       }
 
       const individualChats = allChats.filter((c) => !c.isGroup && (c.id.server === 'c.us' || c.id.server === 'lid'));
-      this.logger.log(`[AutoSync] Found ${individualChats.length} individual chats (${allChats.length} total)`);
+      const groupChats = allChats.filter((c) => c.isGroup && c.id.server === 'g.us');
+      this.logger.log(`[AutoSync] Found ${individualChats.length} individual + ${groupChats.length} group chats (${allChats.length} total)`);
 
-      if (individualChats.length === 0 && attempt < maxAttempts) {
+      if (individualChats.length === 0 && groupChats.length === 0 && attempt < maxAttempts) {
         this.logger.log(`[AutoSync] No chats yet, retrying in ${delayMs / 1000}s...`);
         setTimeout(trySync, delayMs);
         return;
@@ -645,8 +710,21 @@ export class WhatsAppService implements OnModuleDestroy {
         };
       }).filter(c => c.phone && (c.name || c.avatarUrl)); // only contacts with a resolved phone + name/avatar
 
+      // Add group chats to contacts
+      for (const chat of groupChats) {
+        if (chat.name) {
+          contacts.push({
+            phone: chat.id._serialized, // group ID as identifier
+            externalChatId: chat.id._serialized,
+            name: chat.name,
+            avatarUrl: null,
+            isGroup: true,
+          });
+        }
+      }
+
       if (contacts.length > 0) {
-        this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} named contacts`);
+        this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} contacts (${groupChats.length} groups)`);
         await this.forwardToSigcore(workspaceId, 'contacts_sync', {
           contacts,
           sessionPhone: session.phoneNumber || '',
@@ -747,7 +825,71 @@ export class WhatsAppService implements OnModuleDestroy {
           totalMessages++;
         }
       }
-      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${contacts.length} with names, ${skippedChats} skipped (no phone), ${totalMessages} messages forwarded`);
+      // Step 4: Sync group chat messages
+      let groupMessages = 0;
+      for (const chat of groupChats) {
+        if (!chat.name) continue;
+        let rawMessages: any[] = [];
+        try {
+          const fetched = await chat.fetchMessages({ limit: 20 });
+          rawMessages = fetched;
+        } catch {
+          if (pupPage) {
+            try {
+              rawMessages = await pupPage.evaluate(async (chatId: string) => {
+                const store = (window as any).Store;
+                if (!store?.Chat) return [];
+                const chat = store.Chat.get(chatId);
+                if (!chat) return [];
+                if (!chat.msgs?._models?.length) {
+                  try { await chat.loadEarlierMsgs?.(); } catch {}
+                }
+                return (chat.msgs?._models || []).slice(-20).map((m: any) => ({
+                  id: m.id?._serialized || '',
+                  body: m.body || '',
+                  fromMe: m.id?.fromMe || false,
+                  timestamp: m.t || 0,
+                  type: m.type || 'chat',
+                  hasMedia: !!(m.mediaData || m.isMedia),
+                  sender: m.author || m.from || '',
+                })).filter((m: any) => m.body || m.hasMedia);
+              }, chat.id._serialized);
+            } catch {}
+          }
+        }
+
+        for (const msg of rawMessages) {
+          const body = msg.body || '';
+          if (!body && !msg.hasMedia) continue;
+          const isFromMe = msg.fromMe || false;
+          const msgId = msg.id?._serialized || msg.id || `wa_grp_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+          const ts = msg.timestamp;
+          let isoTimestamp: string;
+          if (ts instanceof Date) {
+            isoTimestamp = ts.toISOString();
+          } else if (typeof ts === 'number' && ts > 1000000000) {
+            isoTimestamp = new Date(ts > 9999999999 ? ts : ts * 1000).toISOString();
+          } else {
+            isoTimestamp = new Date().toISOString();
+          }
+          await this.forwardToSigcore(workspaceId, 'message_inbound', {
+            externalMessageId: msgId,
+            externalChatId: chat.id._serialized,
+            from: isFromMe ? (session.phoneNumber || '') : (chat.id._serialized),
+            to: isFromMe ? chat.id._serialized : (session.phoneNumber || ''),
+            body,
+            timestamp: isoTimestamp,
+            hasMedia: msg.hasMedia || false,
+            type: msg.type || 'chat',
+            fromMe: isFromMe,
+            contactName: chat.name,
+            isGroup: true,
+          });
+          groupMessages++;
+        }
+      }
+
+      this.logger.log(`[AutoSync] Done: ${individualChats.length} individual + ${groupChats.length} groups, ${contacts.length} contacts, ${skippedChats} skipped, ${totalMessages + groupMessages} messages forwarded`);
     };
 
     // First attempt after 15s delay

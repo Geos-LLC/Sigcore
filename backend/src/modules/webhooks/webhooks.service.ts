@@ -769,6 +769,7 @@ export class WebhooksService {
       externalChatId: string;
       name: string | null;
       avatarUrl: string | null;
+      isGroup?: boolean;
     }>;
     const sessionPhone = data.sessionPhone as string || '';
 
@@ -794,6 +795,7 @@ export class WebhooksService {
         externalChatId: contact.externalChatId,
         ...(contact.name && { contactName: contact.name }),
         ...(contact.avatarUrl && { avatarUrl: contact.avatarUrl }),
+        ...(contact.isGroup && { isGroup: true }),
       };
 
       if (!conversation) {
@@ -874,12 +876,20 @@ export class WebhooksService {
     const normalizedFrom = from.startsWith('+') ? from : `+${from}`;
     const normalizedTo = to?.startsWith('+') ? to : (to ? `+${to}` : '');
     const isFromMe = data.fromMe === true;
+    const isGroup = data.isGroup === true;
 
-    // For WhatsApp: participant is the OTHER person in the chat, not "me"
-    // fromMe=true: from=myPhone, to=contactPhone → participant=to, ownPhone=from
-    // fromMe=false: from=contactPhone, to=myPhone → participant=from, ownPhone=to
-    const participantPhone = isFromMe ? normalizedTo : normalizedFrom;
-    const ownPhone = isFromMe ? normalizedFrom : normalizedTo;
+    // For groups: participant = group ID (externalChatId), ownPhone = session phone
+    // For individual: participant = the OTHER person, ownPhone = me
+    let participantPhone: string;
+    let ownPhone: string;
+
+    if (isGroup) {
+      participantPhone = externalChatId || normalizedFrom;
+      ownPhone = normalizedTo || normalizedFrom;
+    } else {
+      participantPhone = isFromMe ? normalizedTo : normalizedFrom;
+      ownPhone = isFromMe ? normalizedFrom : normalizedTo;
+    }
 
     if (!participantPhone) {
       this.logger.warn('[WhatsApp] Could not determine participant phone');
