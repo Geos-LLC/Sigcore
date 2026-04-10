@@ -825,7 +825,11 @@ export class WebhooksService {
     for (const contact of contacts) {
       if (!contact.phone) continue;
 
-      const normalizedPhone = contact.phone.startsWith('+') ? contact.phone : `+${contact.phone}`;
+      // Don't add + prefix to group IDs (@g.us) — they're not phone numbers
+      const isGroupContact = contact.isGroup || contact.phone.includes('@');
+      const normalizedPhone = isGroupContact
+        ? contact.phone
+        : (contact.phone.startsWith('+') ? contact.phone : `+${contact.phone}`);
 
       // Find existing conversation for this participant
       let conversation = await this.conversationRepo.findOne({
@@ -925,9 +929,9 @@ export class WebhooksService {
       }
     }
 
-    // Normalize phone numbers
-    const normalizedFrom = from.startsWith('+') ? from : `+${from}`;
-    const normalizedTo = to?.startsWith('+') ? to : (to ? `+${to}` : '');
+    // Normalize phone numbers (don't add + to group IDs or @-style identifiers)
+    const normalizedFrom = from.includes('@') ? from : (from.startsWith('+') ? from : `+${from}`);
+    const normalizedTo = !to ? '' : (to.includes('@') ? to : (to.startsWith('+') ? to : `+${to}`));
     const isFromMe = data.fromMe === true;
     const isGroup = data.isGroup === true;
 
