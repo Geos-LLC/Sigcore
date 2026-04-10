@@ -201,8 +201,9 @@ export class WhatsAppService implements OnModuleDestroy {
       this.logger.log(`[MSG] Raw event: from=${message.from} to=${message.to} type=${message.type} fromMe=${message.fromMe} hasBody=${!!message.body} hasMedia=${message.hasMedia}`);
 
       // Filter: only individual chat messages (not groups, broadcasts, or status updates)
-      if (!message.from || !message.from.endsWith('@c.us')) {
-        this.logger.log(`[MSG] Filtered: not @c.us (from=${message.from})`);
+      // WhatsApp multi-device uses @lid for linked IDs alongside traditional @c.us
+      if (!message.from || !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
+        this.logger.log(`[MSG] Filtered: not individual chat (from=${message.from})`);
         return;
       }
       if (!message.body && !message.hasMedia) {
@@ -210,8 +211,8 @@ export class WhatsAppService implements OnModuleDestroy {
         return;
       }
 
-      const fromPhone = message.from.replace('@c.us', '');
-      const toPhone = message.to?.replace('@c.us', '') || '';
+      const fromPhone = message.from.replace(/@c\.us$/, '').replace(/@lid$/, '');
+      const toPhone = message.to?.replace(/@c\.us$/, '').replace(/@lid$/, '').replace(/@g\.us$/, '') || '';
       const isFromMe = message.fromMe || false;
 
       this.forwardToSigcore(workspaceId, 'message_inbound', {
@@ -454,9 +455,9 @@ export class WhatsAppService implements OnModuleDestroy {
       }
     }
 
-    // Individual chats only — exclude groups (@g.us)
+    // Individual chats only — include c.us (traditional) and lid (multi-device linked IDs)
     const individualChats = allChats.filter(
-      (chat) => chat.id.server === 'c.us',
+      (chat) => !chat.isGroup && (chat.id.server === 'c.us' || chat.id.server === 'lid'),
     );
 
     this.logger.log(
@@ -476,8 +477,8 @@ export class WhatsAppService implements OnModuleDestroy {
         try {
           const fetched = await chat.fetchMessages({ limit: messageLimit });
           messages = fetched.map((msg) => {
-            const fromUser = msg.from?.replace('@c.us', '').replace('@g.us', '') || '';
-            const toUser = msg.to?.replace('@c.us', '').replace('@g.us', '') || '';
+            const fromUser = msg.from?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
+            const toUser = msg.to?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
             return {
               id: msg.id._serialized,
               from: fromUser.startsWith('+') ? fromUser : `+${fromUser}`,
@@ -573,7 +574,7 @@ export class WhatsAppService implements OnModuleDestroy {
         this.logger.log(`[AutoSync] Sample chat: id=${chat.id._serialized} server=${chat.id.server} name=${chat.name} isGroup=${chat.isGroup}`);
       }
 
-      const individualChats = allChats.filter((c) => !c.isGroup && c.id.server === 'c.us');
+      const individualChats = allChats.filter((c) => !c.isGroup && (c.id.server === 'c.us' || c.id.server === 'lid'));
       this.logger.log(`[AutoSync] Found ${individualChats.length} individual chats (${allChats.length} total)`);
 
       if (individualChats.length === 0 && attempt < maxAttempts) {
@@ -620,8 +621,8 @@ export class WhatsAppService implements OnModuleDestroy {
           const messages = await chat.fetchMessages({ limit: 20 });
           for (const msg of messages) {
             if (!msg.body && !msg.hasMedia) continue;
-            const fromUser = msg.from?.replace('@c.us', '').replace('@g.us', '') || '';
-            const toUser = msg.to?.replace('@c.us', '').replace('@g.us', '') || '';
+            const fromUser = msg.from?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
+            const toUser = msg.to?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
             this.forwardToSigcore(workspaceId, 'message_inbound', {
               externalMessageId: msg.id._serialized,
               externalChatId: msg.fromMe ? msg.to : msg.from,
