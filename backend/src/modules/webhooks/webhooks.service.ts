@@ -978,10 +978,10 @@ export class WebhooksService {
         // Race condition: another request created the same conversation — find it
         if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
           conversation = await this.conversationRepo.findOne({
-            where: { workspaceId, participantPhoneNumber: normalizedFrom, provider: ProviderType.WHATSAPP },
+            where: { workspaceId, participantPhoneNumber: participantPhone, provider: ProviderType.WHATSAPP },
           });
           if (!conversation) {
-            this.logger.warn(`[WhatsApp] Race condition but conversation still not found for ${normalizedFrom}`);
+            this.logger.warn(`[WhatsApp] Race condition but conversation still not found for ${participantPhone}`);
             return;
           }
         } else {

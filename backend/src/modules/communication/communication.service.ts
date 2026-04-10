@@ -358,6 +358,9 @@ export class CommunicationService {
         lastMessage: lastMessage?.body || (metadata.lastMessagePreview as string) || null,
         lastMessageAt: lastMessageAt,
         unreadCount: metadata.unreadCount as number || 0,
+        avatarUrl: metadata.avatarUrl as string || null,
+        isGroup: metadata.isGroup as boolean || false,
+        provider: conv.provider || null,
       };
     });
 

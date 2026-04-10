@@ -148,8 +148,11 @@ export class WhatsAppService implements OnModuleDestroy {
       session.error = message;
     });
 
-    // Single event listener for ALL messages (incoming + sent + synced history)
-    client.on('message_create', (msg) => this.handleRealTimeMessage(workspaceId, session, msg));
+    // Single event listener for ALL messages (suppressed during auto-sync — sync handles its own messages)
+    client.on('message_create', (msg) => {
+      if (this.syncing) return;
+      this.handleRealTimeMessage(workspaceId, session, msg);
+    });
 
     // Reactions (suppressed during auto-sync to prevent historical reaction flood)
     client.on('message_reaction', async (reaction: any) => {
