@@ -797,17 +797,26 @@ export class WebhooksService {
       };
 
       if (!conversation) {
-        conversation = this.conversationRepo.create({
-          workspaceId,
-          tenantId: null,
-          externalId: contact.externalChatId || `wa_conv_${Date.now()}`,
-          provider: ProviderType.WHATSAPP,
-          channel: 'whatsapp' as any,
-          phoneNumber: sessionPhone || normalizedPhone,
-          participantPhoneNumber: normalizedPhone,
-          metadata: meta,
-        });
-        await this.conversationRepo.save(conversation);
+        try {
+          conversation = this.conversationRepo.create({
+            workspaceId,
+            tenantId: null,
+            externalId: contact.externalChatId || `wa_conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            provider: ProviderType.WHATSAPP,
+            channel: 'whatsapp' as any,
+            phoneNumber: sessionPhone || normalizedPhone,
+            participantPhoneNumber: normalizedPhone,
+            metadata: meta,
+          });
+          await this.conversationRepo.save(conversation);
+        } catch (e: any) {
+          if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
+            conversation = await this.conversationRepo.findOne({
+              where: { workspaceId, participantPhoneNumber: normalizedPhone, provider: ProviderType.WHATSAPP },
+            });
+          }
+          if (!conversation) continue;
+        }
       } else {
         // Update existing conversation with name/avatar/phoneNumber
         const existingMeta = (conversation.metadata as Record<string, unknown>) || {};
@@ -878,18 +887,33 @@ export class WebhooksService {
     const contactName = data.contactName as string || null;
 
     if (!conversation) {
-      conversation = this.conversationRepo.create({
-        workspaceId,
-        tenantId: null,
-        externalId: externalChatId || `wa_conv_${Date.now()}`,
-        provider: ProviderType.WHATSAPP,
-        channel: 'whatsapp' as any,
-        phoneNumber: normalizedTo,
-        participantPhoneNumber: normalizedFrom,
-        metadata: { externalChatId, ...(contactName && { contactName }) },
-      });
-      await this.conversationRepo.save(conversation);
-      this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom}`);
+      try {
+        conversation = this.conversationRepo.create({
+          workspaceId,
+          tenantId: null,
+          externalId: externalChatId || `wa_conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+          provider: ProviderType.WHATSAPP,
+          channel: 'whatsapp' as any,
+          phoneNumber: normalizedTo,
+          participantPhoneNumber: normalizedFrom,
+          metadata: { externalChatId, ...(contactName && { contactName }) },
+        });
+        await this.conversationRepo.save(conversation);
+        this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom}`);
+      } catch (e: any) {
+        // Race condition: another request created the same conversation — find it
+        if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
+          conversation = await this.conversationRepo.findOne({
+            where: { workspaceId, participantPhoneNumber: normalizedFrom, provider: ProviderType.WHATSAPP },
+          });
+          if (!conversation) {
+            this.logger.warn(`[WhatsApp] Race condition but conversation still not found for ${normalizedFrom}`);
+            return;
+          }
+        } else {
+          throw e;
+        }
+      }
     } else if (contactName) {
       // Update contactName on existing conversation if not already set
       const meta = (conversation.metadata as Record<string, unknown>) || {};

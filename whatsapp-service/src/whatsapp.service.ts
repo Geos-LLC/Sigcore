@@ -295,7 +295,7 @@ export class WhatsAppService implements OnModuleDestroy {
         { workspaceId, eventType, data, timestamp: new Date().toISOString() },
         {
           headers: { 'x-webhook-key': webhookKey, 'Content-Type': 'application/json' },
-          timeout: 10000,
+          timeout: 30000,
         },
       );
       this.logger.debug(`Forwarded ${eventType} to Sigcore for workspace ${workspaceId}`);
@@ -732,7 +732,7 @@ export class WhatsAppService implements OnModuleDestroy {
           } else {
             isoTimestamp = new Date().toISOString();
           }
-          this.forwardToSigcore(workspaceId, 'message_inbound', {
+          await this.forwardToSigcore(workspaceId, 'message_inbound', {
             externalMessageId: msgId,
             externalChatId: chat.id._serialized,
             from: isFromMe ? (session.phoneNumber || '') : contactPhone,
