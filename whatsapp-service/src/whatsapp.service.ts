@@ -415,6 +415,15 @@ export class WhatsAppService implements OnModuleDestroy {
     }
 
     let allChats = await session.client.getChats();
+    this.logger.log(`[getChatsWithMessages] Total chats from getChats(): ${allChats.length}`);
+
+    // Debug: log server types
+    const serverCounts: Record<string, number> = {};
+    for (const chat of allChats) {
+      const server = chat.id?.server || 'unknown';
+      serverCounts[server] = (serverCounts[server] || 0) + 1;
+    }
+    this.logger.log(`[getChatsWithMessages] Chat server types: ${JSON.stringify(serverCounts)}`);
 
     // If getChats() returns empty (common after session restore), try forcing chat load
     if (allChats.length === 0) {
@@ -550,7 +559,21 @@ export class WhatsAppService implements OnModuleDestroy {
 
       this.logger.log(`[AutoSync] Attempt ${attempt}/${maxAttempts} — fetching chats for workspace ${workspaceId}`);
       const allChats = await session.client.getChats();
-      const individualChats = allChats.filter((c) => c.id.server === 'c.us');
+
+      // Debug: log server types to diagnose filtering
+      const serverCounts: Record<string, number> = {};
+      for (const chat of allChats) {
+        const server = chat.id?.server || 'unknown';
+        serverCounts[server] = (serverCounts[server] || 0) + 1;
+      }
+      this.logger.log(`[AutoSync] Chat server types: ${JSON.stringify(serverCounts)}`);
+
+      // Log first 5 chats for debugging
+      for (const chat of allChats.slice(0, 5)) {
+        this.logger.log(`[AutoSync] Sample chat: id=${chat.id._serialized} server=${chat.id.server} name=${chat.name} isGroup=${chat.isGroup}`);
+      }
+
+      const individualChats = allChats.filter((c) => !c.isGroup && c.id.server === 'c.us');
       this.logger.log(`[AutoSync] Found ${individualChats.length} individual chats (${allChats.length} total)`);
 
       if (individualChats.length === 0 && attempt < maxAttempts) {
