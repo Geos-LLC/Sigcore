@@ -458,7 +458,7 @@ export class WhatsAppService implements OnModuleDestroy {
             const store = (window as any).Store;
             if (!store?.Chat?._models) return [];
             return store.Chat._models
-              .filter((c: any) => !c.isGroup && c.id?.server === 'c.us')
+              .filter((c: any) => !c.isGroup && (c.id?.server === 'c.us' || c.id?.server === 'lid'))
               .map((c: any) => c.id?._serialized)
               .filter(Boolean);
           });
@@ -488,42 +488,41 @@ export class WhatsAppService implements OnModuleDestroy {
     const result: any[] = [];
 
     for (const chat of individualChats) {
-      const phone = chat.id.user.startsWith('+')
-        ? chat.id.user
-        : `+${chat.id.user}`;
+      // Resolve real phone number + name via contact
+      const info = await this.resolveContactInfo(session, chat);
+      const phone = info.phone;
 
-      // Always include the chat, even if message fetch fails
+      // Skip contacts without a resolvable phone number
+      if (!phone) continue;
+
       let messages: any[] = [];
       if (messageLimit > 0) {
         try {
           const fetched = await chat.fetchMessages({ limit: messageLimit });
-          messages = fetched.map((msg) => {
-            const fromUser = msg.from?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
-            const toUser = msg.to?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
-            return {
-              id: msg.id._serialized,
-              from: fromUser.startsWith('+') ? fromUser : `+${fromUser}`,
-              to: toUser.startsWith('+') ? toUser : `+${toUser}`,
-              body: msg.body || '',
-              timestamp: msg.timestamp
-                ? new Date(msg.timestamp * 1000).toISOString()
-                : new Date().toISOString(),
-              fromMe: msg.fromMe || false,
-              hasMedia: msg.hasMedia || false,
-              type: msg.type || 'chat',
-            };
-          });
+          messages = fetched.map((msg) => ({
+            id: msg.id._serialized,
+            from: msg.fromMe ? (session.phoneNumber || '') : phone,
+            to: msg.fromMe ? phone : (session.phoneNumber || ''),
+            body: msg.body || '',
+            timestamp: msg.timestamp
+              ? new Date(msg.timestamp * 1000).toISOString()
+              : new Date().toISOString(),
+            fromMe: msg.fromMe || false,
+            hasMedia: msg.hasMedia || false,
+            type: msg.type || 'chat',
+          }));
         } catch (e) {
           this.logger.warn(
-            `[Backfill] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`,
+            `[getChatsWithMessages] Failed to fetch messages for ${phone}: ${e instanceof Error ? e.message : 'unknown'}`,
           );
         }
       }
 
       result.push({
         id: chat.id._serialized,
-        name: chat.name || null,
+        name: info.name || null,
         phone,
+        avatarUrl: info.avatarUrl || null,
         lastMessageAt: chat.timestamp
           ? new Date(chat.timestamp * 1000).toISOString()
           : null,
