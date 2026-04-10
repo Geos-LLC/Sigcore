@@ -794,6 +794,8 @@ export class WebhooksService {
       },
     });
 
+    const contactName = data.contactName as string || null;
+
     if (!conversation) {
       conversation = this.conversationRepo.create({
         workspaceId,
@@ -803,10 +805,18 @@ export class WebhooksService {
         channel: 'whatsapp' as any,
         phoneNumber: normalizedTo,
         participantPhoneNumber: normalizedFrom,
-        metadata: { externalChatId },
+        metadata: { externalChatId, ...(contactName && { contactName }) },
       });
       await this.conversationRepo.save(conversation);
       this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom}`);
+    } else if (contactName) {
+      // Update contactName on existing conversation if not already set
+      const meta = (conversation.metadata as Record<string, unknown>) || {};
+      if (!meta.contactName) {
+        meta.contactName = contactName;
+        conversation.metadata = meta;
+        await this.conversationRepo.save(conversation);
+      }
     }
 
     // Create message record

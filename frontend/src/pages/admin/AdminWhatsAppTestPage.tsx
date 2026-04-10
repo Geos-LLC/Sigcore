@@ -9,6 +9,7 @@ interface SyncedConversation {
   phoneNumber: string;
   participantPhoneNumber: string;
   contactId: string | null;
+  contactName: string | null;
   lastMessage: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
@@ -476,9 +477,9 @@ export default function AdminWhatsAppTestPage() {
                         <span className="font-mono text-sm font-medium text-gray-900">
                           {conv.participantPhoneNumber}
                         </span>
-                        {conv.participantContacts?.[0]?.contactName && (
+                        {(conv.contactName || conv.participantContacts?.[0]?.contactName) && (
                           <span className="text-xs text-gray-500">
-                            ({conv.participantContacts[0].contactName})
+                            ({conv.contactName || conv.participantContacts?.[0]?.contactName})
                           </span>
                         )}
                       </div>
