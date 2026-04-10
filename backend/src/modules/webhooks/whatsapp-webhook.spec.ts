@@ -11,6 +11,7 @@ function buildMockRepo() {
     find: jest.fn(),
     create: jest.fn((data: any) => ({ id: 'generated-id', ...data })),
     save: jest.fn(async (entity: any) => entity),
+    update: jest.fn(),
     remove: jest.fn(),
     count: jest.fn(),
     createQueryBuilder: jest.fn(),

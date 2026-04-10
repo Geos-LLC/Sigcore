@@ -900,7 +900,8 @@ export class WebhooksService {
       }
     }
 
-    // Create message record
+    // Create message record with original timestamp if provided
+    const originalTimestamp = data.timestamp ? new Date(data.timestamp as string) : null;
     const message = this.messageRepo.create({
       conversationId: conversation.id,
       direction: MessageDirection.IN,
@@ -913,6 +914,12 @@ export class WebhooksService {
       metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type },
     });
     await this.messageRepo.save(message);
+
+    // Override createdAt with original message timestamp if available
+    if (originalTimestamp && !isNaN(originalTimestamp.getTime()) && originalTimestamp.getFullYear() > 2020) {
+      await this.messageRepo.update(message.id, { createdAt: originalTimestamp } as any);
+      message.createdAt = originalTimestamp;
+    }
 
     // Emit WebSocket event for real-time UI updates
     this.eventsGateway.emitNewMessage(workspaceId, {

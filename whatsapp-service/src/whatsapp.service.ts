@@ -590,8 +590,8 @@ export class WhatsAppService implements OnModuleDestroy {
    */
   private scheduleAutoSync(workspaceId: string, session: WhatsAppSession): void {
     let attempt = 0;
-    const maxAttempts = 4;
-    const delayMs = 15000;
+    const maxAttempts = 5;
+    const delayMs = 20000; // 20s between attempts — gives WhatsApp Web time to load chats
 
     const trySync = async () => {
       attempt++;
@@ -676,14 +676,26 @@ export class WhatsAppService implements OnModuleDestroy {
           const fetched = await chat.fetchMessages({ limit: 20 });
           rawMessages = fetched;
         } catch {
-          // Fallback: read messages from WhatsApp Web store via Puppeteer
+          // Fallback: read messages from WhatsApp Web store via Puppeteer.
+          // First, force-load the chat to populate msgs._models in memory.
           if (pupPage) {
             try {
-              const storeMessages = await pupPage.evaluate((chatId: string) => {
+              const storeMessages = await pupPage.evaluate(async (chatId: string) => {
                 const store = (window as any).Store;
-                if (!store?.Msg) return [];
+                if (!store?.Chat) return [];
                 const chat = store.Chat.get(chatId);
                 if (!chat) return [];
+
+                // Force-load message history if not already loaded
+                if (!chat.msgs?._models?.length) {
+                  try {
+                    // loadEarlierMsgs triggers WhatsApp to fetch message history from server
+                    await chat.loadEarlierMsgs?.();
+                  } catch {
+                    // Some chats don't support this — proceed with what we have
+                  }
+                }
+
                 const msgs = chat.msgs?._models || [];
                 return msgs.slice(-20).map((m: any) => ({
                   id: m.id?._serialized || '',
@@ -709,13 +721,24 @@ export class WhatsAppService implements OnModuleDestroy {
           if (!body && !msg.hasMedia) continue;
           const isFromMe = msg.fromMe || false;
           const msgId = msg.id?._serialized || msg.id || `wa_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+          // msg.timestamp can be unix seconds (from store) or already a Date (from fetchMessages)
+          const ts = msg.timestamp;
+          let isoTimestamp: string;
+          if (ts instanceof Date) {
+            isoTimestamp = ts.toISOString();
+          } else if (typeof ts === 'number' && ts > 1000000000) {
+            // Unix seconds (>2001) — convert to ms
+            isoTimestamp = new Date(ts > 9999999999 ? ts : ts * 1000).toISOString();
+          } else {
+            isoTimestamp = new Date().toISOString();
+          }
           this.forwardToSigcore(workspaceId, 'message_inbound', {
             externalMessageId: msgId,
             externalChatId: chat.id._serialized,
             from: isFromMe ? (session.phoneNumber || '') : contactPhone,
             to: isFromMe ? contactPhone : (session.phoneNumber || ''),
             body,
-            timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+            timestamp: isoTimestamp,
             hasMedia: msg.hasMedia || false,
             type: msg.type || 'chat',
             fromMe: isFromMe,
