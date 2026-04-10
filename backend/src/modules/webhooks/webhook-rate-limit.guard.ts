@@ -24,8 +24,8 @@ export class WebhookRateLimitGuard implements CanActivate {
   private readonly logger = new Logger(WebhookRateLimitGuard.name);
   private readonly store = new Map<string, RateLimitEntry>();
 
-  // Configuration
-  private readonly limit = 100; // requests
+  // Configuration — 600/min to handle WhatsApp auto-sync bursts
+  private readonly limit = 600; // requests
   private readonly windowMs = 60 * 1000; // 1 minute
 
   // Cleanup interval (every 5 minutes)

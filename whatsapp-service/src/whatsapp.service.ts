@@ -22,6 +22,15 @@ export interface WhatsAppSendResult {
   error?: string;
 }
 
+interface StoreMessage {
+  id: { _serialized: string };
+  body?: string;
+  type?: string;
+  timestamp?: number;
+  fromMe?: boolean;
+  hasMedia?: boolean;
+}
+
 @Injectable()
 export class WhatsAppService implements OnModuleDestroy {
   private readonly logger = new Logger(WhatsAppService.name);
@@ -30,6 +39,8 @@ export class WhatsAppService implements OnModuleDestroy {
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   // LID→phone map built from getContacts() — reused across sync + real-time
   private contactPhoneMap: Map<string, { phone: string; name: string | null }> = new Map();
+  // Flag to suppress reaction/call events during auto-sync
+  private syncing = false;
 
   constructor() {
     this.sessionsPath = path.join(process.cwd(), 'data', 'whatsapp-sessions');
@@ -140,8 +151,9 @@ export class WhatsAppService implements OnModuleDestroy {
     // Single event listener for ALL messages (incoming + sent + synced history)
     client.on('message_create', (msg) => this.handleRealTimeMessage(workspaceId, session, msg));
 
-    // Reactions
+    // Reactions (suppressed during auto-sync to prevent historical reaction flood)
     client.on('message_reaction', async (reaction: any) => {
+      if (this.syncing) return;
       if (!reaction.msgId || !reaction.reaction) return;
       session.lastActivity = new Date();
       const senderId = reaction.senderId || reaction.id?.participant;
@@ -160,8 +172,9 @@ export class WhatsAppService implements OnModuleDestroy {
       });
     });
 
-    // Calls
+    // Calls (suppressed during auto-sync)
     client.on('call', async (call: any) => {
+      if (this.syncing) return;
       session.lastActivity = new Date();
       const peerId = call.peerJid || call.from || call.peer;
       if (!peerId) return;
@@ -319,6 +332,62 @@ export class WhatsAppService implements OnModuleDestroy {
   }
 
   // =========================================================================
+  // Puppeteer store fallback — reads messages from browser memory
+  // This is the ONLY method that works for LID chats where fetchMessages crashes
+  // =========================================================================
+
+  private async fetchMessagesWithFallback(
+    client: Client,
+    chat: any,
+    limit: number,
+  ): Promise<StoreMessage[]> {
+    // Try the normal API first
+    try {
+      const msgs = await chat.fetchMessages({ limit });
+      if (msgs && msgs.length > 0) return msgs;
+    } catch (e) {
+      this.logger.debug(`[Fallback] fetchMessages failed for ${chat.id._serialized}, trying store...`);
+    }
+
+    // Puppeteer store fallback: read from WhatsApp Web's in-browser Store
+    try {
+      const pupPage = (client as any).pupPage;
+      if (!pupPage) return [];
+
+      const storeMessages: StoreMessage[] = await pupPage.evaluate(
+        (chatId: string, msgLimit: number) => {
+          const store = (window as any).Store;
+          if (!store?.Chat) return [];
+          const storeChat = store.Chat.get(chatId);
+          if (!storeChat) return [];
+
+          const models = storeChat.msgs?._models || storeChat.msgs?.models || [];
+          const recent = models.slice(-msgLimit);
+
+          return recent.map((m: any) => ({
+            id: { _serialized: m.id?._serialized || `store_${Date.now()}_${Math.random().toString(36).substring(7)}` },
+            body: m.body || '',
+            type: m.type || 'chat',
+            timestamp: m.t || m.timestamp || 0,
+            fromMe: m.id?.fromMe || false,
+            hasMedia: m.isMedia || m.isMMS || false,
+          }));
+        },
+        chat.id._serialized,
+        limit,
+      );
+
+      if (storeMessages.length > 0) {
+        this.logger.debug(`[Fallback] Got ${storeMessages.length} messages from store for ${chat.id._serialized}`);
+      }
+      return storeMessages;
+    } catch (e) {
+      this.logger.debug(`[Fallback] Store fallback also failed for ${chat.id._serialized}`);
+      return [];
+    }
+  }
+
+  // =========================================================================
   // Auto-sync: runs after WhatsApp connects
   // =========================================================================
 
@@ -330,129 +399,169 @@ export class WhatsAppService implements OnModuleDestroy {
   private async runAutoSync(workspaceId: string, session: WhatsAppSession): Promise<void> {
     if (session.status !== 'ready') return;
     this.logger.log(`[AutoSync] Starting for workspace ${workspaceId}`);
+    this.syncing = true;
 
-    // Step 1: Build contact map (BATCH — one API call)
-    await this.buildContactMap(session.client);
+    try {
+      // Step 1: Build contact map (BATCH — one API call) with retry
+      await this.buildContactMap(session.client);
+      if (this.contactPhoneMap.size === 0) {
+        this.logger.warn('[AutoSync] ContactMap empty after first attempt, retrying in 5s...');
+        await this.delay(5000);
+        await this.buildContactMap(session.client);
+      }
 
-    // Step 2: Get all chats, sorted by WhatsApp's own timestamp (most recent first)
-    let allChats = await session.client.getChats();
-    allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    this.logger.log(`[AutoSync] Got ${allChats.length} chats`);
+      // Step 2: Get all chats, sorted by WhatsApp's own timestamp (most recent first)
+      const allChats = await session.client.getChats();
+      allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      this.logger.log(`[AutoSync] Got ${allChats.length} chats, contactMap has ${this.contactPhoneMap.size} entries`);
 
-    // Step 3: Build contacts list with metadata from chat objects
-    const contacts: Array<{
-      phone: string; externalChatId: string; name: string | null;
-      avatarUrl: string | null; isGroup?: boolean;
-      lastActivityAt: string | null; lastMessagePreview: string | null;
-    }> = [];
+      // Step 3: Build contacts list with metadata from chat objects
+      const contacts: Array<{
+        phone: string; externalChatId: string; name: string | null;
+        avatarUrl: string | null; isGroup?: boolean;
+        lastActivityAt: string | null; lastMessagePreview: string | null;
+      }> = [];
 
-    // Resolve avatars in batch
-    const avatarMap = new Map<string, string | null>();
-    for (const chat of allChats) {
-      try {
-        const url = await session.client.getProfilePicUrl(chat.id._serialized);
-        if (url) avatarMap.set(chat.id._serialized, url);
-      } catch {}
-    }
+      // Resolve avatars in batch (don't fail the whole sync if avatars fail)
+      const avatarMap = new Map<string, string | null>();
+      for (const chat of allChats) {
+        try {
+          const url = await session.client.getProfilePicUrl(chat.id._serialized);
+          if (url) avatarMap.set(chat.id._serialized, url);
+        } catch {}
+      }
 
-    for (const chat of allChats) {
-      const isGroup = chat.isGroup;
-      const lastActivityAt = chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null;
-      const lastMsg = chat.lastMessage;
-      const lastMessagePreview = lastMsg ? this.buildDisplayBody(lastMsg.body, lastMsg.type, lastMsg.hasMedia) : null;
-      const avatar = avatarMap.get(chat.id._serialized) || null;
+      // Per-chat contact fallback: if contactMap is empty, resolve per chat
+      for (const chat of allChats) {
+        const isGroup = chat.isGroup;
+        const lastActivityAt = chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null;
+        const lastMsg = chat.lastMessage;
+        const lastMessagePreview = lastMsg ? this.buildDisplayBody(lastMsg.body, lastMsg.type, lastMsg.hasMedia) : null;
+        const avatar = avatarMap.get(chat.id._serialized) || null;
 
-      if (isGroup) {
-        if (!chat.name) continue;
-        contacts.push({
-          phone: chat.id._serialized,
-          externalChatId: chat.id._serialized,
-          name: chat.name,
-          avatarUrl: avatar,
-          isGroup: true,
-          lastActivityAt,
-          lastMessagePreview,
+        if (isGroup) {
+          if (!chat.name) continue;
+          contacts.push({
+            phone: chat.id._serialized,
+            externalChatId: chat.id._serialized,
+            name: chat.name,
+            avatarUrl: avatar,
+            isGroup: true,
+            lastActivityAt,
+            lastMessagePreview,
+          });
+        } else {
+          let resolved = this.resolvePhone(chat.id._serialized);
+
+          // Fallback: if contactMap missed this chat, try per-chat getContact()
+          if (!resolved) {
+            try {
+              const contact = await chat.getContact();
+              if (contact) {
+                let phone: string | null = null;
+                if (contact.number) {
+                  phone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+                }
+                if (!phone) {
+                  try {
+                    const formatted = await contact.getFormattedNumber();
+                    if (formatted) {
+                      phone = formatted.replace(/[\s\-()]/g, '');
+                      if (!phone.startsWith('+')) phone = `+${phone}`;
+                    }
+                  } catch {}
+                }
+                if (phone) {
+                  const name = contact.name || contact.pushname || null;
+                  this.contactPhoneMap.set(chat.id._serialized, { phone, name });
+                  resolved = { phone, name };
+                }
+              }
+            } catch {}
+          }
+
+          if (!resolved) continue;
+          const contactInfo = this.contactPhoneMap.get(chat.id._serialized);
+          contacts.push({
+            phone: resolved.phone,
+            externalChatId: chat.id._serialized,
+            name: contactInfo?.name || resolved.name || chat.name || null,
+            avatarUrl: avatar,
+            lastActivityAt,
+            lastMessagePreview,
+          });
+        }
+      }
+
+      // Step 4: Send contacts_sync (names + order arrive BEFORE messages)
+      if (contacts.length > 0) {
+        this.logger.log(`[AutoSync] Sending contacts_sync: ${contacts.length} contacts`);
+        await this.forwardToSigcore(workspaceId, 'contacts_sync', {
+          contacts,
+          sessionPhone: session.phoneNumber || '',
         });
-      } else {
-        const resolved = this.resolvePhone(chat.id._serialized);
-        if (!resolved) continue;
-        const contactInfo = this.contactPhoneMap.get(chat.id._serialized);
-        contacts.push({
-          phone: resolved.phone,
-          externalChatId: chat.id._serialized,
-          name: contactInfo?.name || resolved.name || chat.name || null,
-          avatarUrl: avatar,
-          lastActivityAt,
-          lastMessagePreview,
-        });
       }
+
+      // Step 5: Sync messages for each chat (with throttle to avoid 429)
+      let totalMessages = 0;
+      let syncedChats = 0;
+
+      for (const chat of allChats) {
+        if (session.status !== 'ready') break;
+
+        const isGroup = chat.isGroup;
+        let chatPhone: string | null = null;
+        let chatName: string | null = null;
+
+        if (isGroup) {
+          if (!chat.name) continue;
+          chatPhone = chat.id._serialized;
+          chatName = chat.name;
+        } else {
+          const resolved = this.resolvePhone(chat.id._serialized);
+          if (!resolved) continue;
+          chatPhone = resolved.phone;
+          chatName = this.contactPhoneMap.get(chat.id._serialized)?.name || resolved.name;
+        }
+
+        // Sync history from server, then fetch messages (with Puppeteer fallback)
+        try { await chat.syncHistory(); } catch {}
+
+        const messages = await this.fetchMessagesWithFallback(session.client, chat, 20);
+
+        for (const msg of messages) {
+          const body = this.buildDisplayBody(msg.body, msg.type, msg.hasMedia);
+          if (!body) continue;
+
+          const isFromMe = msg.fromMe || false;
+          const ts = msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString();
+
+          await this.forwardToSigcore(workspaceId, 'message_inbound', {
+            externalMessageId: msg.id._serialized,
+            externalChatId: chat.id._serialized,
+            from: isFromMe ? (session.phoneNumber || '') : (isGroup ? chat.id._serialized : chatPhone),
+            to: isFromMe ? (isGroup ? chat.id._serialized : chatPhone) : (session.phoneNumber || ''),
+            body, timestamp: ts,
+            hasMedia: msg.hasMedia, type: msg.type,
+            fromMe: isFromMe, contactName: chatName,
+            ...(isGroup && { isGroup: true }),
+          });
+          totalMessages++;
+
+          // Throttle: 75ms between messages to avoid 429 on Sigcore
+          await this.delay(75);
+        }
+        syncedChats++;
+      }
+
+      this.logger.log(`[AutoSync] Done: ${syncedChats} chats synced, ${totalMessages} messages forwarded`);
+    } finally {
+      this.syncing = false;
     }
+  }
 
-    // Step 4: Send contacts_sync (names + order arrive BEFORE messages)
-    if (contacts.length > 0) {
-      this.logger.log(`[AutoSync] Sending contacts_sync: ${contacts.length} contacts`);
-      await this.forwardToSigcore(workspaceId, 'contacts_sync', {
-        contacts,
-        sessionPhone: session.phoneNumber || '',
-      });
-    }
-
-    // Step 5: Sync messages for each chat
-    let totalMessages = 0;
-    let syncedChats = 0;
-
-    for (const chat of allChats) {
-      if (session.status !== 'ready') break;
-
-      const isGroup = chat.isGroup;
-      let chatPhone: string | null = null;
-      let chatName: string | null = null;
-
-      if (isGroup) {
-        if (!chat.name) continue;
-        chatPhone = chat.id._serialized;
-        chatName = chat.name;
-      } else {
-        const resolved = this.resolvePhone(chat.id._serialized);
-        if (!resolved) continue;
-        chatPhone = resolved.phone;
-        chatName = this.contactPhoneMap.get(chat.id._serialized)?.name || resolved.name;
-      }
-
-      // Sync history from server, then fetch messages
-      try { await chat.syncHistory(); } catch {}
-
-      let messages: WAMessage[] = [];
-      try {
-        messages = await chat.fetchMessages({ limit: 20 });
-      } catch (e) {
-        this.logger.debug(`[AutoSync] fetchMessages failed for ${chatPhone}: ${e instanceof Error ? e.message : 'unknown'}`);
-        continue;
-      }
-
-      for (const msg of messages) {
-        const body = this.buildDisplayBody(msg.body, msg.type, msg.hasMedia);
-        if (!body) continue;
-
-        const isFromMe = msg.fromMe || false;
-        const ts = msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString();
-
-        await this.forwardToSigcore(workspaceId, 'message_inbound', {
-          externalMessageId: msg.id._serialized,
-          externalChatId: chat.id._serialized,
-          from: isFromMe ? (session.phoneNumber || '') : (isGroup ? chat.id._serialized : chatPhone),
-          to: isFromMe ? (isGroup ? chat.id._serialized : chatPhone) : (session.phoneNumber || ''),
-          body, timestamp: ts,
-          hasMedia: msg.hasMedia, type: msg.type,
-          fromMe: isFromMe, contactName: chatName,
-          ...(isGroup && { isGroup: true }),
-        });
-        totalMessages++;
-      }
-      syncedChats++;
-    }
-
-    this.logger.log(`[AutoSync] Done: ${syncedChats} chats synced, ${totalMessages} messages forwarded`);
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   // =========================================================================
