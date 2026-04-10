@@ -180,8 +180,7 @@ export class CommunicationService {
       .addSelect(
         `COALESCE(
           (SELECT MAX(msg.created_at) FROM communication_messages msg WHERE msg.conversation_id = conv.id),
-          (conv.metadata->>'lastActivityAt')::timestamp,
-          conv.updated_at
+          (conv.metadata->>'lastActivityAt')::timestamp
         )`,
         'last_activity',
       )
