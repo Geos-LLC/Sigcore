@@ -198,33 +198,54 @@ export class WhatsAppService implements OnModuleDestroy {
     const forwardMessage = async (message: WAMessage) => {
       session.lastActivity = new Date();
 
-      this.logger.log(`[MSG] Raw event: from=${message.from} to=${message.to} type=${message.type} fromMe=${message.fromMe} hasBody=${!!message.body} hasMedia=${message.hasMedia}`);
-
       // Filter: only individual chat messages (not groups, broadcasts, or status updates)
-      // WhatsApp multi-device uses @lid for linked IDs alongside traditional @c.us
       if (!message.from || !(message.from.endsWith('@c.us') || message.from.endsWith('@lid'))) {
-        this.logger.log(`[MSG] Filtered: not individual chat (from=${message.from})`);
         return;
       }
       if (!message.body && !message.hasMedia) {
-        this.logger.log(`[MSG] Filtered: no body and no media`);
         return;
       }
 
-      const fromPhone = message.from.replace(/@c\.us$/, '').replace(/@lid$/, '');
-      const toPhone = message.to?.replace(/@c\.us$/, '').replace(/@lid$/, '').replace(/@g\.us$/, '') || '';
       const isFromMe = message.fromMe || false;
+      const chatId = isFromMe ? message.to : message.from;
+
+      // Resolve real phone number from contact (LID IDs are NOT phone numbers)
+      let contactPhone: string | null = null;
+      let contactName: string | null = null;
+      try {
+        const contact = await session.client.getContactById(chatId);
+        if (contact?.number) {
+          contactPhone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+        }
+        contactName = contact?.name || contact?.pushname || null;
+      } catch {
+        // fallback
+      }
+
+      // For c.us chats, use the user ID as phone if contact.number not available
+      if (!contactPhone && chatId?.endsWith('@c.us')) {
+        const user = chatId.replace('@c.us', '');
+        if (user && user !== '0') {
+          contactPhone = user.startsWith('+') ? user : `+${user}`;
+        }
+      }
+
+      if (!contactPhone) {
+        this.logger.debug(`[MSG] Skipped: can't resolve phone for ${chatId}`);
+        return;
+      }
 
       this.forwardToSigcore(workspaceId, 'message_inbound', {
         externalMessageId: message.id._serialized,
-        externalChatId: isFromMe ? message.to : message.from,
-        from: fromPhone.startsWith('+') ? fromPhone : `+${fromPhone}`,
-        to: toPhone.startsWith('+') ? toPhone : (toPhone ? `+${toPhone}` : session.phoneNumber || ''),
+        externalChatId: chatId,
+        from: isFromMe ? (session.phoneNumber || '') : contactPhone,
+        to: isFromMe ? contactPhone : (session.phoneNumber || ''),
         body: message.body || '',
         timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia,
         type: message.type,
         fromMe: isFromMe,
+        contactName,
       });
     };
 
@@ -518,26 +539,48 @@ export class WhatsAppService implements OnModuleDestroy {
   }
 
   /**
-   * Resolve the display name and avatar for a chat contact.
-   * Priority: phone contact name > WhatsApp pushname > chat name > null
+   * Resolve the display name, avatar, and real phone number for a chat contact.
+   * LID (Linked ID) chats don't expose the phone number directly —
+   * we need to look it up via contact.number or contact.id.user.
    */
   private async resolveContactInfo(
     session: WhatsAppSession,
-    chatId: string,
-    chatName: string | null,
-  ): Promise<{ name: string | null; avatarUrl: string | null }> {
+    chat: any,
+  ): Promise<{ name: string | null; avatarUrl: string | null; phone: string | null }> {
+    const chatId = chat.id._serialized;
+    const chatName = chat.name || null;
+
     try {
       const contact = await session.client.getContactById(chatId);
       const name = contact?.name || contact?.pushname || chatName || null;
+
+      // Resolve real phone number:
+      // - contact.number is the actual phone number (available for saved contacts)
+      // - For LID chats, chat.id.user is an opaque ID, NOT a phone number
+      let phone: string | null = null;
+      if (contact?.number) {
+        phone = contact.number.startsWith('+') ? contact.number : `+${contact.number}`;
+      } else if (chat.id.server === 'c.us' && chat.id.user && chat.id.user !== '0') {
+        // Traditional c.us chats — user IS the phone number
+        phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
+      }
+      // For LID chats without contact.number, phone stays null (we can't resolve it)
+
       let avatarUrl: string | null = null;
       try {
         avatarUrl = await contact?.getProfilePicUrl() || null;
       } catch {
-        // Profile pic may not be available (privacy settings)
+        // Privacy settings may block profile pic
       }
-      return { name, avatarUrl };
+
+      return { name, avatarUrl, phone };
     } catch {
-      return { name: chatName || null, avatarUrl: null };
+      // Fallback: use chat.id.user only for c.us chats
+      let phone: string | null = null;
+      if (chat.id.server === 'c.us' && chat.id.user && chat.id.user !== '0') {
+        phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
+      }
+      return { name: chatName || null, avatarUrl: null, phone };
     }
   }
 
@@ -583,65 +626,68 @@ export class WhatsAppService implements OnModuleDestroy {
         return;
       }
 
-      // Step 1: Resolve all contact names + avatars first
-      const contactInfo = new Map<string, { name: string | null; avatarUrl: string | null }>();
-      this.logger.log(`[AutoSync] Resolving contact names + avatars for ${individualChats.length} chats...`);
+      // Step 1: Resolve all contact names, avatars, and real phone numbers
+      const contactInfo = new Map<string, { name: string | null; avatarUrl: string | null; phone: string | null }>();
+      this.logger.log(`[AutoSync] Resolving contact info for ${individualChats.length} chats...`);
       for (const chat of individualChats) {
-        const info = await this.resolveContactInfo(session, chat.id._serialized, chat.name || null);
-        const phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
+        const info = await this.resolveContactInfo(session, chat);
         contactInfo.set(chat.id._serialized, info);
-        if (info.name) {
-          this.logger.log(`[AutoSync] Contact: ${phone} → ${info.name}${info.avatarUrl ? ' (has avatar)' : ''}`);
-        }
+        this.logger.log(`[AutoSync] Contact: ${info.phone || chat.id._serialized} → name=${info.name || 'none'} server=${chat.id.server}${info.avatarUrl ? ' (has avatar)' : ''}`);
       }
 
       // Step 2: Send contacts_sync batch event (names + avatars arrive before messages)
       const contacts = individualChats.map(chat => {
-        const phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
         const info = contactInfo.get(chat.id._serialized);
         return {
-          phone,
+          phone: info?.phone || null,
           externalChatId: chat.id._serialized,
           name: info?.name || null,
           avatarUrl: info?.avatarUrl || null,
         };
-      }).filter(c => c.name || c.avatarUrl); // send contacts that have name or avatar
+      }).filter(c => c.phone && (c.name || c.avatarUrl)); // only contacts with a resolved phone + name/avatar
 
       if (contacts.length > 0) {
         this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} named contacts`);
         await this.forwardToSigcore(workspaceId, 'contacts_sync', { contacts });
       }
 
-      // Step 3: Forward each chat's recent messages with contact names
+      // Step 3: Forward each chat's recent messages with resolved phone + contact names
       let totalMessages = 0;
+      let skippedChats = 0;
       for (const chat of individualChats) {
         const chatInfo = contactInfo.get(chat.id._serialized);
-        const chatContactName = chatInfo?.name || null;
+        const contactPhone = chatInfo?.phone;
+
+        // Skip chats where we couldn't resolve a real phone number
+        if (!contactPhone) {
+          skippedChats++;
+          continue;
+        }
+
         try {
           const messages = await chat.fetchMessages({ limit: 20 });
           for (const msg of messages) {
             if (!msg.body && !msg.hasMedia) continue;
-            const fromUser = msg.from?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
-            const toUser = msg.to?.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '') || '';
+            const isFromMe = msg.fromMe || false;
             this.forwardToSigcore(workspaceId, 'message_inbound', {
               externalMessageId: msg.id._serialized,
-              externalChatId: msg.fromMe ? msg.to : msg.from,
-              from: fromUser.startsWith('+') ? fromUser : `+${fromUser}`,
-              to: toUser.startsWith('+') ? toUser : (toUser ? `+${toUser}` : session.phoneNumber || ''),
+              externalChatId: chat.id._serialized,
+              from: isFromMe ? (session.phoneNumber || '') : contactPhone,
+              to: isFromMe ? contactPhone : (session.phoneNumber || ''),
               body: msg.body || '',
               timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
               hasMedia: msg.hasMedia,
               type: msg.type,
-              fromMe: msg.fromMe || false,
-              contactName: chatContactName,
+              fromMe: isFromMe,
+              contactName: chatInfo?.name || null,
             });
             totalMessages++;
           }
         } catch (e) {
-          this.logger.warn(`[AutoSync] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`);
+          this.logger.warn(`[AutoSync] Failed to fetch messages for ${contactPhone} (${chat.id._serialized}): ${e instanceof Error ? e.message : 'unknown'}`);
         }
       }
-      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${contacts.length} contacts with names, ${totalMessages} messages forwarded`);
+      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${contacts.length} with names, ${skippedChats} skipped (no phone), ${totalMessages} messages forwarded`);
     };
 
     // First attempt after 15s delay

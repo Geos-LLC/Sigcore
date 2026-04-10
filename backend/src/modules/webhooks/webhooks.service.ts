@@ -803,7 +803,7 @@ export class WebhooksService {
           externalId: contact.externalChatId || `wa_conv_${Date.now()}`,
           provider: ProviderType.WHATSAPP,
           channel: 'whatsapp' as any,
-          phoneNumber: '',
+          phoneNumber: normalizedPhone, // use participant phone as phoneNumber too (WhatsApp is 1:1)
           participantPhoneNumber: normalizedPhone,
           metadata: meta,
         });
