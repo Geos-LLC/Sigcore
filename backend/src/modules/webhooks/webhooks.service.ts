@@ -745,6 +745,10 @@ export class WebhooksService {
         break;
       case 'status_change':
         this.logger.log(`[WhatsApp] Status change for workspace ${workspaceId}: ${data.status}`);
+        // Clean slate on reconnect: delete old WhatsApp data so fresh sync replaces it
+        if (data.status === 'ready') {
+          await this.clearWhatsAppData(workspaceId);
+        }
         await this.outboundWebhooksService.emitEvent(
           workspaceId,
           WebhookEventType.WHATSAPP_STATUS_CHANGE,
@@ -754,6 +758,45 @@ export class WebhooksService {
       default:
         this.logger.debug(`[WhatsApp] Unhandled event type: ${eventType}`);
     }
+  }
+
+  /**
+   * Delete all WhatsApp conversations + messages for a workspace.
+   * Called on reconnect so fresh sync replaces stale data.
+   */
+  private async clearWhatsAppData(workspaceId: string): Promise<void> {
+    this.logger.log(`[WhatsApp] Clearing old WhatsApp data for workspace ${workspaceId}`);
+
+    // Find all WhatsApp conversations for this workspace
+    const conversations = await this.conversationRepo.find({
+      where: { workspaceId, provider: ProviderType.WHATSAPP },
+      select: ['id'],
+    });
+
+    if (conversations.length === 0) {
+      this.logger.log(`[WhatsApp] No existing WhatsApp data to clear`);
+      return;
+    }
+
+    const conversationIds = conversations.map(c => c.id);
+
+    // Delete messages for these conversations
+    const msgResult = await this.messageRepo
+      .createQueryBuilder()
+      .delete()
+      .where('conversationId IN (:...ids)', { ids: conversationIds })
+      .execute();
+
+    // Delete conversations
+    const convResult = await this.conversationRepo
+      .createQueryBuilder()
+      .delete()
+      .where('id IN (:...ids)', { ids: conversationIds })
+      .execute();
+
+    this.logger.log(
+      `[WhatsApp] Cleared ${convResult.affected || 0} conversations and ${msgResult.affected || 0} messages`,
+    );
   }
 
   /**
