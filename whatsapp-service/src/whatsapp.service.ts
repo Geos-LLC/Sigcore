@@ -508,7 +508,32 @@ export class WhatsAppService implements OnModuleDestroy {
   }
 
   /**
+   * Resolve the display name and avatar for a chat contact.
+   * Priority: phone contact name > WhatsApp pushname > chat name > null
+   */
+  private async resolveContactInfo(
+    session: WhatsAppSession,
+    chatId: string,
+    chatName: string | null,
+  ): Promise<{ name: string | null; avatarUrl: string | null }> {
+    try {
+      const contact = await session.client.getContactById(chatId);
+      const name = contact?.name || contact?.pushname || chatName || null;
+      let avatarUrl: string | null = null;
+      try {
+        avatarUrl = await contact?.getProfilePicUrl() || null;
+      } catch {
+        // Profile pic may not be available (privacy settings)
+      }
+      return { name, avatarUrl };
+    } catch {
+      return { name: chatName || null, avatarUrl: null };
+    }
+  }
+
+  /**
    * Auto-sync chats after WhatsApp is ready.
+   * Flow: 1) fetch chats, 2) resolve contact names, 3) send contacts_sync, 4) sync messages
    * Retries every 15s (up to 4 times) waiting for chats to populate.
    */
   private scheduleAutoSync(workspaceId: string, session: WhatsAppSession): void {
@@ -534,9 +559,40 @@ export class WhatsAppService implements OnModuleDestroy {
         return;
       }
 
-      // Forward each chat's recent messages to Sigcore
+      // Step 1: Resolve all contact names + avatars first
+      const contactInfo = new Map<string, { name: string | null; avatarUrl: string | null }>();
+      this.logger.log(`[AutoSync] Resolving contact names + avatars for ${individualChats.length} chats...`);
+      for (const chat of individualChats) {
+        const info = await this.resolveContactInfo(session, chat.id._serialized, chat.name || null);
+        const phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
+        contactInfo.set(chat.id._serialized, info);
+        if (info.name) {
+          this.logger.log(`[AutoSync] Contact: ${phone} → ${info.name}${info.avatarUrl ? ' (has avatar)' : ''}`);
+        }
+      }
+
+      // Step 2: Send contacts_sync batch event (names + avatars arrive before messages)
+      const contacts = individualChats.map(chat => {
+        const phone = chat.id.user.startsWith('+') ? chat.id.user : `+${chat.id.user}`;
+        const info = contactInfo.get(chat.id._serialized);
+        return {
+          phone,
+          externalChatId: chat.id._serialized,
+          name: info?.name || null,
+          avatarUrl: info?.avatarUrl || null,
+        };
+      }).filter(c => c.name || c.avatarUrl); // send contacts that have name or avatar
+
+      if (contacts.length > 0) {
+        this.logger.log(`[AutoSync] Sending contacts_sync with ${contacts.length} named contacts`);
+        await this.forwardToSigcore(workspaceId, 'contacts_sync', { contacts });
+      }
+
+      // Step 3: Forward each chat's recent messages with contact names
       let totalMessages = 0;
       for (const chat of individualChats) {
+        const chatInfo = contactInfo.get(chat.id._serialized);
+        const chatContactName = chatInfo?.name || null;
         try {
           const messages = await chat.fetchMessages({ limit: 20 });
           for (const msg of messages) {
@@ -553,7 +609,7 @@ export class WhatsAppService implements OnModuleDestroy {
               hasMedia: msg.hasMedia,
               type: msg.type,
               fromMe: msg.fromMe || false,
-              contactName: chat.name || null,
+              contactName: chatContactName,
             });
             totalMessages++;
           }
@@ -561,7 +617,7 @@ export class WhatsAppService implements OnModuleDestroy {
           this.logger.warn(`[AutoSync] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`);
         }
       }
-      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${totalMessages} messages forwarded`);
+      this.logger.log(`[AutoSync] Done: ${individualChats.length} chats, ${contacts.length} contacts with names, ${totalMessages} messages forwarded`);
     };
 
     // First attempt after 15s delay

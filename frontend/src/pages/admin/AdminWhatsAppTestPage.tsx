@@ -472,14 +472,35 @@ export default function AdminWhatsAppTestPage() {
                         <ChevronRight className="h-4 w-4 text-gray-400" />
                       )}
                     </div>
+                    {/* Avatar */}
+                    <div className="shrink-0">
+                      {(conv as any).avatarUrl || (conv as any).metadata?.avatarUrl ? (
+                        <img
+                          src={(conv as any).avatarUrl || (conv as any).metadata?.avatarUrl}
+                          alt=""
+                          className="w-9 h-9 rounded-full object-cover"
+                          onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        />
+                      ) : (
+                        <div className="w-9 h-9 rounded-full bg-green-100 flex items-center justify-center text-green-600 text-sm font-bold">
+                          {(conv.contactName || conv.participantPhoneNumber || '?').charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-medium text-gray-900">
-                          {conv.participantPhoneNumber}
-                        </span>
-                        {(conv.contactName || conv.participantContacts?.[0]?.contactName) && (
-                          <span className="text-xs text-gray-500">
-                            ({conv.contactName || conv.participantContacts?.[0]?.contactName})
+                        {(conv.contactName || conv.participantContacts?.[0]?.contactName) ? (
+                          <>
+                            <span className="text-sm font-medium text-gray-900">
+                              {conv.contactName || conv.participantContacts?.[0]?.contactName}
+                            </span>
+                            <span className="text-xs text-gray-400 font-mono">
+                              {conv.participantPhoneNumber}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="font-mono text-sm font-medium text-gray-900">
+                            {conv.participantPhoneNumber}
                           </span>
                         )}
                       </div>

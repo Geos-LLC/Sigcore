@@ -729,6 +729,9 @@ export class WebhooksService {
     this.logger.log(`[WhatsApp] Processing ${eventType} for workspace ${workspaceId}`);
 
     switch (eventType) {
+      case 'contacts_sync':
+        await this.handleWhatsAppContactsSync(workspaceId, data);
+        break;
       case 'message_inbound':
         await this.handleWhatsAppInboundMessage(workspaceId, data);
         break;
@@ -751,6 +754,80 @@ export class WebhooksService {
       default:
         this.logger.debug(`[WhatsApp] Unhandled event type: ${eventType}`);
     }
+  }
+
+  /**
+   * Handle contacts_sync: create/update conversations with contact names + avatars
+   * before messages arrive, so conversations show names immediately.
+   */
+  private async handleWhatsAppContactsSync(
+    workspaceId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const contacts = data.contacts as Array<{
+      phone: string;
+      externalChatId: string;
+      name: string | null;
+      avatarUrl: string | null;
+    }>;
+
+    if (!contacts || !Array.isArray(contacts)) return;
+
+    this.logger.log(`[WhatsApp] Syncing ${contacts.length} contacts for workspace ${workspaceId}`);
+
+    for (const contact of contacts) {
+      if (!contact.phone) continue;
+
+      const normalizedPhone = contact.phone.startsWith('+') ? contact.phone : `+${contact.phone}`;
+
+      // Find existing conversation for this participant
+      let conversation = await this.conversationRepo.findOne({
+        where: {
+          workspaceId,
+          participantPhoneNumber: normalizedPhone,
+          provider: ProviderType.WHATSAPP,
+        },
+      });
+
+      const meta: Record<string, unknown> = {
+        externalChatId: contact.externalChatId,
+        ...(contact.name && { contactName: contact.name }),
+        ...(contact.avatarUrl && { avatarUrl: contact.avatarUrl }),
+      };
+
+      if (!conversation) {
+        // Pre-create conversation with name + avatar before messages arrive
+        conversation = this.conversationRepo.create({
+          workspaceId,
+          tenantId: null,
+          externalId: contact.externalChatId || `wa_conv_${Date.now()}`,
+          provider: ProviderType.WHATSAPP,
+          channel: 'whatsapp' as any,
+          phoneNumber: '',
+          participantPhoneNumber: normalizedPhone,
+          metadata: meta,
+        });
+        await this.conversationRepo.save(conversation);
+      } else {
+        // Update existing conversation with name/avatar
+        const existingMeta = (conversation.metadata as Record<string, unknown>) || {};
+        let changed = false;
+        if (contact.name && !existingMeta.contactName) {
+          existingMeta.contactName = contact.name;
+          changed = true;
+        }
+        if (contact.avatarUrl && !existingMeta.avatarUrl) {
+          existingMeta.avatarUrl = contact.avatarUrl;
+          changed = true;
+        }
+        if (changed) {
+          conversation.metadata = existingMeta;
+          await this.conversationRepo.save(conversation);
+        }
+      }
+    }
+
+    this.logger.log(`[WhatsApp] Contacts sync complete for workspace ${workspaceId}`);
   }
 
   private async handleWhatsAppInboundMessage(
