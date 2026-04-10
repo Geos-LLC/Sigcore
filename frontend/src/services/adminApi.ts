@@ -332,6 +332,11 @@ class AdminApiService {
 
   // ==================== Conversations (from DB) ====================
 
+  async getConversationMessages(conversationId: string): Promise<any[]> {
+    const response = await this.client.get<{ data: any[] }>(`/conversations/${conversationId}/messages`);
+    return response.data.data;
+  }
+
   async getConversations(options?: { page?: number; limit?: number; provider?: string }): Promise<{ conversations: any[]; meta: any }> {
     const params = new URLSearchParams();
     if (options?.page) params.append('page', String(options.page));

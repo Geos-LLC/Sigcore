@@ -1,8 +1,19 @@
-import { useState, useEffect, useRef } from 'react';
-import { CheckCircle, XCircle, Loader2, Plug, Unplug, MessageSquare, QrCode, RefreshCw, Send, Smartphone } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { CheckCircle, XCircle, Loader2, Plug, Unplug, MessageSquare, QrCode, RefreshCw, Send, Smartphone, Database, ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 
 type Status = 'idle' | 'loading' | 'success' | 'error';
+
+interface SyncedConversation {
+  id: string;
+  phoneNumber: string;
+  participantPhoneNumber: string;
+  contactId: string | null;
+  lastMessage: string | null;
+  lastMessageAt: string | null;
+  unreadCount: number;
+  participantContacts?: { phoneNumber: string; contactName: string | null }[] | null;
+}
 
 export default function AdminWhatsAppTestPage() {
   // Connection state
@@ -20,14 +31,36 @@ export default function AdminWhatsAppTestPage() {
   const [sendStatus, setSendStatus] = useState<Status>('idle');
   const [sendResult, setSendResult] = useState<any>(null);
 
+  // Synced conversations
+  const [conversations, setConversations] = useState<SyncedConversation[]>([]);
+  const [convMeta, setConvMeta] = useState<{ total: number; page: number; totalPages: number } | null>(null);
+  const [convLoading, setConvLoading] = useState(false);
+  const [convPage, setConvPage] = useState(1);
+  const [expandedConv, setExpandedConv] = useState<string | null>(null);
+  const [convMessages, setConvMessages] = useState<Record<string, any[]>>({});
+  const [loadingMessages, setLoadingMessages] = useState<string | null>(null);
+  const [syncPollCount, setSyncPollCount] = useState(0);
+
   // QR polling
   const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Sync polling
+  const syncPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     checkHealth();
     checkStatus();
-    return () => stopQrPolling();
+    return () => {
+      stopQrPolling();
+      stopSyncPolling();
+    };
   }, []);
+
+  // Load conversations when connected
+  useEffect(() => {
+    if (status === 'ready') {
+      loadConversations(1);
+    }
+  }, [status]);
 
   async function checkHealth() {
     try {
@@ -59,7 +92,6 @@ export default function AdminWhatsAppTestPage() {
     setQrCode(null);
     try {
       await adminApi.connectWhatsApp();
-      // Start polling for QR code
       startQrPolling();
     } catch (e: any) {
       setError(e.message);
@@ -76,7 +108,10 @@ export default function AdminWhatsAppTestPage() {
       setStatus('disconnected');
       setPhoneNumber(null);
       setQrCode(null);
+      setConversations([]);
+      setConvMeta(null);
       stopQrPolling();
+      stopSyncPolling();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -86,7 +121,7 @@ export default function AdminWhatsAppTestPage() {
 
   function startQrPolling() {
     stopQrPolling();
-    pollQr(); // immediate first poll
+    pollQr();
     qrPollRef.current = setInterval(pollQr, 3000);
   }
 
@@ -105,6 +140,8 @@ export default function AdminWhatsAppTestPage() {
         setPhoneNumber(result.phoneNumber || null);
         setQrCode(null);
         stopQrPolling();
+        // Start sync polling — auto-sync takes ~15-60s after connect
+        startSyncPolling();
         return;
       }
       if (result.qrCode) {
@@ -114,7 +151,59 @@ export default function AdminWhatsAppTestPage() {
         setStatus(result.status || 'initializing');
       }
     } catch {
-      // ignore polling errors
+      // ignore
+    }
+  }
+
+  // Sync polling: after connect, poll conversations every 5s to show sync progress
+  function startSyncPolling() {
+    stopSyncPolling();
+    setSyncPollCount(0);
+    syncPollRef.current = setInterval(async () => {
+      setSyncPollCount(prev => prev + 1);
+      await loadConversations(1, true);
+    }, 5000);
+    // Stop after 90s (auto-sync completes in ~60s max)
+    setTimeout(() => stopSyncPolling(), 90000);
+  }
+
+  function stopSyncPolling() {
+    if (syncPollRef.current) {
+      clearInterval(syncPollRef.current);
+      syncPollRef.current = null;
+    }
+  }
+
+  const loadConversations = useCallback(async (page: number, silent = false) => {
+    if (!silent) setConvLoading(true);
+    try {
+      const result = await adminApi.getConversations({ page, limit: 20, provider: 'whatsapp' });
+      setConversations(result.conversations);
+      setConvMeta(result.meta);
+      setConvPage(page);
+    } catch {
+      // ignore
+    } finally {
+      if (!silent) setConvLoading(false);
+    }
+  }, []);
+
+  async function loadMessages(convId: string) {
+    if (expandedConv === convId) {
+      setExpandedConv(null);
+      return;
+    }
+    setExpandedConv(convId);
+    if (convMessages[convId]) return; // already loaded
+
+    setLoadingMessages(convId);
+    try {
+      const response = await adminApi.getConversationMessages(convId);
+      setConvMessages(prev => ({ ...prev, [convId]: response }));
+    } catch {
+      setConvMessages(prev => ({ ...prev, [convId]: [] }));
+    } finally {
+      setLoadingMessages(null);
     }
   }
 
@@ -128,6 +217,8 @@ export default function AdminWhatsAppTestPage() {
       setSendStatus('success');
       setSendResult(result);
       setMessageBody('');
+      // Refresh conversations after send
+      setTimeout(() => loadConversations(convPage), 2000);
     } catch (e: any) {
       setSendStatus('error');
       setSendResult({ error: e.response?.data?.message || e.message });
@@ -154,8 +245,10 @@ export default function AdminWhatsAppTestPage() {
     not_initialized: 'Not Initialized',
   };
 
+  const isSyncing = syncPollRef.current !== null;
+
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-6">
       {/* Header */}
       <div className="flex items-center gap-3">
         <div className="p-2 bg-green-100 rounded-lg">
@@ -192,7 +285,6 @@ export default function AdminWhatsAppTestPage() {
           </span>
         </div>
 
-        {/* Phone number */}
         {phoneNumber && (
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle className="h-4 w-4 text-green-500" />
@@ -200,7 +292,6 @@ export default function AdminWhatsAppTestPage() {
           </div>
         )}
 
-        {/* Error */}
         {error && (
           <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 p-3 rounded-lg">
             <XCircle className="h-4 w-4 shrink-0" />
@@ -208,7 +299,6 @@ export default function AdminWhatsAppTestPage() {
           </div>
         )}
 
-        {/* QR Code */}
         {qrCode && (
           <div className="flex flex-col items-center gap-3 py-4">
             <div className="flex items-center gap-2 text-sm text-blue-600">
@@ -220,7 +310,6 @@ export default function AdminWhatsAppTestPage() {
           </div>
         )}
 
-        {/* Connect / Disconnect buttons */}
         <div className="flex gap-3">
           {status !== 'ready' ? (
             <button
@@ -307,6 +396,174 @@ export default function AdminWhatsAppTestPage() {
             }`}>
               {JSON.stringify(sendResult, null, 2)}
             </pre>
+          )}
+        </div>
+      )}
+
+      {/* Synced Conversations */}
+      {status === 'ready' && (
+        <div className="card p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              <Database className="h-5 w-5" />
+              Synced Conversations
+              {convMeta && (
+                <span className="text-sm font-normal text-gray-400">({convMeta.total} total)</span>
+              )}
+            </h2>
+            <div className="flex items-center gap-3">
+              {isSyncing && (
+                <span className="flex items-center gap-1.5 text-xs text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Syncing...
+                </span>
+              )}
+              <button
+                onClick={() => loadConversations(convPage)}
+                disabled={convLoading}
+                className="btn btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3"
+              >
+                {convLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {/* Sync Progress Bar */}
+          {isSyncing && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-gray-500">
+                <span>Auto-sync in progress — messages loading from WhatsApp...</span>
+                <span>{convMeta?.total || 0} conversations</span>
+              </div>
+              <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-green-400 to-green-500 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(syncPollCount * 6, 95)}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Conversations Table */}
+          {conversations.length === 0 && !convLoading && !isSyncing ? (
+            <div className="text-center py-8 text-gray-400 text-sm">
+              No WhatsApp conversations synced yet. Messages will appear here after connecting.
+            </div>
+          ) : conversations.length === 0 && (convLoading || isSyncing) ? (
+            <div className="text-center py-8 text-gray-400 text-sm flex flex-col items-center gap-2">
+              <Loader2 className="h-5 w-5 animate-spin text-blue-400" />
+              Waiting for conversations to sync...
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {conversations.map(conv => (
+                <div key={conv.id}>
+                  {/* Conversation row */}
+                  <button
+                    onClick={() => loadMessages(conv.id)}
+                    className="w-full text-left py-3 px-2 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-3"
+                  >
+                    <div className="shrink-0">
+                      {expandedConv === conv.id ? (
+                        <ChevronDown className="h-4 w-4 text-gray-400" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-gray-400" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-medium text-gray-900">
+                          {conv.participantPhoneNumber}
+                        </span>
+                        {conv.participantContacts?.[0]?.contactName && (
+                          <span className="text-xs text-gray-500">
+                            ({conv.participantContacts[0].contactName})
+                          </span>
+                        )}
+                      </div>
+                      {conv.lastMessage && (
+                        <p className="text-xs text-gray-400 truncate mt-0.5">{conv.lastMessage}</p>
+                      )}
+                    </div>
+                    <div className="shrink-0 text-right">
+                      {conv.lastMessageAt && (
+                        <span className="text-xs text-gray-400">
+                          {new Date(conv.lastMessageAt).toLocaleDateString()} {new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+
+                  {/* Expanded messages */}
+                  {expandedConv === conv.id && (
+                    <div className="ml-9 mb-3 bg-gray-50 rounded-lg p-3 max-h-80 overflow-y-auto space-y-2">
+                      {loadingMessages === conv.id ? (
+                        <div className="text-center py-4">
+                          <Loader2 className="h-4 w-4 animate-spin text-gray-400 mx-auto" />
+                        </div>
+                      ) : (convMessages[conv.id] || []).length === 0 ? (
+                        <p className="text-xs text-gray-400 text-center py-2">No messages</p>
+                      ) : (
+                        (convMessages[conv.id] || []).map((msg: any) => (
+                          <div
+                            key={msg.id}
+                            className={`flex items-start gap-2 text-xs ${
+                              msg.direction === 'out' ? 'flex-row-reverse' : ''
+                            }`}
+                          >
+                            <div className="shrink-0 mt-0.5">
+                              {msg.direction === 'in' ? (
+                                <ArrowDownLeft className="h-3 w-3 text-blue-400" />
+                              ) : (
+                                <ArrowUpRight className="h-3 w-3 text-green-400" />
+                              )}
+                            </div>
+                            <div
+                              className={`rounded-lg px-3 py-1.5 max-w-[80%] ${
+                                msg.direction === 'out'
+                                  ? 'bg-green-100 text-green-900'
+                                  : 'bg-white text-gray-800 border border-gray-200'
+                              }`}
+                            >
+                              <p>{msg.body}</p>
+                              <span className="text-[10px] text-gray-400 mt-0.5 block">
+                                {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {convMeta && convMeta.totalPages > 1 && (
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-xs text-gray-400">
+                Page {convMeta.page} of {convMeta.totalPages}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => loadConversations(convPage - 1)}
+                  disabled={convPage <= 1 || convLoading}
+                  className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-30"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => loadConversations(convPage + 1)}
+                  disabled={convPage >= convMeta.totalPages || convLoading}
+                  className="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-30"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
