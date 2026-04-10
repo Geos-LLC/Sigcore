@@ -457,21 +457,16 @@ export class WhatsAppService implements OnModuleDestroy {
     const result: any[] = [];
 
     for (const chat of individualChats) {
-      try {
-        const messages = await chat.fetchMessages({ limit: messageLimit });
-        const phone = chat.id.user.startsWith('+')
-          ? chat.id.user
-          : `+${chat.id.user}`;
+      const phone = chat.id.user.startsWith('+')
+        ? chat.id.user
+        : `+${chat.id.user}`;
 
-        result.push({
-          id: chat.id._serialized,
-          name: chat.name || null,
-          phone,
-          lastMessageAt: chat.timestamp
-            ? new Date(chat.timestamp * 1000).toISOString()
-            : null,
-          unreadCount: chat.unreadCount || 0,
-          messages: messages.map((msg) => {
+      // Always include the chat, even if message fetch fails
+      let messages: any[] = [];
+      if (messageLimit > 0) {
+        try {
+          const fetched = await chat.fetchMessages({ limit: messageLimit });
+          messages = fetched.map((msg) => {
             const fromUser = msg.from?.replace('@c.us', '').replace('@g.us', '') || '';
             const toUser = msg.to?.replace('@c.us', '').replace('@g.us', '') || '';
             return {
@@ -486,13 +481,24 @@ export class WhatsAppService implements OnModuleDestroy {
               hasMedia: msg.hasMedia || false,
               type: msg.type || 'chat',
             };
-          }),
-        });
-      } catch (e) {
-        this.logger.warn(
-          `[Backfill] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`,
-        );
+          });
+        } catch (e) {
+          this.logger.warn(
+            `[Backfill] Failed to fetch messages for chat ${chat.id._serialized}: ${e instanceof Error ? e.message : 'unknown'}`,
+          );
+        }
       }
+
+      result.push({
+        id: chat.id._serialized,
+        name: chat.name || null,
+        phone,
+        lastMessageAt: chat.timestamp
+          ? new Date(chat.timestamp * 1000).toISOString()
+          : null,
+        unreadCount: chat.unreadCount || 0,
+        messages,
+      });
     }
 
     this.logger.log(
