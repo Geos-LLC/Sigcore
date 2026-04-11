@@ -292,6 +292,150 @@ describe('CommunicationService – Tenant Isolation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Paginated getMessagesForConversation with cursor
+// ---------------------------------------------------------------------------
+describe('CommunicationService – Paginated messages with cursor', () => {
+  function mockConvQueryBuilder(conversations: any[]) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(conversations),
+    };
+  }
+
+  function mockMsgQueryBuilder(messages: any[]) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      getMany: jest.fn().mockResolvedValue(messages),
+    };
+  }
+
+  it('applies before cursor as andWhere on msg.created_at', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    const conv = makeConversation({ id: 'conv-1' });
+    conversationRepo.findOne.mockResolvedValue(conv);
+    conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+
+    const msgQb = mockMsgQueryBuilder([
+      { id: 'msg-old', body: 'older', conversationId: 'conv-1', createdAt: new Date('2026-04-01') },
+    ]);
+    messageRepo.createQueryBuilder.mockReturnValue(msgQb);
+
+    const beforeTimestamp = '2026-04-05T00:00:00Z';
+    const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', null, {
+      before: beforeTimestamp,
+      limit: 20,
+    });
+
+    // Should apply andWhere for cursor
+    expect(msgQb.andWhere).toHaveBeenCalledWith(
+      'msg.created_at < :before',
+      { before: new Date(beforeTimestamp) },
+    );
+    // Should apply take with the requested limit
+    expect(msgQb.take).toHaveBeenCalledWith(20);
+    // Should order DESC
+    expect(msgQb.orderBy).toHaveBeenCalledWith('msg.created_at', 'DESC');
+    expect(messages).toHaveLength(1);
+  });
+
+  it('defaults to 30 messages when no limit specified', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    const conv = makeConversation({ id: 'conv-1' });
+    conversationRepo.findOne.mockResolvedValue(conv);
+    conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+
+    const msgQb = mockMsgQueryBuilder([]);
+    messageRepo.createQueryBuilder.mockReturnValue(msgQb);
+
+    await service.getMessagesForConversation(WS_ID, 'conv-1', null);
+
+    // Default limit = 30
+    expect(msgQb.take).toHaveBeenCalledWith(30);
+  });
+
+  it('does NOT apply before cursor when not provided', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    const conv = makeConversation({ id: 'conv-1' });
+    conversationRepo.findOne.mockResolvedValue(conv);
+    conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+
+    const msgQb = mockMsgQueryBuilder([]);
+    messageRepo.createQueryBuilder.mockReturnValue(msgQb);
+
+    await service.getMessagesForConversation(WS_ID, 'conv-1', null, { limit: 10 });
+
+    // andWhere should only be called by the conversation filter (from where clause), not for cursor
+    // The only andWhere call would be for participant phones
+    const andWhereCalls = msgQb.andWhere.mock.calls;
+    const hasCursorFilter = andWhereCalls.some(
+      (call: any) => typeof call[0] === 'string' && call[0].includes('created_at'),
+    );
+    expect(hasCursorFilter).toBe(false);
+  });
+
+  it('returns messages in chronological order (reversed from DESC query)', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    const conv = makeConversation({ id: 'conv-1' });
+    conversationRepo.findOne.mockResolvedValue(conv);
+    conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+
+    // Simulate DB returning DESC order (newest first)
+    const msgQb = mockMsgQueryBuilder([
+      { id: 'msg-3', body: 'newest', createdAt: new Date('2026-04-03') },
+      { id: 'msg-2', body: 'middle', createdAt: new Date('2026-04-02') },
+      { id: 'msg-1', body: 'oldest', createdAt: new Date('2026-04-01') },
+    ]);
+    messageRepo.createQueryBuilder.mockReturnValue(msgQb);
+
+    const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', null);
+
+    // Should be reversed to chronological order
+    expect(messages[0].id).toBe('msg-1');
+    expect(messages[1].id).toBe('msg-2');
+    expect(messages[2].id).toBe('msg-3');
+  });
+
+  it('applies both before cursor and limit together for pagination', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    const conv = makeConversation({ id: 'conv-1' });
+    conversationRepo.findOne.mockResolvedValue(conv);
+    conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
+
+    const msgQb = mockMsgQueryBuilder([]);
+    messageRepo.createQueryBuilder.mockReturnValue(msgQb);
+
+    const beforeTs = '2026-04-08T12:00:00Z';
+    await service.getMessagesForConversation(WS_ID, 'conv-1', null, {
+      before: beforeTs,
+      limit: 15,
+    });
+
+    expect(msgQb.andWhere).toHaveBeenCalledWith(
+      'msg.created_at < :before',
+      { before: new Date(beforeTs) },
+    );
+    expect(msgQb.take).toHaveBeenCalledWith(15);
+    expect(msgQb.orderBy).toHaveBeenCalledWith('msg.created_at', 'DESC');
+  });
+
+  it('throws NotFoundException when conversation does not exist', async () => {
+    const { service, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.getMessagesForConversation(WS_ID, 'conv-nonexistent', null, {
+        before: '2026-04-08T12:00:00Z',
+        limit: 10,
+      }),
+    ).rejects.toThrow(NotFoundException);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // SyncOptions tenantId
 // ---------------------------------------------------------------------------
 describe('CommunicationService – SyncOptions.tenantId', () => {

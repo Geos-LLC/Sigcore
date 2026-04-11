@@ -38,7 +38,7 @@ function buildService() {
   const workspaceRepo = buildMockRepo();
   const tenantPhoneNumberRepo = buildMockRepo();
   const encryptionService = { decrypt: jest.fn(), encrypt: jest.fn() };
-  const eventsGateway = { emitNewMessage: jest.fn(), emitNewConversation: jest.fn() };
+  const eventsGateway = { emitNewMessage: jest.fn(), emitNewConversation: jest.fn(), emitConversationUpdate: jest.fn() };
   const openPhoneProvider = {};
   const idempotencyService = { isDuplicate: jest.fn().mockResolvedValue(false), markProcessed: jest.fn() };
   const outboundWebhooksService = { emitEvent: jest.fn(), emitMessageEvent: jest.fn() };
@@ -254,5 +254,157 @@ describe('WebhooksService – WhatsApp webhook handler', () => {
         service.handleWhatsAppWebhook(WS_ID, 'unknown_event', { foo: 'bar' }),
       ).resolves.not.toThrow();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clearWhatsAppData on reconnect (status_change: ready)
+// ---------------------------------------------------------------------------
+describe('WebhooksService – clearWhatsAppData on reconnect', () => {
+  it('deletes all WhatsApp conversations and messages on status_change=ready', async () => {
+    const { service, conversationRepo, messageRepo, outboundWebhooksService } = buildService();
+
+    // Simulate existing WhatsApp conversations
+    const existingConvs = [
+      { id: 'wa-conv-1' },
+      { id: 'wa-conv-2' },
+    ];
+    conversationRepo.find.mockResolvedValue(existingConvs);
+
+    const msgQb = buildMockQueryBuilder();
+    const convQb = buildMockQueryBuilder();
+
+    // First call = message delete QB, second call = conversation delete QB
+    messageRepo.createQueryBuilder.mockReturnValueOnce(msgQb);
+    conversationRepo.createQueryBuilder.mockReturnValueOnce(convQb);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'status_change', {
+      status: 'ready',
+    });
+
+    // Should look up WhatsApp conversations for this workspace
+    expect(conversationRepo.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { workspaceId: WS_ID, provider: ProviderType.WHATSAPP },
+        select: ['id'],
+      }),
+    );
+
+    // Should delete messages for those conversations
+    expect(msgQb.delete).toHaveBeenCalled();
+    expect(msgQb.where).toHaveBeenCalledWith(
+      'conversationId IN (:...ids)',
+      { ids: ['wa-conv-1', 'wa-conv-2'] },
+    );
+    expect(msgQb.execute).toHaveBeenCalled();
+
+    // Should delete conversations
+    expect(convQb.delete).toHaveBeenCalled();
+    expect(convQb.where).toHaveBeenCalledWith(
+      'id IN (:...ids)',
+      { ids: ['wa-conv-1', 'wa-conv-2'] },
+    );
+    expect(convQb.execute).toHaveBeenCalled();
+
+    // Should still emit the status_change webhook event
+    expect(outboundWebhooksService.emitEvent).toHaveBeenCalledWith(
+      WS_ID,
+      'whatsapp.status.change',
+      expect.objectContaining({ provider: 'whatsapp', status: 'ready' }),
+    );
+  });
+
+  it('skips delete when no existing WhatsApp conversations', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+
+    conversationRepo.find.mockResolvedValue([]);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'status_change', {
+      status: 'ready',
+    });
+
+    // Should NOT create query builders for delete
+    expect(messageRepo.createQueryBuilder).not.toHaveBeenCalled();
+    expect(conversationRepo.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('does NOT clear data on non-ready status changes', async () => {
+    const { service, conversationRepo } = buildService();
+
+    await service.handleWhatsAppWebhook(WS_ID, 'status_change', {
+      status: 'disconnected',
+      reason: 'User logged out',
+    });
+
+    // Should NOT look for conversations to delete
+    expect(conversationRepo.find).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Group ID normalization — don't add + prefix to @g.us / @ identifiers
+// ---------------------------------------------------------------------------
+describe('WebhooksService – Group ID normalization', () => {
+  it('does NOT add + prefix to @g.us group identifiers in from', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '120363123456789@g.us',
+      to: '+15559876543',
+      body: 'Group message',
+      externalMessageId: 'wa_group_1',
+      externalChatId: '120363123456789@g.us',
+      isGroup: true,
+    });
+
+    // from contains @, so should NOT get + prefix
+    expect(messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromNumber: '120363123456789@g.us',
+      }),
+    );
+  });
+
+  it('does NOT add + prefix to @c.us identifiers used as from', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '15551234567@c.us',
+      to: '+15559876543',
+      body: 'At-sign identifier',
+      externalMessageId: 'wa_at_1',
+      externalChatId: '15551234567@c.us',
+    });
+
+    expect(messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromNumber: '15551234567@c.us',
+      }),
+    );
+  });
+
+  it('adds + prefix to regular phone numbers without @', async () => {
+    const { service, conversationRepo, messageRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '15551234567',
+      to: '15559876543',
+      body: 'Regular phone',
+      externalMessageId: 'wa_reg_1',
+      externalChatId: '15551234567@c.us',
+    });
+
+    expect(messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromNumber: '+15551234567',
+        toNumber: '+15559876543',
+      }),
+    );
   });
 });

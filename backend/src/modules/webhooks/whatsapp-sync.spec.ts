@@ -38,7 +38,7 @@ function buildService() {
   const workspaceRepo = buildMockRepo();
   const tenantPhoneNumberRepo = buildMockRepo();
   const encryptionService = { decrypt: jest.fn(), encrypt: jest.fn() };
-  const eventsGateway = { emitNewMessage: jest.fn(), emitNewConversation: jest.fn() };
+  const eventsGateway = { emitNewMessage: jest.fn(), emitNewConversation: jest.fn(), emitConversationUpdate: jest.fn() };
   const openPhoneProvider = {};
   const idempotencyService = { isDuplicate: jest.fn().mockResolvedValue(false), markProcessed: jest.fn() };
   const outboundWebhooksService = { emitEvent: jest.fn(), emitMessageEvent: jest.fn() };
@@ -396,6 +396,189 @@ describe('WhatsApp Sync — Conversation Handling', () => {
     );
     expect(messageRepo.create).toHaveBeenNthCalledWith(2,
       expect.objectContaining({ conversationId: 'conv-contact', direction: 'out' }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reaction Suppression Tests
+// ---------------------------------------------------------------------------
+describe('WhatsApp Sync — Reaction Suppression', () => {
+  it('does not store a message when body is empty (reaction-like event)', async () => {
+    const { service, messageRepo, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+15551234567',
+      to: '+15559876543',
+      body: '', // empty body — reaction or system event
+      externalMessageId: 'wa_reaction_1',
+      externalChatId: '15551234567@c.us',
+    });
+
+    // Guard: if (!from || !body) return — empty body should be rejected
+    expect(messageRepo.create).not.toHaveBeenCalled();
+    expect(conversationRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('does not store a message when body is null/undefined', async () => {
+    const { service, messageRepo, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+15551234567',
+      to: '+15559876543',
+      // body omitted entirely
+      externalMessageId: 'wa_reaction_2',
+      externalChatId: '15551234567@c.us',
+    });
+
+    expect(messageRepo.create).not.toHaveBeenCalled();
+    expect(conversationRepo.create).not.toHaveBeenCalled();
+  });
+
+  it('stores a message when body has actual content', async () => {
+    const { service, messageRepo, conversationRepo } = buildService();
+    messageRepo.findOne.mockResolvedValue(null);
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+      from: '+15551234567',
+      to: '+15559876543',
+      body: 'Real message content',
+      externalMessageId: 'wa_real_msg',
+      externalChatId: '15551234567@c.us',
+    });
+
+    expect(messageRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: 'Real message content',
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unreadCount in contacts_sync
+// ---------------------------------------------------------------------------
+describe('WhatsApp Sync — unreadCount in contacts_sync', () => {
+  it('stores unreadCount in metadata for new conversations', async () => {
+    const { service, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null); // no existing conv
+
+    await service.handleWhatsAppWebhook(WS_ID, 'contacts_sync', {
+      sessionPhone: '+15559876543',
+      contacts: [
+        {
+          phone: '+15551234567',
+          externalChatId: '15551234567@c.us',
+          name: 'John',
+          avatarUrl: null,
+          unreadCount: 5,
+        },
+      ],
+    });
+
+    expect(conversationRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          unreadCount: 5,
+        }),
+      }),
+    );
+    expect(conversationRepo.save).toHaveBeenCalled();
+  });
+
+  it('defaults unreadCount to 0 when not provided', async () => {
+    const { service, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'contacts_sync', {
+      sessionPhone: '+15559876543',
+      contacts: [
+        {
+          phone: '+15551234567',
+          externalChatId: '15551234567@c.us',
+          name: 'Jane',
+          avatarUrl: null,
+          // no unreadCount
+        },
+      ],
+    });
+
+    expect(conversationRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          unreadCount: 0,
+        }),
+      }),
+    );
+  });
+
+  it('updates unreadCount in metadata for existing conversations', async () => {
+    const { service, conversationRepo } = buildService();
+
+    const existingConv = {
+      id: 'conv-existing',
+      workspaceId: WS_ID,
+      participantPhoneNumber: '+15551234567',
+      provider: 'whatsapp',
+      phoneNumber: '+15559876543',
+      metadata: { externalChatId: '15551234567@c.us', unreadCount: 2 },
+    };
+    conversationRepo.findOne.mockResolvedValue(existingConv);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'contacts_sync', {
+      sessionPhone: '+15559876543',
+      contacts: [
+        {
+          phone: '+15551234567',
+          externalChatId: '15551234567@c.us',
+          name: 'John',
+          avatarUrl: null,
+          unreadCount: 8,
+        },
+      ],
+    });
+
+    // Should NOT create, should update existing
+    expect(conversationRepo.create).not.toHaveBeenCalled();
+    expect(conversationRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          unreadCount: 8,
+        }),
+      }),
+    );
+  });
+
+  it('normalizes group IDs in contacts_sync — no + prefix for @g.us', async () => {
+    const { service, conversationRepo } = buildService();
+    conversationRepo.findOne.mockResolvedValue(null);
+
+    await service.handleWhatsAppWebhook(WS_ID, 'contacts_sync', {
+      sessionPhone: '+15559876543',
+      contacts: [
+        {
+          phone: '120363123456789@g.us',
+          externalChatId: '120363123456789@g.us',
+          name: 'Test Group',
+          avatarUrl: null,
+          isGroup: true,
+          unreadCount: 3,
+        },
+      ],
+    });
+
+    // Group phone should NOT get + prefix
+    expect(conversationRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        participantPhoneNumber: '120363123456789@g.us',
+        metadata: expect.objectContaining({
+          isGroup: true,
+          unreadCount: 3,
+        }),
+      }),
     );
   });
 });
