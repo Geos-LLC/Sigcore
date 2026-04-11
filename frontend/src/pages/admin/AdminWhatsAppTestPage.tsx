@@ -477,10 +477,15 @@ export default function AdminWhatsAppTestPage() {
                         <p className="text-xs text-gray-400 truncate mt-0.5">{conv.lastMessage}</p>
                       )}
                     </div>
-                    <div className="shrink-0 text-right">
+                    <div className="shrink-0 text-right flex flex-col items-end gap-1">
                       {conv.lastMessageAt && (
                         <span className="text-xs text-gray-400">
                           {new Date(conv.lastMessageAt).toLocaleDateString()} {new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                      {conv.unreadCount > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-green-500 text-white text-[11px] font-bold">
+                          {conv.unreadCount}
                         </span>
                       )}
                     </div>

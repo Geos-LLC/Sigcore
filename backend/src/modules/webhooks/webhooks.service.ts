@@ -815,6 +815,7 @@ export class WebhooksService {
       isGroup?: boolean;
       lastActivityAt?: string | null;
       lastMessagePreview?: string | null;
+      unreadCount?: number;
     }>;
     const sessionPhone = data.sessionPhone as string || '';
 
@@ -847,6 +848,7 @@ export class WebhooksService {
         ...(contact.isGroup && { isGroup: true }),
         ...(contact.lastActivityAt && { lastActivityAt: contact.lastActivityAt }),
         ...(contact.lastMessagePreview && { lastMessagePreview: contact.lastMessagePreview }),
+        unreadCount: contact.unreadCount || 0,
       };
 
       if (!conversation) {
@@ -888,6 +890,9 @@ export class WebhooksService {
         }
         if (contact.isGroup) {
           existingMeta.isGroup = true; changed = true;
+        }
+        if (contact.unreadCount !== undefined) {
+          existingMeta.unreadCount = contact.unreadCount; changed = true;
         }
         if (sessionPhone && !contact.isGroup && conversation.phoneNumber !== sessionPhone) {
           conversation.phoneNumber = sessionPhone; changed = true;

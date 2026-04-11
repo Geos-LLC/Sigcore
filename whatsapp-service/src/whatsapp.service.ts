@@ -408,6 +408,7 @@ export class WhatsAppService implements OnModuleDestroy {
         phone: string; externalChatId: string; name: string | null;
         avatarUrl: string | null; isGroup?: boolean;
         lastActivityAt: string | null; lastMessagePreview: string | null;
+        unreadCount?: number;
       }> = [];
 
       // Resolve avatars in batch — try API first, then Puppeteer store fallback
@@ -475,6 +476,7 @@ export class WhatsAppService implements OnModuleDestroy {
             isGroup: true,
             lastActivityAt,
             lastMessagePreview,
+            unreadCount: chat.unreadCount || 0,
           });
         } else {
           let resolved = this.resolvePhone(chat.id._serialized);
@@ -515,6 +517,7 @@ export class WhatsAppService implements OnModuleDestroy {
             avatarUrl: avatar,
             lastActivityAt,
             lastMessagePreview,
+            unreadCount: chat.unreadCount || 0,
           });
         }
       }
