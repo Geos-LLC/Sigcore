@@ -276,6 +276,9 @@ export class WhatsAppService implements OnModuleDestroy {
 
     const isFromMe = message.fromMe || false;
 
+    // Download media for real-time messages
+    const media = await this.downloadMessageMedia(message);
+
     if (isGroup) {
       const groupId = message.from.endsWith('@g.us') ? message.from : message.to;
       let groupName: string | null = null;
@@ -289,6 +292,7 @@ export class WhatsAppService implements OnModuleDestroy {
         body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
         contactName: groupName, isGroup: true,
+        ...(media && { mediaData: media.data, mediaMimetype: media.mimetype, mediaFilename: media.filename }),
       });
       return;
     }
@@ -306,17 +310,30 @@ export class WhatsAppService implements OnModuleDestroy {
       body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
       hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
       contactName: resolved.name,
+      ...(media && { mediaData: media.data, mediaMimetype: media.mimetype, mediaFilename: media.filename }),
     });
   }
 
   private buildDisplayBody(body: string | undefined, type: string, hasMedia: boolean): string {
-    if (body) return body;
     const labels: Record<string, string> = {
       image: '📷 Photo', video: '🎥 Video', audio: '🎵 Audio',
       ptt: '🎤 Voice message', document: '📄 Document', sticker: '🏷️ Sticker',
       location: '📍 Location', vcard: '👤 Contact', call_log: '📞 Call',
     };
+    if (body && !hasMedia) return body;
+    if (body && hasMedia) return `${labels[type] || '📎 Attachment'} ${body}`;
     return labels[type] || (hasMedia ? '📎 Attachment' : '');
+  }
+
+  private async downloadMessageMedia(message: WAMessage): Promise<{ data: string; mimetype: string; filename?: string } | null> {
+    if (!message.hasMedia) return null;
+    try {
+      const media = await message.downloadMedia();
+      if (!media?.data) return null;
+      return { data: media.data, mimetype: media.mimetype, filename: media.filename || undefined };
+    } catch {
+      return null;
+    }
   }
 
   // =========================================================================

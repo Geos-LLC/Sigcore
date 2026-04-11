@@ -377,6 +377,10 @@ export class CommunicationService {
     };
   }
 
+  async getMessageById(messageId: string): Promise<CommunicationMessage | null> {
+    return this.messageRepo.findOne({ where: { id: messageId } });
+  }
+
   async getMessagesForConversation(
     workspaceId: string,
     conversationId: string,

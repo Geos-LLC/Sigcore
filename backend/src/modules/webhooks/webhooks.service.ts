@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   CommunicationConversation,
 } from '../../database/entities/communication-conversation.entity';
@@ -799,6 +801,15 @@ export class WebhooksService {
     );
   }
 
+  private mimeToExt(mime: string): string {
+    const map: Record<string, string> = {
+      'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
+      'video/mp4': '.mp4', 'audio/ogg': '.ogg', 'audio/mpeg': '.mp3', 'audio/mp4': '.m4a',
+      'application/pdf': '.pdf', 'application/octet-stream': '.bin',
+    };
+    return map[mime] || '.bin';
+  }
+
   /**
    * Handle contacts_sync: create/update conversations with contact names + avatars
    * before messages arrive, so conversations show names immediately.
@@ -1021,7 +1032,7 @@ export class WebhooksService {
         toNumber: normalizedTo,
         providerMessageId: msgProviderMessageId,
         status: MessageStatus.DELIVERED,
-        metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type },
+        metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type } as Record<string, unknown>,
       });
       await this.messageRepo.save(message);
     } catch (e: any) {
@@ -1031,6 +1042,28 @@ export class WebhooksService {
         return;
       }
       throw e;
+    }
+
+    // Save media to local disk if present
+    const mediaData = data.mediaData as string | undefined;
+    const mediaMimetype = data.mediaMimetype as string | undefined;
+    if (mediaData && mediaMimetype) {
+      try {
+        const ext = this.mimeToExt(mediaMimetype);
+        const mediaDir = path.join(process.cwd(), 'uploads', 'whatsapp', workspaceId);
+        if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+        const filename = `${message.id}${ext}`;
+        const filepath = path.join(mediaDir, filename);
+        fs.writeFileSync(filepath, Buffer.from(mediaData, 'base64'));
+
+        const meta = (message.metadata || {}) as Record<string, unknown>;
+        meta.mediaPath = `whatsapp/${workspaceId}/${filename}`;
+        meta.mediaMimetype = mediaMimetype;
+        message.metadata = meta;
+        await this.messageRepo.save(message);
+      } catch (e) {
+        this.logger.debug(`[WhatsApp] Failed to save media: ${e instanceof Error ? e.message : 'unknown'}`);
+      }
     }
 
     // Override createdAt with original message timestamp if available

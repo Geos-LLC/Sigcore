@@ -6,11 +6,16 @@ import {
   Body,
   Param,
   Query,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
   Header,
+  NotFoundException,
 } from '@nestjs/common';
+import { Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { CommunicationService } from './communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
@@ -65,6 +70,27 @@ export class ConversationsController {
       tenantId,
     );
     return { data: messages };
+  }
+
+  @Get('messages/:messageId/media')
+  async getMessageMedia(
+    @Param('messageId') messageId: string,
+    @Res() res: Response,
+  ) {
+    const message = await this.communicationService.getMessageById(messageId);
+    if (!message) throw new NotFoundException('Message not found');
+
+    const meta = (message.metadata || {}) as Record<string, unknown>;
+    const mediaPath = meta.mediaPath as string;
+    if (!mediaPath) throw new NotFoundException('No media for this message');
+
+    const fullPath = path.join(process.cwd(), 'uploads', mediaPath);
+    if (!fs.existsSync(fullPath)) throw new NotFoundException('Media file not found');
+
+    const mimetype = (meta.mediaMimetype as string) || 'application/octet-stream';
+    res.setHeader('Content-Type', mimetype);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(fullPath).pipe(res);
   }
 
   @Get(':id/calls')
