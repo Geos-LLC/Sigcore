@@ -1034,8 +1034,13 @@ export class WebhooksService {
     }
 
     // Override createdAt with original message timestamp if available
+    // Must use queryBuilder — repository.update() ignores @CreateDateColumn
     if (originalTimestamp && !isNaN(originalTimestamp.getTime()) && originalTimestamp.getFullYear() > 2020) {
-      await this.messageRepo.update(message.id, { createdAt: originalTimestamp } as any);
+      await this.messageRepo.createQueryBuilder()
+        .update()
+        .set({ createdAt: originalTimestamp } as any)
+        .where('id = :id', { id: message.id })
+        .execute();
       message.createdAt = originalTimestamp;
     }
 

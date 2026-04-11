@@ -5,6 +5,17 @@ import { MessageDirection, MessageStatus } from '../../database/entities/communi
 // ---------------------------------------------------------------------------
 // Mock builders (same pattern as whatsapp-webhook.spec.ts)
 // ---------------------------------------------------------------------------
+function buildMockQueryBuilder() {
+  const qb: any = {
+    update: jest.fn().mockReturnThis(),
+    delete: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    execute: jest.fn().mockResolvedValue({ affected: 1 }),
+  };
+  return qb;
+}
+
 function buildMockRepo() {
   return {
     findOne: jest.fn(),
@@ -14,7 +25,7 @@ function buildMockRepo() {
     update: jest.fn(),
     remove: jest.fn(),
     count: jest.fn(),
-    createQueryBuilder: jest.fn(),
+    createQueryBuilder: jest.fn().mockReturnValue(buildMockQueryBuilder()),
     query: jest.fn(),
   };
 }
