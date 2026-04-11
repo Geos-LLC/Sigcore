@@ -51,7 +51,6 @@ export default function App() {
         <Route path="whatsapp" element={<AdminWhatsAppTestPage />} />
         <Route path="provisioning" element={<AdminProvisioningTestPage />} />
         <Route path="sync-monitor" element={<AdminSyncMonitorPage />} />
-        <Route path="api-docs" element={<ApiDocsPage />} />
       </Route>
 
       {/* Portal */}
@@ -70,6 +69,9 @@ export default function App() {
         <Route path="orders" element={<TenantOrdersPage />} />
         <Route path="billing" element={<TenantBillingPage />} />
       </Route>
+
+      {/* Public */}
+      <Route path="/api-docs" element={<ApiDocsPage />} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/admin/login" replace />} />

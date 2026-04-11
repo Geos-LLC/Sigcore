@@ -94,10 +94,10 @@ export default function AdminLayout() {
                 <RefreshCw className="h-4 w-4" />
                 Sync Monitor
               </Link>
-              <Link to="/admin/api-docs" className={navLinkClass('/admin/api-docs')}>
+              <a href="/api-docs" className={navLinkClass('/api-docs')}>
                 <Book className="h-4 w-4" />
                 API Docs
-              </Link>
+              </a>
             </div>
           </nav>
 
