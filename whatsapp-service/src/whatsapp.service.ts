@@ -154,25 +154,10 @@ export class WhatsAppService implements OnModuleDestroy {
       this.handleRealTimeMessage(workspaceId, session, msg);
     });
 
-    // Reactions (suppressed during auto-sync to prevent historical reaction flood)
-    client.on('message_reaction', async (reaction: any) => {
-      if (this.syncing) return;
-      if (!reaction.msgId || !reaction.reaction) return;
+    // Reactions: logged but NOT forwarded as messages — they mess up conversation ordering
+    // WhatsApp shows reactions inline on the original message, not as separate entries
+    client.on('message_reaction', async () => {
       session.lastActivity = new Date();
-      const senderId = reaction.senderId || reaction.id?.participant;
-      const resolved = senderId ? this.resolvePhone(senderId) : null;
-      if (!resolved) return;
-
-      await this.forwardToSigcore(workspaceId, 'message_inbound', {
-        externalMessageId: `react_${Date.now()}_${Math.random().toString(36).substring(7)}`,
-        externalChatId: senderId,
-        from: resolved.phone,
-        to: session.phoneNumber || '',
-        body: `Reacted ${reaction.reaction}`,
-        timestamp: new Date().toISOString(),
-        type: 'reaction', fromMe: false,
-        contactName: resolved.name,
-      });
     });
 
     // Calls (suppressed during auto-sync)
