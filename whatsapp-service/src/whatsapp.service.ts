@@ -410,13 +410,51 @@ export class WhatsAppService implements OnModuleDestroy {
         lastActivityAt: string | null; lastMessagePreview: string | null;
       }> = [];
 
-      // Resolve avatars in batch (don't fail the whole sync if avatars fail)
-      const avatarMap = new Map<string, string | null>();
+      // Resolve avatars in batch — try API first, then Puppeteer store fallback
+      const avatarMap = new Map<string, string>();
+      let avatarResolved = 0;
+
+      // Method 1: client.getProfilePicUrl (works when privacy allows)
       for (const chat of allChats) {
         try {
           const url = await session.client.getProfilePicUrl(chat.id._serialized);
-          if (url) avatarMap.set(chat.id._serialized, url);
+          if (url) {
+            avatarMap.set(chat.id._serialized, url);
+            avatarResolved++;
+          }
         } catch {}
+      }
+      this.logger.log(`[AutoSync] Avatars from API: ${avatarResolved}/${allChats.length}`);
+
+      // Method 2: Puppeteer store fallback — read profile pics WhatsApp Web has cached
+      if (avatarResolved < allChats.length / 2) {
+        try {
+          const pupPage = (session.client as any).pupPage;
+          if (pupPage) {
+            const storeAvatars: Array<{ id: string; url: string }> = await pupPage.evaluate(() => {
+              const store = (window as any).Store;
+              if (!store?.ProfilePicThumb) return [];
+              const results: Array<{ id: string; url: string }> = [];
+              const thumbs = store.ProfilePicThumb.getModelsArray?.() || [];
+              for (const thumb of thumbs) {
+                const url = thumb.imgFull || thumb.img;
+                if (url && thumb.id) {
+                  results.push({ id: typeof thumb.id === 'string' ? thumb.id : thumb.id._serialized, url });
+                }
+              }
+              return results;
+            });
+
+            for (const { id, url } of storeAvatars) {
+              if (!avatarMap.has(id) && url) {
+                avatarMap.set(id, url);
+              }
+            }
+            this.logger.log(`[AutoSync] Avatars after store fallback: ${avatarMap.size}/${allChats.length}`);
+          }
+        } catch (e) {
+          this.logger.debug(`[AutoSync] Store avatar fallback failed: ${e instanceof Error ? e.message : 'unknown'}`);
+        }
       }
 
       // Per-chat contact fallback: if contactMap is empty, resolve per chat
