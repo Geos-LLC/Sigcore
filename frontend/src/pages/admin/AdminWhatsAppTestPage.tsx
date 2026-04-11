@@ -41,7 +41,10 @@ export default function AdminWhatsAppTestPage() {
   const [convPage, setConvPage] = useState(1);
   const [expandedConv, setExpandedConv] = useState<string | null>(null);
   const [convMessages, setConvMessages] = useState<Record<string, any[]>>({});
+  const [convHasMore, setConvHasMore] = useState<Record<string, boolean>>({});
   const [loadingMessages, setLoadingMessages] = useState<string | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const msgContainerRef = useRef<HTMLDivElement | null>(null);
   const [syncPollCount, setSyncPollCount] = useState(0);
 
   // QR polling
@@ -216,12 +219,55 @@ export default function AdminWhatsAppTestPage() {
   async function loadMessagesForConv(convId: string) {
     setLoadingMessages(convId);
     try {
-      const response = await adminApi.getConversationMessages(convId);
-      setConvMessages(prev => ({ ...prev, [convId]: response }));
+      const result = await adminApi.getConversationMessages(convId, { limit: 30 });
+      setConvMessages(prev => ({ ...prev, [convId]: result.data }));
+      setConvHasMore(prev => ({ ...prev, [convId]: result.hasMore }));
+      // Scroll to bottom after initial load
+      setTimeout(() => {
+        if (msgContainerRef.current) {
+          msgContainerRef.current.scrollTop = msgContainerRef.current.scrollHeight;
+        }
+      }, 50);
     } catch {
       setConvMessages(prev => ({ ...prev, [convId]: [] }));
+      setConvHasMore(prev => ({ ...prev, [convId]: false }));
     } finally {
       setLoadingMessages(null);
+    }
+  }
+
+  async function loadOlderMessages(convId: string) {
+    const existing = convMessages[convId];
+    if (!existing || existing.length === 0 || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const oldest = existing[0];
+      const result = await adminApi.getConversationMessages(convId, { limit: 30, before: oldest.createdAt });
+      if (result.data.length > 0) {
+        // Preserve scroll position
+        const container = msgContainerRef.current;
+        const prevHeight = container?.scrollHeight || 0;
+        setConvMessages(prev => ({ ...prev, [convId]: [...result.data, ...(prev[convId] || [])] }));
+        setConvHasMore(prev => ({ ...prev, [convId]: result.hasMore }));
+        setTimeout(() => {
+          if (container) {
+            container.scrollTop = container.scrollHeight - prevHeight;
+          }
+        }, 50);
+      } else {
+        setConvHasMore(prev => ({ ...prev, [convId]: false }));
+      }
+    } catch {
+      setConvHasMore(prev => ({ ...prev, [convId]: false }));
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  function handleMessagesScroll(convId: string, e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollTop < 40 && convHasMore[convId] && !loadingOlder) {
+      loadOlderMessages(convId);
     }
   }
 
@@ -493,7 +539,18 @@ export default function AdminWhatsAppTestPage() {
 
                   {/* Messages */}
                   {expandedConv === conv.id && (
-                    <div className="ml-9 mb-3 bg-gray-50 rounded-lg p-3 max-h-80 overflow-y-auto space-y-2">
+                    <div
+                      ref={msgContainerRef}
+                      onScroll={e => handleMessagesScroll(conv.id, e)}
+                      className="ml-9 mb-3 bg-gray-50 rounded-lg p-3 max-h-80 overflow-y-auto space-y-2"
+                    >
+                      {loadingOlder && (
+                        <div className="text-center py-2"><Loader2 className="h-3 w-3 animate-spin text-gray-400 mx-auto" /></div>
+                      )}
+                      {convHasMore[conv.id] && !loadingOlder && (convMessages[conv.id] || []).length > 0 && (
+                        <p className="text-[10px] text-gray-400 text-center py-1 cursor-pointer hover:text-gray-600"
+                          onClick={() => loadOlderMessages(conv.id)}>Scroll up for older messages</p>
+                      )}
                       {loadingMessages === conv.id ? (
                         <div className="text-center py-4"><Loader2 className="h-4 w-4 animate-spin text-gray-400 mx-auto" /></div>
                       ) : (convMessages[conv.id] || []).length === 0 ? (

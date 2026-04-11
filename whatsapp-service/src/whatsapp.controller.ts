@@ -124,6 +124,19 @@ export class WhatsAppController {
     return this.whatsAppService.sendMessage(workspaceId, body.to, body.message);
   }
 
+  @Post(':workspaceId/download-media')
+  async downloadMedia(
+    @Param('workspaceId') workspaceId: string,
+    @Headers('x-api-key') apiKey: string,
+    @Body() body: { messageId: string; chatId: string },
+  ) {
+    this.validateApiKey(apiKey);
+    if (!body.messageId || !body.chatId) {
+      throw new HttpException('Missing messageId or chatId', HttpStatus.BAD_REQUEST);
+    }
+    return this.whatsAppService.downloadMediaForMessage(workspaceId, body.chatId, body.messageId);
+  }
+
   @Delete(':workspaceId/disconnect')
   async disconnect(
     @Param('workspaceId') workspaceId: string,

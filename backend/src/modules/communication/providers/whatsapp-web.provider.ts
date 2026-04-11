@@ -231,6 +231,22 @@ export class WhatsAppWebProvider {
     }
   }
 
+  async downloadMedia(
+    workspaceId: string,
+    chatId: string,
+    messageId: string,
+  ): Promise<{ data: string; mimetype: string; filename?: string } | null> {
+    try {
+      const result = await this.fetch(`/${workspaceId}/download-media`, {
+        method: 'POST',
+        body: JSON.stringify({ messageId, chatId }),
+      });
+      return result;
+    } catch {
+      return null;
+    }
+  }
+
   async isServiceAvailable(): Promise<boolean> {
     try {
       const result = await this.fetch('/health');

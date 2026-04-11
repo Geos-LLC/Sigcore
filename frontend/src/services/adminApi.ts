@@ -332,9 +332,13 @@ class AdminApiService {
 
   // ==================== Conversations (from DB) ====================
 
-  async getConversationMessages(conversationId: string): Promise<any[]> {
-    const response = await this.client.get<{ data: any[] }>(`/conversations/${conversationId}/messages`);
-    return response.data.data;
+  async getConversationMessages(conversationId: string, options?: { limit?: number; before?: string }): Promise<{ data: any[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.append('limit', String(options.limit));
+    if (options?.before) params.append('before', options.before);
+    const qs = params.toString();
+    const response = await this.client.get<{ data: any[]; meta: { hasMore: boolean } }>(`/conversations/${conversationId}/messages${qs ? `?${qs}` : ''}`);
+    return { data: response.data.data, hasMore: response.data.meta?.hasMore ?? false };
   }
 
   async getConversations(options?: { page?: number; limit?: number; provider?: string }): Promise<{ conversations: any[]; meta: any }> {

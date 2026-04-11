@@ -381,10 +381,15 @@ export class CommunicationService {
     return this.messageRepo.findOne({ where: { id: messageId } });
   }
 
+  async updateMessageMetadata(messageId: string, metadata: Record<string, unknown>): Promise<void> {
+    await this.messageRepo.update(messageId, { metadata } as any);
+  }
+
   async getMessagesForConversation(
     workspaceId: string,
     conversationId: string,
     tenantId?: string | null,
+    pagination?: { limit?: number; before?: string },
   ): Promise<CommunicationMessage[]> {
     const where: any = { id: conversationId, workspaceId };
     if (tenantId) where.tenantId = tenantId;
@@ -395,7 +400,6 @@ export class CommunicationService {
     }
 
     // Find ALL conversations with the same participant to merge complete message history
-    // The same participant might have multiple conversation records in our DB
     const participantPhones: string[] = [];
     if (conversation.participantPhoneNumber) {
       participantPhones.push(conversation.participantPhoneNumber);
@@ -408,7 +412,6 @@ export class CommunicationService {
       }
     }
 
-    // Find all conversations with this participant
     let conversationIds = [conversation.id];
     if (participantPhones.length > 0) {
       const relatedConversations = await this.conversationRepo
@@ -418,13 +421,26 @@ export class CommunicationService {
         .getMany();
 
       conversationIds = [...new Set(relatedConversations.map(c => c.id))];
-      this.logger.log(`Found ${conversationIds.length} related conversations for participant`);
     }
 
-    return this.messageRepo.find({
-      where: { conversationId: In(conversationIds) },
-      order: { createdAt: 'ASC' },
-    });
+    const qb = this.messageRepo
+      .createQueryBuilder('msg')
+      .where('msg.conversationId IN (:...ids)', { ids: conversationIds });
+
+    // Cursor pagination: load messages before a given timestamp
+    if (pagination?.before) {
+      qb.andWhere('msg.created_at < :before', { before: new Date(pagination.before) });
+    }
+
+    const limit = pagination?.limit || 30;
+
+    // Fetch newest-first, then reverse for chronological display
+    const messages = await qb
+      .orderBy('msg.created_at', 'DESC')
+      .take(limit)
+      .getMany();
+
+    return messages.reverse();
   }
 
   async getMessagesForContact(

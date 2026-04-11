@@ -154,12 +154,22 @@ describe('CommunicationService – Tenant Isolation', () => {
       };
     }
 
+    function mockMsgQueryBuilder(messages: any[]) {
+      return {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue(messages),
+      };
+    }
+
     it('returns messages when conversation belongs to the tenant', async () => {
       const { service, conversationRepo, messageRepo } = buildService();
       const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
       conversationRepo.findOne.mockResolvedValue(conv);
       conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
-      messageRepo.find.mockResolvedValue([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]);
+      messageRepo.createQueryBuilder.mockReturnValue(mockMsgQueryBuilder([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]));
 
       const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A);
       expect(messages).toHaveLength(1);
@@ -183,7 +193,7 @@ describe('CommunicationService – Tenant Isolation', () => {
       const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
       conversationRepo.findOne.mockResolvedValue(conv);
       conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
-      messageRepo.find.mockResolvedValue([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]);
+      messageRepo.createQueryBuilder.mockReturnValue(mockMsgQueryBuilder([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]));
 
       const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', null);
       expect(messages).toHaveLength(1);

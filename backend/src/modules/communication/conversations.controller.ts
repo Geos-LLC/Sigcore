@@ -21,12 +21,16 @@ import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { SendMessageDto } from './dto';
+import { WhatsAppWebProvider } from './providers/whatsapp-web.provider';
 
 @Controller('conversations')
 @UseGuards(SigcoreAuthGuard)
 // TODO: re-enable @RequiresTenantScope() after fixing TypeORM tenant_id persistence
 export class ConversationsController {
-  constructor(private readonly communicationService: CommunicationService) {}
+  constructor(
+    private readonly communicationService: CommunicationService,
+    private readonly whatsAppProvider: WhatsAppWebProvider,
+  ) {}
 
   @Get()
   @Header('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -63,34 +67,78 @@ export class ConversationsController {
     @Param('id') conversationId: string,
     @WorkspaceId() workspaceId: string,
     @TenantId() tenantId: string | null,
+    @Query('limit') limitStr?: string,
+    @Query('before') before?: string,
   ) {
+    const limit = Math.min(parseInt(limitStr || '30', 10) || 30, 100);
     const messages = await this.communicationService.getMessagesForConversation(
       workspaceId,
       conversationId,
       tenantId,
+      { limit, before },
     );
-    return { data: messages };
+    return {
+      data: messages,
+      meta: { hasMore: messages.length === limit },
+    };
   }
 
   @Get('messages/:messageId/media')
   async getMessageMedia(
     @Param('messageId') messageId: string,
+    @WorkspaceId() workspaceId: string,
     @Res() res: Response,
   ) {
     const message = await this.communicationService.getMessageById(messageId);
     if (!message) throw new NotFoundException('Message not found');
 
     const meta = (message.metadata || {}) as Record<string, unknown>;
-    const mediaPath = meta.mediaPath as string;
-    if (!mediaPath) throw new NotFoundException('No media for this message');
+    let mediaPath = meta.mediaPath as string | undefined;
+    let mimetype = (meta.mediaMimetype as string) || 'application/octet-stream';
 
-    const fullPath = path.join(process.cwd(), 'uploads', mediaPath);
-    if (!fs.existsSync(fullPath)) throw new NotFoundException('Media file not found');
+    // If media file exists locally, serve it
+    if (mediaPath) {
+      const fullPath = path.join(process.cwd(), 'uploads', mediaPath);
+      if (fs.existsSync(fullPath)) {
+        res.setHeader('Content-Type', mimetype);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        fs.createReadStream(fullPath).pipe(res);
+        return;
+      }
+    }
 
-    const mimetype = (meta.mediaMimetype as string) || 'application/octet-stream';
+    // On-demand download: ask WhatsApp service if message has media
+    if (!meta.hasMedia) throw new NotFoundException('No media for this message');
+
+    const chatId = meta.externalChatId as string;
+    const providerMsgId = message.providerMessageId;
+    if (!chatId || !providerMsgId) throw new NotFoundException('Missing chat/message ID for download');
+
+    const media = await this.whatsAppProvider.downloadMedia(workspaceId, chatId, providerMsgId);
+    if (!media?.data) throw new NotFoundException('Media no longer available');
+
+    // Save to disk for future requests
+    const mimeMap: Record<string, string> = {
+      'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
+      'video/mp4': '.mp4', 'audio/ogg': '.ogg', 'audio/mpeg': '.mp3',
+    };
+    const ext = mimeMap[media.mimetype] || '.bin';
+    const mediaDir = path.join(process.cwd(), 'uploads', 'whatsapp', workspaceId);
+    if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+    const filename = `${message.id}${ext}`;
+    const filepath = path.join(mediaDir, filename);
+    fs.writeFileSync(filepath, Buffer.from(media.data, 'base64'));
+
+    // Update message metadata
+    meta.mediaPath = `whatsapp/${workspaceId}/${filename}`;
+    meta.mediaMimetype = media.mimetype;
+    message.metadata = meta;
+    await this.communicationService.updateMessageMetadata(message.id, meta);
+
+    mimetype = media.mimetype;
     res.setHeader('Content-Type', mimetype);
     res.setHeader('Cache-Control', 'public, max-age=86400');
-    fs.createReadStream(fullPath).pipe(res);
+    fs.createReadStream(filepath).pipe(res);
   }
 
   @Get(':id/calls')

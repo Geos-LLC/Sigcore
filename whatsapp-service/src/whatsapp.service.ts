@@ -659,6 +659,31 @@ export class WhatsAppService implements OnModuleDestroy {
     return this.sessions.get(workspaceId) || null;
   }
 
+  async downloadMediaForMessage(
+    workspaceId: string,
+    chatId: string,
+    messageId: string,
+  ): Promise<{ data: string; mimetype: string; filename?: string } | null> {
+    const session = this.sessions.get(workspaceId);
+    if (!session || session.status !== 'ready') return null;
+
+    try {
+      const chat = await session.client.getChatById(chatId);
+      if (!chat) return null;
+
+      const messages = await chat.fetchMessages({ limit: 50 });
+      const target = messages.find(m => m.id._serialized === messageId);
+      if (!target || !target.hasMedia) return null;
+
+      const media = await target.downloadMedia();
+      if (!media?.data) return null;
+      return { data: media.data, mimetype: media.mimetype, filename: media.filename || undefined };
+    } catch (e) {
+      this.logger.debug(`[Media] Failed to download: ${e instanceof Error ? e.message : 'unknown'}`);
+      return null;
+    }
+  }
+
   isConnected(workspaceId: string): boolean {
     return this.sessions.get(workspaceId)?.status === 'ready';
   }
