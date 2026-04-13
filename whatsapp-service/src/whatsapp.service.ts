@@ -745,8 +745,43 @@ export class WhatsAppService implements OnModuleDestroy {
     const allChats = await session.client.getChats();
     allChats.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
+    // Resolve avatars: API first, then Puppeteer store fallback
+    const avatarMap = new Map<string, string>();
+    for (const chat of allChats) {
+      try {
+        const url = await session.client.getProfilePicUrl(chat.id._serialized);
+        if (url) avatarMap.set(chat.id._serialized, url);
+      } catch {}
+    }
+    // Store fallback for avatars not resolved by API
+    if (avatarMap.size < allChats.length / 2) {
+      try {
+        const pupPage = (session.client as any).pupPage;
+        if (pupPage) {
+          const storeAvatars: Array<{ id: string; url: string }> = await pupPage.evaluate(() => {
+            const store = (window as any).Store;
+            if (!store?.ProfilePicThumb) return [];
+            const results: Array<{ id: string; url: string }> = [];
+            const thumbs = store.ProfilePicThumb.getModelsArray?.() || [];
+            for (const thumb of thumbs) {
+              const url = thumb.imgFull || thumb.img;
+              if (url && thumb.id) {
+                results.push({ id: typeof thumb.id === 'string' ? thumb.id : thumb.id._serialized, url });
+              }
+            }
+            return results;
+          });
+          for (const { id, url } of storeAvatars) {
+            if (!avatarMap.has(id) && url) avatarMap.set(id, url);
+          }
+        }
+      } catch {}
+    }
+
     const result: any[] = [];
     for (const chat of allChats) {
+      const avatar = avatarMap.get(chat.id._serialized) || null;
+
       if (chat.isGroup) {
         if (!chat.name) continue;
         let messages: any[] = [];
@@ -765,7 +800,7 @@ export class WhatsAppService implements OnModuleDestroy {
         }
         result.push({
           id: chat.id._serialized, name: chat.name, phone: chat.id._serialized,
-          avatarUrl: null, isGroup: true,
+          avatarUrl: avatar, isGroup: true,
           lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
           unreadCount: chat.unreadCount || 0, messages,
         });
@@ -790,7 +825,7 @@ export class WhatsAppService implements OnModuleDestroy {
         }
         result.push({
           id: chat.id._serialized, name: contactInfo?.name || resolved.name || chat.name || null,
-          phone: resolved.phone, avatarUrl: null,
+          phone: resolved.phone, avatarUrl: avatar,
           lastMessageAt: chat.timestamp ? new Date(chat.timestamp * 1000).toISOString() : null,
           unreadCount: chat.unreadCount || 0, messages,
         });
