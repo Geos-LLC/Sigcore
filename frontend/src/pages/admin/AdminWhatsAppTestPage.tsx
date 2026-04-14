@@ -3,6 +3,45 @@ import { CheckCircle, XCircle, Loader2, Plug, Unplug, MessageSquare, QrCode, Ref
 import { io, Socket } from 'socket.io-client';
 import { adminApi } from '../../services/adminApi';
 
+/**
+ * Renders WhatsApp media (image/video/audio) using the authed adminApi client.
+ * Browser <img src=""> can't carry X-API-Key, so we fetch the bytes and render
+ * them as an object URL.
+ */
+function AuthedMedia({ messageId, kind, mimetype, filename }: {
+  messageId: string;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  mimetype?: string;
+  filename?: string;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    adminApi.fetchMessageMediaBlob(messageId)
+      .then(blob => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => { if (!cancelled) setError(true); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [messageId]);
+
+  if (error) return <span className="text-xs text-red-400 mb-1 block">⚠️ Media unavailable</span>;
+  if (!url) return <span className="text-xs text-gray-400 mb-1 block"><Loader2 className="h-3 w-3 inline animate-spin" /> loading…</span>;
+
+  if (kind === 'image') return <img src={url} alt="" className="rounded max-w-[240px] max-h-[200px] object-cover mb-1" />;
+  if (kind === 'video') return <video src={url} controls className="rounded max-w-[240px] max-h-[200px] mb-1" />;
+  if (kind === 'audio') return <audio src={url} controls className="mb-1 max-w-[240px]" />;
+  return <a href={url} download={filename || 'attachment'} className="text-blue-600 underline text-xs mb-1 block">📎 {filename || mimetype || 'Download'}</a>;
+}
+
 type Status = 'idle' | 'loading' | 'success' | 'error';
 
 interface SyncedConversation {
@@ -564,33 +603,23 @@ export default function AdminWhatsAppTestPage() {
                             <div className={`rounded-lg px-3 py-1.5 max-w-[80%] ${
                               msg.direction === 'out' ? 'bg-green-100 text-green-900' : 'bg-white text-gray-800 border border-gray-200'
                             }`}>
-                              {/* Use SF response contract: hasMedia + mediaType + mediaUrl (top-level).
-                                  Fall back to legacy metadata fields for messages persisted before the contract shipped. */}
+                              {/* SF contract first (hasMedia/mediaType/mediaUrl), legacy metadata fallback */}
                               {(() => {
                                 const hasMedia = msg.hasMedia ?? Boolean(msg.metadata?.mediaS3Key || msg.metadata?.mediaPath);
                                 if (!hasMedia) return null;
                                 const mime = msg.mediaMimetype || msg.metadata?.mediaMimetype || '';
-                                const mediaType =
+                                const kind: 'image' | 'video' | 'audio' | 'document' =
                                   msg.mediaType ||
                                   (mime.startsWith('image/') ? 'image' :
                                    mime.startsWith('video/') ? 'video' :
                                    mime.startsWith('audio/') ? 'audio' : 'document');
-                                const url = msg.mediaUrl || `/conversations/messages/${msg.id}/media`;
-                                const apiUrl = url.startsWith('/api') ? url : `/api${url}`;
-                                if (mediaType === 'image') return (
-                                  <img src={apiUrl} alt="" className="rounded max-w-[240px] max-h-[200px] object-cover mb-1"
-                                    onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                                );
-                                if (mediaType === 'video') return (
-                                  <video src={apiUrl} controls className="rounded max-w-[240px] max-h-[200px] mb-1" />
-                                );
-                                if (mediaType === 'audio') return (
-                                  <audio src={apiUrl} controls className="mb-1 max-w-[240px]" />
-                                );
                                 return (
-                                  <a href={apiUrl} target="_blank" rel="noreferrer" className="text-blue-600 underline text-xs mb-1 block">
-                                    📎 {msg.mediaFilename || msg.metadata?.mediaFilename || 'Download attachment'}
-                                  </a>
+                                  <AuthedMedia
+                                    messageId={msg.id}
+                                    kind={kind}
+                                    mimetype={mime}
+                                    filename={msg.mediaFilename || msg.metadata?.mediaFilename}
+                                  />
                                 );
                               })()}
                               <p>{msg.body}</p>

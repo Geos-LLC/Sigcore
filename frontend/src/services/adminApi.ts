@@ -332,6 +332,16 @@ class AdminApiService {
 
   // ==================== Conversations (from DB) ====================
 
+  /**
+   * Fetch message media as a blob via the authenticated client (X-API-Key header).
+   * Browser <img src> can't carry the auth header, so callers convert the blob
+   * to an object URL and use it in the src attribute.
+   */
+  async fetchMessageMediaBlob(messageId: string): Promise<Blob> {
+    const response = await this.client.get(`/conversations/messages/${messageId}/media`, { responseType: 'blob' });
+    return response.data as Blob;
+  }
+
   async getConversationMessages(conversationId: string, options?: { limit?: number; before?: string }): Promise<{ data: any[]; hasMore: boolean }> {
     const params = new URLSearchParams();
     if (options?.limit) params.append('limit', String(options.limit));
