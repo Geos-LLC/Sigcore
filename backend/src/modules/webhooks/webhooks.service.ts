@@ -29,6 +29,7 @@ import { OpenPhoneProvider } from '../communication/providers/openphone.provider
 import { IdempotencyService } from './idempotency.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
+import { S3Service } from '../../shared/storage/s3.service';
 
 export interface OpenPhoneMessageObject {
   id: string;
@@ -93,6 +94,7 @@ export class WebhooksService {
     private openPhoneProvider: OpenPhoneProvider,
     private idempotencyService: IdempotencyService,
     private outboundWebhooksService: OutboundWebhooksService,
+    private s3Service: S3Service,
   ) {}
 
   async getWorkspaceByWebhookId(webhookId: string): Promise<Workspace | null> {
@@ -747,10 +749,9 @@ export class WebhooksService {
         break;
       case 'status_change':
         this.logger.log(`[WhatsApp] Status change for workspace ${workspaceId}: ${data.status}`);
-        // Clean slate on reconnect: delete old WhatsApp data so fresh sync replaces it
-        if (data.status === 'ready') {
-          await this.clearWhatsAppData(workspaceId);
-        }
+        // PR3: Do NOT wipe conversations/messages on reconnect. The sync pipeline
+        // upserts by providerMessageId, and media persisted to S3 survives redeploys.
+        // Wiping here caused every redeploy to re-download every photo.
         await this.outboundWebhooksService.emitEvent(
           workspaceId,
           WebhookEventType.WHATSAPP_STATUS_CHANGE,
@@ -1032,7 +1033,16 @@ export class WebhooksService {
         toNumber: normalizedTo,
         providerMessageId: msgProviderMessageId,
         status: MessageStatus.DELIVERED,
-        metadata: { externalChatId, hasMedia: data.hasMedia, type: data.type } as Record<string, unknown>,
+        metadata: {
+          externalChatId,
+          hasMedia: data.hasMedia,
+          type: data.type,
+          ...(data.mediaStatus ? { mediaStatus: data.mediaStatus } : {}),
+          ...(data.mediaSource ? { mediaSource: data.mediaSource } : {}),
+          ...(data.mediaMimetype ? { mediaMimetype: data.mediaMimetype } : {}),
+          ...(data.mediaFilename ? { mediaFilename: data.mediaFilename } : {}),
+          ...(data.mediaSizeBytes ? { mediaSizeBytes: data.mediaSizeBytes } : {}),
+        } as Record<string, unknown>,
       });
       await this.messageRepo.save(message);
     } catch (e: any) {
@@ -1044,25 +1054,42 @@ export class WebhooksService {
       throw e;
     }
 
-    // Save media to local disk if present
+    // Save media to S3 if present. Falls back to local disk when S3 is not configured
+    // (e.g. local dev without AWS creds) so we keep back-compat with the old pipeline.
     const mediaData = data.mediaData as string | undefined;
     const mediaMimetype = data.mediaMimetype as string | undefined;
     if (mediaData && mediaMimetype) {
+      const meta = (message.metadata || {}) as Record<string, unknown>;
       try {
         const ext = this.mimeToExt(mediaMimetype);
-        const mediaDir = path.join(process.cwd(), 'uploads', 'whatsapp', workspaceId);
-        if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
-        const filename = `${message.id}${ext}`;
-        const filepath = path.join(mediaDir, filename);
-        fs.writeFileSync(filepath, Buffer.from(mediaData, 'base64'));
+        const buffer = Buffer.from(mediaData, 'base64');
 
-        const meta = (message.metadata || {}) as Record<string, unknown>;
-        meta.mediaPath = `whatsapp/${workspaceId}/${filename}`;
-        meta.mediaMimetype = mediaMimetype;
+        if (this.s3Service.isConfigured()) {
+          const s3Key = this.s3Service.buildKey(workspaceId, message.id, ext);
+          await this.s3Service.putObject({ key: s3Key, body: buffer, contentType: mediaMimetype });
+          meta.mediaS3Key = s3Key;
+          meta.mediaMimetype = mediaMimetype;
+          meta.mediaSizeBytes = buffer.length;
+          if (!meta.mediaStatus) meta.mediaStatus = 'downloaded';
+          if (!meta.mediaSource) meta.mediaSource = data.mediaSource || 'realtime';
+        } else {
+          // Back-compat local disk path
+          const mediaDir = path.join(process.cwd(), 'uploads', 'whatsapp', workspaceId);
+          if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
+          const filename = `${message.id}${ext}`;
+          const filepath = path.join(mediaDir, filename);
+          fs.writeFileSync(filepath, buffer);
+          meta.mediaPath = `whatsapp/${workspaceId}/${filename}`;
+          meta.mediaMimetype = mediaMimetype;
+          meta.mediaSizeBytes = buffer.length;
+        }
         message.metadata = meta;
         await this.messageRepo.save(message);
       } catch (e) {
         this.logger.debug(`[WhatsApp] Failed to save media: ${e instanceof Error ? e.message : 'unknown'}`);
+        meta.mediaStatus = 'failed';
+        message.metadata = meta;
+        try { await this.messageRepo.save(message); } catch {}
       }
     }
 

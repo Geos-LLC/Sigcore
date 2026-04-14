@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as bodyParser from 'body-parser';
 import { AppModule } from './app.module';
 import { LoghubLogger } from '@geos/loghub-client';
 
@@ -15,6 +16,11 @@ async function bootstrap() {
   // while Twilio signed the webhook URL with 'https'.
   const expressApp = app.getHttpAdapter().getInstance();
   expressApp.set('trust proxy', 1);
+
+  // Lift body size cap — base64-encoded 5 MB media ≈ 6.7 MB JSON on
+  // /webhooks/whatsapp/inbound. Default Express limit is 100 KB which 413s.
+  app.use(bodyParser.json({ limit: '20mb' }));
+  app.use(bodyParser.urlencoded({ limit: '20mb', extended: true }));
 
   const configService = app.get(ConfigService);
   const logger = new Logger('HTTP');

@@ -42,6 +42,13 @@ function buildService() {
   const openPhoneProvider = {};
   const idempotencyService = { isDuplicate: jest.fn().mockResolvedValue(false), markProcessed: jest.fn() };
   const outboundWebhooksService = { emitEvent: jest.fn(), emitMessageEvent: jest.fn() };
+  const s3Service = {
+    isConfigured: jest.fn().mockReturnValue(false),
+    buildKey: jest.fn((ws: string, id: string, ext: string) => `whatsapp/${ws}/${id}${ext}`),
+    putObject: jest.fn().mockResolvedValue({ uploaded: true, skipped: false }),
+    headObject: jest.fn().mockResolvedValue(false),
+    getObjectStream: jest.fn().mockResolvedValue(null),
+  };
 
   const service = new WebhooksService(
     conversationRepo as any,
@@ -55,6 +62,7 @@ function buildService() {
     openPhoneProvider as any,
     idempotencyService as any,
     outboundWebhooksService as any,
+    s3Service as any,
   );
 
   return {

@@ -22,6 +22,8 @@ import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator
 import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { SendMessageDto } from './dto';
 import { WhatsAppWebProvider } from './providers/whatsapp-web.provider';
+import { S3Service } from '../../shared/storage/s3.service';
+import { decorateMessage } from './message-media.mapper';
 
 @Controller('conversations')
 @UseGuards(SigcoreAuthGuard)
@@ -30,6 +32,7 @@ export class ConversationsController {
   constructor(
     private readonly communicationService: CommunicationService,
     private readonly whatsAppProvider: WhatsAppWebProvider,
+    private readonly s3Service: S3Service,
   ) {}
 
   @Get()
@@ -78,7 +81,7 @@ export class ConversationsController {
       { limit, before },
     );
     return {
-      data: messages,
+      data: messages.map(m => decorateMessage(m as any)),
       meta: { hasMore: messages.length === limit },
     };
   }
@@ -93,10 +96,22 @@ export class ConversationsController {
     if (!message) throw new NotFoundException('Message not found');
 
     const meta = (message.metadata || {}) as Record<string, unknown>;
-    let mediaPath = meta.mediaPath as string | undefined;
-    let mimetype = (meta.mediaMimetype as string) || 'application/octet-stream';
+    const mimetype = (meta.mediaMimetype as string) || 'application/octet-stream';
 
-    // If media file exists locally, serve it
+    // 1. S3 (primary) — stream directly to client
+    const s3Key = meta.mediaS3Key as string | undefined;
+    if (s3Key && this.s3Service.isConfigured()) {
+      const obj = await this.s3Service.getObjectStream(s3Key);
+      if (obj) {
+        res.setHeader('Content-Type', obj.contentType || mimetype);
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        obj.stream.pipe(res);
+        return;
+      }
+    }
+
+    // 2. Legacy local disk (back-compat for pre-S3 messages)
+    const mediaPath = meta.mediaPath as string | undefined;
     if (mediaPath) {
       const fullPath = path.join(process.cwd(), 'uploads', mediaPath);
       if (fs.existsSync(fullPath)) {
@@ -107,9 +122,8 @@ export class ConversationsController {
       }
     }
 
-    // On-demand download: ask WhatsApp service if message has media
+    // 3. On-demand download from WhatsApp service, then persist to S3 (or disk fallback)
     if (!meta.hasMedia) throw new NotFoundException('No media for this message');
-
     const chatId = meta.externalChatId as string;
     const providerMsgId = message.providerMessageId;
     if (!chatId || !providerMsgId) throw new NotFoundException('Missing chat/message ID for download');
@@ -117,26 +131,41 @@ export class ConversationsController {
     const media = await this.whatsAppProvider.downloadMedia(workspaceId, chatId, providerMsgId);
     if (!media?.data) throw new NotFoundException('Media no longer available');
 
-    // Save to disk for future requests
     const mimeMap: Record<string, string> = {
       'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
       'video/mp4': '.mp4', 'audio/ogg': '.ogg', 'audio/mpeg': '.mp3',
     };
     const ext = mimeMap[media.mimetype] || '.bin';
+    const buffer = Buffer.from(media.data, 'base64');
+
+    if (this.s3Service.isConfigured()) {
+      const key = this.s3Service.buildKey(workspaceId, message.id, ext);
+      await this.s3Service.putObject({ key, body: buffer, contentType: media.mimetype });
+      meta.mediaS3Key = key;
+      meta.mediaMimetype = media.mimetype;
+      meta.mediaSizeBytes = buffer.length;
+      meta.mediaStatus = 'downloaded';
+      meta.mediaSource = 'on_demand';
+      await this.communicationService.updateMessageMetadata(message.id, meta);
+
+      res.setHeader('Content-Type', media.mimetype);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.end(buffer);
+      return;
+    }
+
+    // Legacy disk fallback when S3 is not configured
     const mediaDir = path.join(process.cwd(), 'uploads', 'whatsapp', workspaceId);
     if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
     const filename = `${message.id}${ext}`;
     const filepath = path.join(mediaDir, filename);
-    fs.writeFileSync(filepath, Buffer.from(media.data, 'base64'));
-
-    // Update message metadata
+    fs.writeFileSync(filepath, buffer);
     meta.mediaPath = `whatsapp/${workspaceId}/${filename}`;
     meta.mediaMimetype = media.mimetype;
-    message.metadata = meta;
+    meta.mediaSizeBytes = buffer.length;
     await this.communicationService.updateMessageMetadata(message.id, meta);
 
-    mimetype = media.mimetype;
-    res.setHeader('Content-Type', mimetype);
+    res.setHeader('Content-Type', media.mimetype);
     res.setHeader('Cache-Control', 'public, max-age=86400');
     fs.createReadStream(filepath).pipe(res);
   }

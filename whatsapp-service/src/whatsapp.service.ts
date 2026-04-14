@@ -31,6 +31,23 @@ interface StoreMessage {
   hasMedia?: boolean;
 }
 
+export type MediaStatus =
+  | 'downloaded'
+  | 'skipped_too_large'
+  | 'unsupported_store_message'
+  | 'not_found'
+  | 'failed';
+
+export type MediaSource = 'realtime' | 'sync' | 'on_demand';
+
+interface DownloadedMedia {
+  data: string;
+  mimetype: string;
+  filename?: string;
+  sizeBytes: number;
+  status: MediaStatus;
+}
+
 @Injectable()
 export class WhatsAppService implements OnModuleDestroy {
   private readonly logger = new Logger(WhatsAppService.name);
@@ -278,6 +295,7 @@ export class WhatsAppService implements OnModuleDestroy {
 
     // Download media for real-time messages
     const media = await this.downloadMessageMedia(message);
+    const mediaPayload = this.buildMediaPayload(media, 'realtime', message.hasMedia);
 
     if (isGroup) {
       const groupId = message.from.endsWith('@g.us') ? message.from : message.to;
@@ -292,7 +310,7 @@ export class WhatsAppService implements OnModuleDestroy {
         body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
         hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
         contactName: groupName, isGroup: true,
-        ...(media && { mediaData: media.data, mediaMimetype: media.mimetype, mediaFilename: media.filename }),
+        ...mediaPayload,
       });
       return;
     }
@@ -310,8 +328,43 @@ export class WhatsAppService implements OnModuleDestroy {
       body, timestamp: message.timestamp ? new Date(message.timestamp * 1000).toISOString() : new Date().toISOString(),
       hasMedia: message.hasMedia, type: message.type, fromMe: isFromMe,
       contactName: resolved.name,
-      ...(media && { mediaData: media.data, mediaMimetype: media.mimetype, mediaFilename: media.filename }),
+      ...mediaPayload,
     });
+  }
+
+  /**
+   * Build the media-related fields appended to a forwarded message payload.
+   * Single source of truth for the outbound media contract shared with Sigcore.
+   */
+  private buildMediaPayload(
+    media: DownloadedMedia | null,
+    source: MediaSource,
+    hasMedia: boolean,
+  ): Record<string, unknown> {
+    if (media && media.status === 'downloaded') {
+      return {
+        mediaData: media.data,
+        mediaMimetype: media.mimetype,
+        mediaFilename: media.filename,
+        mediaSizeBytes: media.sizeBytes,
+        mediaStatus: 'downloaded' as MediaStatus,
+        mediaSource: source,
+      };
+    }
+    if (media && media.status !== 'downloaded') {
+      return {
+        mediaStatus: media.status,
+        mediaSource: source,
+        ...(media.mimetype ? { mediaMimetype: media.mimetype } : {}),
+        ...(media.filename ? { mediaFilename: media.filename } : {}),
+        ...(media.sizeBytes ? { mediaSizeBytes: media.sizeBytes } : {}),
+      };
+    }
+    if (hasMedia) {
+      // hasMedia=true but no download attempt succeeded (e.g. StoreMessage path)
+      return { mediaStatus: 'unsupported_store_message' as MediaStatus, mediaSource: source };
+    }
+    return {};
   }
 
   private buildDisplayBody(body: string | undefined, type: string, hasMedia: boolean): string {
@@ -325,14 +378,38 @@ export class WhatsAppService implements OnModuleDestroy {
     return labels[type] || (hasMedia ? '📎 Attachment' : '');
   }
 
-  private async downloadMessageMedia(message: WAMessage): Promise<{ data: string; mimetype: string; filename?: string } | null> {
+  private getMaxMediaBytes(): number {
+    const mb = parseInt(process.env.SYNC_MAX_MEDIA_MB || '5', 10);
+    return (Number.isFinite(mb) ? mb : 5) * 1024 * 1024;
+  }
+
+  private async downloadMessageMedia(message: WAMessage): Promise<DownloadedMedia | null> {
     if (!message.hasMedia) return null;
     try {
       const media = await message.downloadMedia();
-      if (!media?.data) return null;
-      return { data: media.data, mimetype: media.mimetype, filename: media.filename || undefined };
-    } catch {
-      return null;
+      if (!media?.data) return { data: '', mimetype: '', status: 'not_found', sizeBytes: 0 };
+      const sizeBytes = Buffer.byteLength(media.data, 'base64');
+      const maxBytes = this.getMaxMediaBytes();
+      if (sizeBytes > maxBytes) {
+        this.logger.warn(`[Media] Skipped oversized media: messageId=${message.id?._serialized} sizeBytes=${sizeBytes} maxBytes=${maxBytes}`);
+        return {
+          data: '',
+          mimetype: media.mimetype,
+          filename: media.filename || undefined,
+          sizeBytes,
+          status: 'skipped_too_large',
+        };
+      }
+      return {
+        data: media.data,
+        mimetype: media.mimetype,
+        filename: media.filename || undefined,
+        sizeBytes,
+        status: 'downloaded',
+      };
+    } catch (e) {
+      this.logger.debug(`[Media] downloadMedia failed: ${e instanceof Error ? e.message : 'unknown'}`);
+      return { data: '', mimetype: '', status: 'failed', sizeBytes: 0 };
     }
   }
 
@@ -575,12 +652,23 @@ export class WhatsAppService implements OnModuleDestroy {
 
         const messages = await this.fetchMessagesWithFallback(session.client, chat, 20);
 
+        const throttleMediaMs = parseInt(process.env.SYNC_THROTTLE_MEDIA_MS || '250', 10) || 250;
+        const throttleTextMs = parseInt(process.env.SYNC_THROTTLE_TEXT_MS || '75', 10) || 75;
+
         for (const msg of messages) {
           const body = this.buildDisplayBody(msg.body, msg.type, msg.hasMedia);
           if (!body) continue;
 
           const isFromMe = msg.fromMe || false;
           const ts = msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString();
+
+          // Download media for real Messages (StoreMessage has no downloadMedia)
+          const hasDownloadMedia = typeof (msg as any).downloadMedia === 'function';
+          let media: DownloadedMedia | null = null;
+          if (msg.hasMedia && hasDownloadMedia) {
+            media = await this.downloadMessageMedia(msg as WAMessage);
+          }
+          const mediaPayload = this.buildMediaPayload(media, 'sync', !!msg.hasMedia);
 
           await this.forwardToSigcore(workspaceId, 'message_inbound', {
             externalMessageId: msg.id._serialized,
@@ -591,11 +679,13 @@ export class WhatsAppService implements OnModuleDestroy {
             hasMedia: msg.hasMedia, type: msg.type,
             fromMe: isFromMe, contactName: chatName,
             ...(isGroup && { isGroup: true }),
+            ...mediaPayload,
           });
           totalMessages++;
 
-          // Throttle: 75ms between messages to avoid 429 on Sigcore
-          await this.delay(75);
+          // Adaptive throttle: bump for media messages (heavier payload) vs text
+          const isMediaMsg = media?.status === 'downloaded';
+          await this.delay(isMediaMsg ? throttleMediaMs : throttleTextMs);
         }
         syncedChats++;
       }
@@ -667,17 +757,66 @@ export class WhatsAppService implements OnModuleDestroy {
     const session = this.sessions.get(workspaceId);
     if (!session || session.status !== 'ready') return null;
 
+    const maxDurationMs = parseInt(process.env.ON_DEMAND_MAX_DURATION_MS || '3000', 10) || 3000;
+    const maxMessages = 500;
+    const pageSize = 100;
+    const startedAt = Date.now();
+
     try {
       const chat = await session.client.getChatById(chatId);
       if (!chat) return null;
 
-      const messages = await chat.fetchMessages({ limit: 50 });
-      const target = messages.find(m => m.id._serialized === messageId);
-      if (!target || !target.hasMedia) return null;
+      let scanned = 0;
+      let beforeId: string | undefined;
 
-      const media = await target.downloadMedia();
-      if (!media?.data) return null;
-      return { data: media.data, mimetype: media.mimetype, filename: media.filename || undefined };
+      // Paged walk through history. whatsapp-web.js fetchMessages doesn't
+      // support a 'before' cursor natively, so we grow `limit` page by page.
+      // On LID-crash, fall through to Puppeteer store.
+      while (scanned < maxMessages) {
+        if (Date.now() - startedAt > maxDurationMs) {
+          this.logger.debug(`[Media] on-demand lookup exceeded ${maxDurationMs}ms — aborting`);
+          break;
+        }
+
+        const nextLimit = Math.min(maxMessages, scanned + pageSize);
+        let messages: any[] = [];
+        try {
+          messages = await chat.fetchMessages({ limit: nextLimit });
+        } catch (e) {
+          this.logger.debug(`[Media] fetchMessages failed (likely LID chat): ${e instanceof Error ? e.message : 'unknown'}`);
+          // Try Puppeteer store fallback (store messages have no downloadMedia — best effort)
+          try {
+            const store = await this.fetchMessagesWithFallback(session.client, chat, maxMessages);
+            const storeTarget: any = store.find(m => m.id._serialized === messageId);
+            if (!storeTarget) return null;
+            if (typeof storeTarget.downloadMedia === 'function') {
+              const m = await storeTarget.downloadMedia();
+              if (m?.data) return { data: m.data, mimetype: m.mimetype, filename: m.filename || undefined };
+            }
+            this.logger.debug(`[Media] LID/store target has no downloadMedia — unsupported`);
+          } catch {}
+          return null;
+        }
+
+        if (!messages || messages.length === 0) break;
+
+        const target = messages.find(m => m.id._serialized === messageId);
+        if (target) {
+          if (!target.hasMedia) return null;
+          const media = await target.downloadMedia();
+          if (!media?.data) return null;
+          return { data: media.data, mimetype: media.mimetype, filename: media.filename || undefined };
+        }
+
+        if (messages.length <= scanned) break; // no new messages available
+        scanned = messages.length;
+        // guard: if the batch didn't grow, stop
+        const oldestId = messages[messages.length - 1]?.id?._serialized;
+        if (oldestId === beforeId) break;
+        beforeId = oldestId;
+      }
+
+      return null;
     } catch (e) {
       this.logger.debug(`[Media] Failed to download: ${e instanceof Error ? e.message : 'unknown'}`);
       return null;

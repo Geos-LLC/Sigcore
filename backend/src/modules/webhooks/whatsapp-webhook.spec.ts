@@ -42,6 +42,13 @@ function buildService() {
   const openPhoneProvider = {};
   const idempotencyService = { isDuplicate: jest.fn().mockResolvedValue(false), markProcessed: jest.fn() };
   const outboundWebhooksService = { emitEvent: jest.fn(), emitMessageEvent: jest.fn() };
+  const s3Service = {
+    isConfigured: jest.fn().mockReturnValue(false),
+    buildKey: jest.fn((ws: string, id: string, ext: string) => `whatsapp/${ws}/${id}${ext}`),
+    putObject: jest.fn().mockResolvedValue({ uploaded: true, skipped: false }),
+    headObject: jest.fn().mockResolvedValue(false),
+    getObjectStream: jest.fn().mockResolvedValue(null),
+  };
 
   const service = new WebhooksService(
     conversationRepo as any,
@@ -55,6 +62,7 @@ function buildService() {
     openPhoneProvider as any,
     idempotencyService as any,
     outboundWebhooksService as any,
+    s3Service as any,
   );
 
   return {
@@ -63,6 +71,7 @@ function buildService() {
     messageRepo,
     eventsGateway,
     outboundWebhooksService,
+    s3Service,
   };
 }
 
@@ -255,56 +264,132 @@ describe('WebhooksService – WhatsApp webhook handler', () => {
       ).resolves.not.toThrow();
     });
   });
+
+  describe('PR2: inbound media persists to S3 + metadata contract', () => {
+    it('writes to S3 when configured and sets mediaS3Key + mediaStatus + mediaSource + mediaSizeBytes', async () => {
+      const { service, conversationRepo, messageRepo, s3Service } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+      (s3Service.isConfigured as jest.Mock).mockReturnValue(true);
+
+      const base64 = Buffer.from('hello-image').toString('base64');
+
+      await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+        from: '+15551234567',
+        to: '+15559876543',
+        body: '📷 Photo',
+        externalMessageId: 'wa_msg_media_1',
+        externalChatId: '15551234567@c.us',
+        hasMedia: true,
+        type: 'image',
+        mediaData: base64,
+        mediaMimetype: 'image/jpeg',
+        mediaFilename: 'photo.jpg',
+        mediaSizeBytes: Buffer.byteLength(base64, 'base64'),
+        mediaStatus: 'downloaded',
+        mediaSource: 'realtime',
+      });
+
+      expect(s3Service.putObject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: expect.stringMatching(/^whatsapp\/ws-1\/.+\.jpg$/),
+          contentType: 'image/jpeg',
+        }),
+      );
+
+      // The final save should persist metadata with S3 key + status + source
+      const saveCalls = messageRepo.save.mock.calls.map((c: any[]) => c[0]);
+      const finalSave = saveCalls[saveCalls.length - 1];
+      expect(finalSave.metadata).toEqual(
+        expect.objectContaining({
+          mediaS3Key: expect.stringMatching(/^whatsapp\/ws-1\/.+\.jpg$/),
+          mediaMimetype: 'image/jpeg',
+          mediaStatus: 'downloaded',
+          mediaSource: 'realtime',
+          mediaSizeBytes: expect.any(Number),
+        }),
+      );
+      // Must NOT set legacy mediaPath when S3 is active
+      expect(finalSave.metadata.mediaPath).toBeUndefined();
+    });
+
+    it('persists mediaStatus for LID chats even without mediaData', async () => {
+      const { service, conversationRepo, messageRepo, s3Service } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+      (s3Service.isConfigured as jest.Mock).mockReturnValue(true);
+
+      await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+        from: '+15551234567',
+        to: '+15559876543',
+        body: '📷 Photo',
+        externalMessageId: 'wa_lid_1',
+        externalChatId: '15551234567@lid',
+        hasMedia: true,
+        type: 'image',
+        mediaStatus: 'unsupported_store_message',
+        mediaSource: 'sync',
+      });
+
+      // No S3 upload should happen (no data)
+      expect(s3Service.putObject).not.toHaveBeenCalled();
+
+      // Message metadata should carry the status so SF can render a placeholder
+      const createCall = messageRepo.create.mock.calls[0][0];
+      expect(createCall.metadata).toEqual(
+        expect.objectContaining({
+          mediaStatus: 'unsupported_store_message',
+          mediaSource: 'sync',
+          hasMedia: true,
+        }),
+      );
+    });
+
+    it('falls back to local disk when S3 is not configured (back-compat)', async () => {
+      const { service, conversationRepo, s3Service } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+      (s3Service.isConfigured as jest.Mock).mockReturnValue(false);
+
+      // Don't actually let fs write; stub via spy so we just confirm we didn't call S3
+      await service.handleWhatsAppWebhook(WS_ID, 'message_inbound', {
+        from: '+15551234567',
+        to: '+15559876543',
+        body: '📷 Photo',
+        externalMessageId: 'wa_nos3_1',
+        externalChatId: '15551234567@c.us',
+        hasMedia: true,
+        type: 'image',
+        mediaData: Buffer.from('x').toString('base64'),
+        mediaMimetype: 'image/jpeg',
+      });
+
+      expect(s3Service.putObject).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
-// clearWhatsAppData on reconnect (status_change: ready)
+// PR3: Reconnect no longer wipes WhatsApp data.
+// Sync upserts by providerMessageId; media persisted in S3 survives redeploys.
 // ---------------------------------------------------------------------------
-describe('WebhooksService – clearWhatsAppData on reconnect', () => {
-  it('deletes all WhatsApp conversations and messages on status_change=ready', async () => {
+describe('WebhooksService – status_change=ready (PR3: no wipe)', () => {
+  it('does NOT delete conversations or messages on status_change=ready', async () => {
     const { service, conversationRepo, messageRepo, outboundWebhooksService } = buildService();
 
     // Simulate existing WhatsApp conversations
-    const existingConvs = [
+    conversationRepo.find.mockResolvedValue([
       { id: 'wa-conv-1' },
       { id: 'wa-conv-2' },
-    ];
-    conversationRepo.find.mockResolvedValue(existingConvs);
-
-    const msgQb = buildMockQueryBuilder();
-    const convQb = buildMockQueryBuilder();
-
-    // First call = message delete QB, second call = conversation delete QB
-    messageRepo.createQueryBuilder.mockReturnValueOnce(msgQb);
-    conversationRepo.createQueryBuilder.mockReturnValueOnce(convQb);
+    ]);
 
     await service.handleWhatsAppWebhook(WS_ID, 'status_change', {
       status: 'ready',
     });
 
-    // Should look up WhatsApp conversations for this workspace
-    expect(conversationRepo.find).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { workspaceId: WS_ID, provider: ProviderType.WHATSAPP },
-        select: ['id'],
-      }),
-    );
+    // Must not run any delete query builders
+    expect(messageRepo.createQueryBuilder).not.toHaveBeenCalled();
+    expect(conversationRepo.createQueryBuilder).not.toHaveBeenCalled();
 
-    // Should delete messages for those conversations
-    expect(msgQb.delete).toHaveBeenCalled();
-    expect(msgQb.where).toHaveBeenCalledWith(
-      'conversationId IN (:...ids)',
-      { ids: ['wa-conv-1', 'wa-conv-2'] },
-    );
-    expect(msgQb.execute).toHaveBeenCalled();
-
-    // Should delete conversations
-    expect(convQb.delete).toHaveBeenCalled();
-    expect(convQb.where).toHaveBeenCalledWith(
-      'id IN (:...ids)',
-      { ids: ['wa-conv-1', 'wa-conv-2'] },
-    );
-    expect(convQb.execute).toHaveBeenCalled();
+    // Should NOT even call .find looking for conversations to wipe
+    expect(conversationRepo.find).not.toHaveBeenCalled();
 
     // Should still emit the status_change webhook event
     expect(outboundWebhooksService.emitEvent).toHaveBeenCalledWith(
@@ -312,20 +397,6 @@ describe('WebhooksService – clearWhatsAppData on reconnect', () => {
       'whatsapp.status.change',
       expect.objectContaining({ provider: 'whatsapp', status: 'ready' }),
     );
-  });
-
-  it('skips delete when no existing WhatsApp conversations', async () => {
-    const { service, conversationRepo, messageRepo } = buildService();
-
-    conversationRepo.find.mockResolvedValue([]);
-
-    await service.handleWhatsAppWebhook(WS_ID, 'status_change', {
-      status: 'ready',
-    });
-
-    // Should NOT create query builders for delete
-    expect(messageRepo.createQueryBuilder).not.toHaveBeenCalled();
-    expect(conversationRepo.createQueryBuilder).not.toHaveBeenCalled();
   });
 
   it('does NOT clear data on non-ready status changes', async () => {
@@ -336,7 +407,6 @@ describe('WebhooksService – clearWhatsAppData on reconnect', () => {
       reason: 'User logged out',
     });
 
-    // Should NOT look for conversations to delete
     expect(conversationRepo.find).not.toHaveBeenCalled();
   });
 });
