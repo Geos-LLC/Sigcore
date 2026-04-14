@@ -564,24 +564,35 @@ export default function AdminWhatsAppTestPage() {
                             <div className={`rounded-lg px-3 py-1.5 max-w-[80%] ${
                               msg.direction === 'out' ? 'bg-green-100 text-green-900' : 'bg-white text-gray-800 border border-gray-200'
                             }`}>
-                              {msg.metadata?.mediaPath && msg.metadata?.mediaMimetype?.startsWith('image/') && (
-                                <img
-                                  src={`/api/conversations/messages/${msg.id}/media`}
-                                  alt=""
-                                  className="rounded max-w-[240px] max-h-[200px] object-cover mb-1"
-                                  onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
-                                />
-                              )}
-                              {msg.metadata?.mediaPath && msg.metadata?.mediaMimetype?.startsWith('video/') && (
-                                <video
-                                  src={`/api/conversations/messages/${msg.id}/media`}
-                                  controls
-                                  className="rounded max-w-[240px] max-h-[200px] mb-1"
-                                />
-                              )}
-                              {msg.metadata?.mediaPath && (msg.metadata?.mediaMimetype?.startsWith('audio/') || msg.metadata?.mediaMimetype === 'audio/ogg') && (
-                                <audio src={`/api/conversations/messages/${msg.id}/media`} controls className="mb-1 max-w-[240px]" />
-                              )}
+                              {/* Use SF response contract: hasMedia + mediaType + mediaUrl (top-level).
+                                  Fall back to legacy metadata fields for messages persisted before the contract shipped. */}
+                              {(() => {
+                                const hasMedia = msg.hasMedia ?? Boolean(msg.metadata?.mediaS3Key || msg.metadata?.mediaPath);
+                                if (!hasMedia) return null;
+                                const mime = msg.mediaMimetype || msg.metadata?.mediaMimetype || '';
+                                const mediaType =
+                                  msg.mediaType ||
+                                  (mime.startsWith('image/') ? 'image' :
+                                   mime.startsWith('video/') ? 'video' :
+                                   mime.startsWith('audio/') ? 'audio' : 'document');
+                                const url = msg.mediaUrl || `/conversations/messages/${msg.id}/media`;
+                                const apiUrl = url.startsWith('/api') ? url : `/api${url}`;
+                                if (mediaType === 'image') return (
+                                  <img src={apiUrl} alt="" className="rounded max-w-[240px] max-h-[200px] object-cover mb-1"
+                                    onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
+                                );
+                                if (mediaType === 'video') return (
+                                  <video src={apiUrl} controls className="rounded max-w-[240px] max-h-[200px] mb-1" />
+                                );
+                                if (mediaType === 'audio') return (
+                                  <audio src={apiUrl} controls className="mb-1 max-w-[240px]" />
+                                );
+                                return (
+                                  <a href={apiUrl} target="_blank" rel="noreferrer" className="text-blue-600 underline text-xs mb-1 block">
+                                    📎 {msg.mediaFilename || msg.metadata?.mediaFilename || 'Download attachment'}
+                                  </a>
+                                );
+                              })()}
                               <p>{msg.body}</p>
                               <span className="text-[10px] text-gray-400 mt-0.5 block">
                                 {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
