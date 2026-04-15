@@ -22,7 +22,7 @@ export default function ApiDocsPage() {
     setTimeout(() => setCopiedEndpoint(null), 2000);
   };
 
-  const endpoints: { category: string; description?: string; items: Endpoint[] }[] = [
+  const endpoints: { category: string; description?: string; items: Endpoint[]; notes?: { title: string; body: string[] } }[] = [
     {
       category: 'Authentication',
       description: 'Connect communication providers to your workspace.',
@@ -274,19 +274,55 @@ export default function ApiDocsPage() {
         {
           method: 'GET',
           path: '/conversations/:id/messages',
-          description: 'Paginated messages with cursor-based pagination.',
+          description: 'Paginated messages with cursor-based pagination. Each message includes the WhatsApp media contract (hasMedia, mediaType, mediaMimetype, mediaFilename, mediaStatus, mediaUrl) so clients can render photos/videos/audio without extra lookups.',
           auth: 'X-API-Key',
           query: 'limit=30&before=2026-04-11T00:00:00Z',
-          response: { data: ['...messages'], meta: { hasMore: true } },
+          response: {
+            data: [
+              {
+                id: 'uuid',
+                conversationId: 'uuid',
+                direction: 'in',
+                body: '📷 Photo',
+                fromNumber: '+15551234567',
+                toNumber: '+15559876543',
+                createdAt: '2026-04-14T10:23:00Z',
+                hasMedia: true,
+                mediaType: 'image',
+                mediaMimetype: 'image/jpeg',
+                mediaFilename: 'photo.jpg',
+                mediaStatus: 'downloaded',
+                mediaUrl: '/conversations/messages/uuid/media',
+                metadata: { mediaS3Key: 'whatsapp/<ws>/<id>.jpg', mediaSource: 'realtime', mediaSizeBytes: 102400 },
+              },
+            ],
+            meta: { hasMore: true },
+          },
         },
         {
           method: 'GET',
           path: '/conversations/messages/:messageId/media',
-          description: 'Get media file (image/video/audio) for a message. Downloads on-demand from WhatsApp if not cached.',
-          auth: 'X-API-Key',
-          response: 'Binary file with Content-Type header',
+          description: 'Stream the binary media file for a message. Resolution order: S3 (primary) → legacy local disk (back-compat) → on-demand download from WhatsApp, then persisted to S3 for future requests. Returns the raw bytes with the original Content-Type.',
+          auth: 'X-API-Key (header — browser <img src> cannot carry it; fetch as a blob via authed client and render as an object URL)',
+          response: 'Binary file with Content-Type header (image/jpeg, video/mp4, audio/ogg, etc.)',
         },
       ],
+      notes: {
+        title: 'WhatsApp media contract',
+        body: [
+          'Every message in GET /conversations/:id/messages includes these top-level fields so clients never need to guess whether media exists:',
+          '• hasMedia (boolean) — true when media is available OR expected (LID chats with unsupported_store_message still set this true so UI can show a retry affordance).',
+          '• mediaType — "image" | "video" | "audio" | "document" | null, derived from the mimetype.',
+          '• mediaMimetype — original MIME (e.g. "image/jpeg", "audio/ogg").',
+          '• mediaFilename — original filename if provided by WhatsApp.',
+          '• mediaStatus — "downloaded" | "skipped_too_large" | "unsupported_store_message" | "not_found" | "failed". Surface to the UI so users understand why media may be missing.',
+          '• mediaUrl — stable endpoint path, always "/conversations/messages/:id/media". Do NOT construct URLs manually.',
+          '',
+          'Storage: media is persisted to S3 (s3://sigcore-whatsapp-media/whatsapp/<workspaceId>/<messageId>.<ext>) and survives Railway redeploys. Sync upserts by providerMessageId, so reconnects do not re-upload existing media.',
+          '',
+          'Size cap: media larger than SYNC_MAX_MEDIA_MB (default 5 MB) is skipped during sync. The message still appears with mediaStatus="skipped_too_large" and hasMedia=false by default.',
+        ],
+      },
     },
     {
       category: 'Contacts',
@@ -887,6 +923,16 @@ if (computed !== req.headers['x-callio-signature']) {
               );
             })}
           </div>
+          {category.notes && (
+            <div className="p-5 border-t border-amber-100 bg-amber-50">
+              <h3 className="text-sm font-semibold text-amber-900 mb-2">📌 {category.notes.title}</h3>
+              <div className="text-xs text-gray-700 space-y-1">
+                {category.notes.body.map((line, i) => (
+                  line === '' ? <div key={i} className="h-2" /> : <p key={i} className="leading-relaxed">{line}</p>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ))}
 
