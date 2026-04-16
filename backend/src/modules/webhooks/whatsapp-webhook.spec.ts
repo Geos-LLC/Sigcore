@@ -49,6 +49,12 @@ function buildService() {
     headObject: jest.fn().mockResolvedValue(false),
     getObjectStream: jest.fn().mockResolvedValue(null),
   };
+  const tenantIntegrationRepo = buildMockRepo();
+  const webhookSubscriptionRepo = buildMockRepo();
+
+  // Default: no tenant_integrations rows, no webhook subs (tenant resolution returns null)
+  tenantIntegrationRepo.find.mockResolvedValue([]);
+  webhookSubscriptionRepo.find.mockResolvedValue([]);
 
   const service = new WebhooksService(
     conversationRepo as any,
@@ -57,6 +63,8 @@ function buildService() {
     integrationRepo as any,
     workspaceRepo as any,
     tenantPhoneNumberRepo as any,
+    tenantIntegrationRepo as any,
+    webhookSubscriptionRepo as any,
     encryptionService as any,
     eventsGateway as any,
     openPhoneProvider as any,
@@ -72,6 +80,8 @@ function buildService() {
     eventsGateway,
     outboundWebhooksService,
     s3Service,
+    tenantIntegrationRepo,
+    webhookSubscriptionRepo,
   };
 }
 
@@ -188,8 +198,10 @@ describe('WebhooksService – WhatsApp webhook handler', () => {
         'whatsapp.message.inbound',
         expect.objectContaining({
           provider: 'whatsapp',
+          tenantId: null,
           message: expect.objectContaining({ text: 'Webhook test', direction: 'in' }),
         }),
+        undefined, // resolvedTenantId
       );
     });
 

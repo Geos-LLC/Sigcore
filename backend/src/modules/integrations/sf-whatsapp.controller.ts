@@ -8,9 +8,13 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { Response } from 'express';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { SfAuthGuard } from '../auth/sf-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { WhatsAppWebProvider } from '../communication/providers/whatsapp-web.provider';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { ProviderType } from '../../database/entities/communication-integration.entity';
 
 /**
  * SF-facing WhatsApp integration endpoints.
@@ -20,7 +24,36 @@ import { WhatsAppWebProvider } from '../communication/providers/whatsapp-web.pro
 @Controller('sf/integrations/whatsapp')
 @UseGuards(SfAuthGuard)
 export class SfWhatsAppController {
-  constructor(private readonly whatsappProvider: WhatsAppWebProvider) {}
+  constructor(
+    private readonly whatsappProvider: WhatsAppWebProvider,
+    @InjectRepository(TenantIntegration)
+    private readonly tenantIntegrationRepo: Repository<TenantIntegration>,
+  ) {}
+
+  /**
+   * Ensure a tenant_integrations row exists tying this tenant to the WhatsApp
+   * integration on this workspace. Used by inbound webhook handler to resolve
+   * which tenant owns incoming messages (without this, conversations would be
+   * persisted with tenant_id = null and invisible to tenant-scoped API keys).
+   */
+  private async ensureTenantIntegration(workspaceId: string, tenantId: string): Promise<void> {
+    const existing = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, tenantId, provider: ProviderType.WHATSAPP },
+    });
+    if (existing) return;
+    try {
+      await this.tenantIntegrationRepo.save(
+        this.tenantIntegrationRepo.create({
+          workspaceId,
+          tenantId,
+          provider: ProviderType.WHATSAPP,
+          credentialsEncrypted: '',
+        }),
+      );
+    } catch (e: any) {
+      if (e?.code !== '23505') throw e;
+    }
+  }
 
   @Get('status')
   async getStatus(@WorkspaceId() workspaceId: string) {
@@ -52,8 +85,9 @@ export class SfWhatsAppController {
   }
 
   @Post('connect')
-  async connect(@WorkspaceId() workspaceId: string) {
+  async connect(@WorkspaceId() workspaceId: string, @TenantId() tenantId: string | null) {
     try {
+      if (tenantId) await this.ensureTenantIntegration(workspaceId, tenantId);
       const session = await this.whatsappProvider.initializeClient(workspaceId);
       return {
         data: {

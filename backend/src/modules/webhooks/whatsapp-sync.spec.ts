@@ -49,6 +49,10 @@ function buildService() {
     headObject: jest.fn().mockResolvedValue(false),
     getObjectStream: jest.fn().mockResolvedValue(null),
   };
+  const tenantIntegrationRepo = buildMockRepo();
+  const webhookSubscriptionRepo = buildMockRepo();
+  tenantIntegrationRepo.find.mockResolvedValue([]);
+  webhookSubscriptionRepo.find.mockResolvedValue([]);
 
   const service = new WebhooksService(
     conversationRepo as any,
@@ -57,6 +61,8 @@ function buildService() {
     integrationRepo as any,
     workspaceRepo as any,
     tenantPhoneNumberRepo as any,
+    tenantIntegrationRepo as any,
+    webhookSubscriptionRepo as any,
     encryptionService as any,
     eventsGateway as any,
     openPhoneProvider as any,
@@ -614,6 +620,7 @@ describe('WhatsApp Sync — Webhook Payload Contract', () => {
       'whatsapp.message.inbound',
       expect.objectContaining({
         provider: 'whatsapp',
+        tenantId: null,
         conversation: expect.objectContaining({
           externalChatId: '15551234567@c.us',
           participantPhone: '+15551234567',
@@ -625,6 +632,7 @@ describe('WhatsApp Sync — Webhook Payload Contract', () => {
           timestamp: '2026-04-08T14:30:00Z',
         }),
       }),
+      undefined, // resolvedTenantId (null → undefined when no tenant_integration)
     );
   });
 });

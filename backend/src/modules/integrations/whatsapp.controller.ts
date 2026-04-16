@@ -10,14 +10,36 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { Response } from 'express';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { WhatsAppWebProvider } from '../communication/providers/whatsapp-web.provider';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { ProviderType } from '../../database/entities/communication-integration.entity';
 
 @Controller('integrations/whatsapp')
 @UseGuards(SigcoreAuthGuard)
 export class WhatsAppController {
-  constructor(private readonly whatsappProvider: WhatsAppWebProvider) {}
+  constructor(
+    private readonly whatsappProvider: WhatsAppWebProvider,
+    @InjectRepository(TenantIntegration)
+    private readonly tenantIntegrationRepo: Repository<TenantIntegration>,
+  ) {}
+
+  private async ensureTenantIntegration(workspaceId: string, tenantId: string): Promise<void> {
+    const existing = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, tenantId, provider: ProviderType.WHATSAPP },
+    });
+    if (existing) return;
+    try {
+      await this.tenantIntegrationRepo.save(
+        this.tenantIntegrationRepo.create({ workspaceId, tenantId, provider: ProviderType.WHATSAPP, credentialsEncrypted: '' }),
+      );
+    } catch (e: any) {
+      if (e?.code !== '23505') throw e;
+    }
+  }
 
   /**
    * Get WhatsApp connection status for the workspace
@@ -92,8 +114,9 @@ export class WhatsAppController {
    * Start WhatsApp connection (generates QR code)
    */
   @Post('connect')
-  async connect(@WorkspaceId() workspaceId: string) {
+  async connect(@WorkspaceId() workspaceId: string, @TenantId() tenantId: string | null) {
     try {
+      if (tenantId) await this.ensureTenantIntegration(workspaceId, tenantId);
       const session = await this.whatsappProvider.initializeClient(workspaceId);
 
       return {

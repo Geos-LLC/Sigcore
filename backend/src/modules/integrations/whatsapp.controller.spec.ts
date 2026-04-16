@@ -15,9 +15,18 @@ function buildProvider() {
   };
 }
 
+function buildTenantIntegrationRepo() {
+  return {
+    findOne: jest.fn().mockResolvedValue(null),
+    save: jest.fn().mockImplementation(async (e: any) => e),
+    create: jest.fn().mockImplementation((data: any) => data),
+  };
+}
+
 function buildController(provider = buildProvider()) {
-  const controller = new WhatsAppController(provider as any);
-  return { controller, provider };
+  const tenantIntegrationRepo = buildTenantIntegrationRepo();
+  const controller = new WhatsAppController(provider as any, tenantIntegrationRepo as any);
+  return { controller, provider, tenantIntegrationRepo };
 }
 
 function mockRes() {
@@ -81,7 +90,7 @@ describe('WhatsAppController', () => {
       const { controller, provider } = buildController();
       provider.initializeClient.mockResolvedValue({ status: 'initializing' });
 
-      const result = await controller.connect(WS_ID);
+      const result = await controller.connect(WS_ID, null);
 
       expect(result.data.success).toBe(true);
       expect(result.data.status).toBe('initializing');
@@ -92,7 +101,7 @@ describe('WhatsAppController', () => {
       const { controller, provider } = buildController();
       provider.initializeClient.mockRejectedValue(new Error('Puppeteer crashed'));
 
-      const result = await controller.connect(WS_ID);
+      const result = await controller.connect(WS_ID, null);
 
       expect(result.data.success).toBe(false);
       expect(result.data.status).toBe('error');
@@ -103,7 +112,7 @@ describe('WhatsAppController', () => {
       const { controller, provider } = buildController();
       provider.initializeClient.mockResolvedValue({ status: 'error', error: 'Auth failed' });
 
-      const result = await controller.connect(WS_ID);
+      const result = await controller.connect(WS_ID, null);
 
       expect(result.data.success).toBe(false);
       expect(result.data.error).toBe('Auth failed');

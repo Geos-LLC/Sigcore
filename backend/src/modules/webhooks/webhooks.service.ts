@@ -23,6 +23,8 @@ import {
 } from '../../database/entities/communication-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { WebhookSubscription, WebhookSubscriptionStatus } from '../../database/entities/webhook-subscription.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { EventsGateway } from '../events/events.gateway';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
@@ -89,6 +91,10 @@ export class WebhooksService {
     private workspaceRepo: Repository<Workspace>,
     @InjectRepository(TenantPhoneNumber)
     private tenantPhoneNumberRepo: Repository<TenantPhoneNumber>,
+    @InjectRepository(TenantIntegration)
+    private tenantIntegrationRepo: Repository<TenantIntegration>,
+    @InjectRepository(WebhookSubscription)
+    private webhookSubscriptionRepo: Repository<WebhookSubscription>,
     private encryptionService: EncryptionService,
     private eventsGateway: EventsGateway,
     private openPhoneProvider: OpenPhoneProvider,
@@ -919,6 +925,49 @@ export class WebhooksService {
     this.logger.log(`[WhatsApp] Contacts sync complete for workspace ${workspaceId}`);
   }
 
+  /**
+   * Resolve the tenant that owns the WhatsApp integration on this workspace.
+   *
+   * Preference order:
+   *   1. explicit `tenant_integrations` row (workspace + provider=whatsapp)
+   *   2. sole tenant with an active webhook subscription listing any `whatsapp.*` event
+   *   3. null (not determinable — conversation stays workspace-wide)
+   */
+  private async resolveWhatsAppTenantId(workspaceId: string): Promise<string | null> {
+    try {
+      const rows = await this.tenantIntegrationRepo.find({
+        where: { workspaceId, provider: ProviderType.WHATSAPP },
+      });
+      if (rows.length === 1) return rows[0].tenantId;
+      if (rows.length > 1) {
+        this.logger.warn(`[WhatsApp] Multiple tenant_integrations for workspace ${workspaceId} — cannot unambiguously tag tenant_id`);
+        return null;
+      }
+    } catch (e) {
+      this.logger.debug(`[WhatsApp] tenant_integrations lookup failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+
+    // Fallback: infer from webhook subscriptions listing any whatsapp.* event.
+    try {
+      const subs = await this.webhookSubscriptionRepo.find({
+        where: [
+          { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
+          { workspaceId, status: WebhookSubscriptionStatus.PAUSED },
+        ],
+      });
+      const whatsAppSubs = subs.filter(s => (s.events || []).some(e => e.startsWith('whatsapp.')));
+      const tenantIds = Array.from(new Set(whatsAppSubs.map(s => s.tenantId).filter(Boolean))) as string[];
+      if (tenantIds.length === 1) {
+        this.logger.log(`[WhatsApp] Inferred tenantId=${tenantIds[0]} from webhook subscription on workspace ${workspaceId}`);
+        return tenantIds[0];
+      }
+    } catch (e) {
+      this.logger.debug(`[WhatsApp] subscription inference failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+
+    return null;
+  }
+
   private async handleWhatsAppInboundMessage(
     workspaceId: string,
     data: Record<string, unknown>,
@@ -934,6 +983,9 @@ export class WebhooksService {
       return;
     }
 
+    // Resolve tenant up-front so both dedup-backfill and new-insert branches can use it
+    const resolvedTenantId = await this.resolveWhatsAppTenantId(workspaceId);
+
     // Dedup: skip if we already have this message (message_create + message events fire for same msg,
     // and auto-sync can re-forward messages already received in real-time)
     if (externalMessageId) {
@@ -942,6 +994,13 @@ export class WebhooksService {
       });
       if (existing) {
         this.logger.debug(`[WhatsApp] Dedup: message ${externalMessageId} already exists, skipping`);
+        // Backfill tenant_id on the existing conversation if it was created pre-fix
+        if (resolvedTenantId && existing.conversationId) {
+          await this.conversationRepo.update(
+            { id: existing.conversationId, tenantId: null as any },
+            { tenantId: resolvedTenantId } as any,
+          );
+        }
         return;
       }
     }
@@ -985,7 +1044,7 @@ export class WebhooksService {
       try {
         conversation = this.conversationRepo.create({
           workspaceId,
-          tenantId: null,
+          tenantId: resolvedTenantId,
           externalId: externalChatId || `wa_conv_${Date.now()}_${Math.random().toString(36).substring(7)}`,
           provider: ProviderType.WHATSAPP,
           channel: 'whatsapp' as any,
@@ -994,7 +1053,7 @@ export class WebhooksService {
           metadata: { externalChatId, ...(contactName && { contactName }) },
         });
         await this.conversationRepo.save(conversation);
-        this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom}`);
+        this.logger.log(`[WhatsApp] Created conversation ${conversation.id} for ${normalizedFrom} (tenant=${resolvedTenantId || 'null'})`);
       } catch (e: any) {
         // Race condition: another request created the same conversation — find it
         if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
@@ -1009,13 +1068,19 @@ export class WebhooksService {
           throw e;
         }
       }
-    } else if (contactName) {
-      // Update contactName on existing conversation if not already set
-      const meta = (conversation.metadata as Record<string, unknown>) || {};
-      if (!meta.contactName) {
-        meta.contactName = contactName;
-        conversation.metadata = meta;
+    } else {
+      // Backfill tenant_id on existing untagged conversation (pre-fix data)
+      if (resolvedTenantId && !conversation.tenantId) {
+        conversation.tenantId = resolvedTenantId;
         await this.conversationRepo.save(conversation);
+      }
+      if (contactName) {
+        const meta = (conversation.metadata as Record<string, unknown>) || {};
+        if (!meta.contactName) {
+          meta.contactName = contactName;
+          conversation.metadata = meta;
+          await this.conversationRepo.save(conversation);
+        }
       }
     }
 
@@ -1119,12 +1184,14 @@ export class WebhooksService {
       },
     });
 
-    // Fan out to tenant webhook subscribers
+    // Fan out to tenant webhook subscribers (scoped to resolvedTenantId so other
+    // tenants on the same workspace don't receive messages that aren't theirs)
     await this.outboundWebhooksService.emitEvent(
       workspaceId,
       WebhookEventType.WHATSAPP_MESSAGE_INBOUND,
       {
         provider: 'whatsapp',
+        tenantId: resolvedTenantId,
         conversation: {
           id: conversation.id,
           externalChatId,
@@ -1147,6 +1214,7 @@ export class WebhooksService {
           contactName,
         },
       },
+      resolvedTenantId || undefined,
     );
   }
 
