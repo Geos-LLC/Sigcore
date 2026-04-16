@@ -159,6 +159,9 @@ export class CommunicationService {
       participantContacts: { phoneNumber: string; contactId: string | null; contactName: string | null }[] | null;
       contactId: string | null;
       contactName: string | null;
+      company: string | null;
+      firstName: string | null;
+      lastName: string | null;
       lastMessage: string | null;
       lastMessageAt: Date | null;
       unreadCount: number;
@@ -355,6 +358,9 @@ export class CommunicationService {
         participantContacts,
         contactId: conv.contactId || null,
         contactName: (metadata.contactName as string) || (metadata.conversationName as string) || null,
+        company: (metadata.company as string) || null,
+        firstName: (metadata.firstName as string) || null,
+        lastName: (metadata.lastName as string) || null,
         lastMessage: lastMessage?.body || (metadata.lastMessagePreview as string) || null,
         lastMessageAt: lastMessageAt,
         unreadCount: metadata.unreadCount as number || 0,
@@ -1561,6 +1567,20 @@ export class CommunicationService {
             if (name) {
               const meta = conversation.metadata as Record<string, unknown> || {};
               meta.contactName = name;
+              conversation.metadata = meta;
+            }
+          }
+
+          // Enrich metadata with company/firstName/lastName from OpenPhone contact
+          if (convData.participantPhoneNumber && openPhoneContactsByPhone.size > 0) {
+            const participant = convData.participantPhoneNumber;
+            const opContact = openPhoneContactsByPhone.get(participant)
+              || openPhoneContactsByPhone.get(this.normalizePhoneNumber(participant));
+            if (opContact) {
+              const meta = conversation.metadata as Record<string, unknown> || {};
+              if (opContact.company) meta.company = opContact.company;
+              if (opContact.firstName) meta.firstName = opContact.firstName;
+              if (opContact.lastName) meta.lastName = opContact.lastName;
               conversation.metadata = meta;
             }
           }
