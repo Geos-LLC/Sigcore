@@ -578,6 +578,24 @@ export class IntegrationsService {
     const phoneIds = Array.from(phoneNumberMap.keys());
     this.logger.log(`Full sync: fetching ALL conversations for ${phoneIds.length} phone numbers in parallel`);
 
+    // Fetch OpenPhone contacts in parallel with conversations — build phone→contact map for company enrichment
+    const normalizeDigits = (ph: string) => (ph || '').replace(/\D/g, '').slice(-10);
+    const contactByPhone = new Map<string, { company?: string; firstName?: string; lastName?: string }>();
+    const contactsPromise = this.openPhoneProvider.getOpenPhoneContacts(credentials)
+      .then(contacts => {
+        for (const c of contacts) {
+          const fields = { company: c.company, firstName: c.firstName, lastName: c.lastName };
+          for (const pn of c.phoneNumbers || []) {
+            if (pn.value) {
+              contactByPhone.set(pn.value, fields);
+              contactByPhone.set(normalizeDigits(pn.value), fields);
+            }
+          }
+        }
+        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys) for company enrichment`);
+      })
+      .catch(e => { this.logger.warn(`Full sync: contacts fetch failed: ${e.message}`); });
+
     // Fetch conversations for all phone numbers in parallel
     const results = await Promise.allSettled(
       phoneIds.map(pnId =>
@@ -586,6 +604,8 @@ export class IntegrationsService {
       ),
     );
 
+    await contactsPromise;
+
     // Merge all conversations
     let allConvs: any[] = [];
     for (const result of results) {
@@ -593,14 +613,20 @@ export class IntegrationsService {
         for (const conv of result.value) {
           const meta = conv.metadata as Record<string, unknown> || {};
           const phoneInfo = phoneNumberMap.get(meta.phoneNumberId as string);
+          const participant = conv.participantPhoneNumber || '';
+          const opContact = contactByPhone.get(participant)
+            || contactByPhone.get(normalizeDigits(participant));
           allConvs.push({
-            participantPhone: conv.participantPhoneNumber,
+            participantPhone: participant,
             phoneNumberId: conv.metadata?.phoneNumberId,
             phoneNumber: conv.phoneNumber || phoneInfo?.number || '',
             phoneNumberName: phoneInfo?.name || '',
             lastMessageAt: conv.lastMessageAt,
             conversationName: conv.metadata?.conversationName,
             contactName: null, // Will be enriched below
+            company: opContact?.company || null,
+            firstName: opContact?.firstName || null,
+            lastName: opContact?.lastName || null,
             externalId: conv.externalId,
           });
         }
