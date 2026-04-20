@@ -1395,15 +1395,27 @@ export class CommunicationService {
           const openPhoneContacts = await this.openPhoneProvider.getOpenPhoneContacts(credentials);
           this.logger.log(`Fetched ${openPhoneContacts.length} contacts from OpenPhone`);
 
-          // Index OpenPhone contacts by all their phone numbers
+          // Index OpenPhone contacts by all their phone numbers.
+          // OpenPhone allows duplicate contacts with the same phone — merge field-wise with first-non-null
+          // wins so the indexed entry has the best available company/firstName/lastName across dups.
+          const mergeInto = (map: Map<string, any>, key: string, c: any) => {
+            const existing = map.get(key);
+            map.set(key, {
+              ...existing,
+              ...c,
+              company:   (existing?.company ?? null) || c.company || null,
+              firstName: (existing?.firstName ?? null) || c.firstName || null,
+              lastName:  (existing?.lastName ?? null) || c.lastName || null,
+            });
+          };
           for (const opContact of openPhoneContacts) {
             if (opContact.phoneNumbers) {
               for (const phoneEntry of opContact.phoneNumbers) {
                 if (phoneEntry.value) {
-                  contactsForFiltering.set(phoneEntry.value, opContact);
-                  contactsForFiltering.set(this.normalizePhoneNumber(phoneEntry.value), opContact);
-                  openPhoneContactsByPhone.set(phoneEntry.value, opContact);
-                  openPhoneContactsByPhone.set(this.normalizePhoneNumber(phoneEntry.value), opContact);
+                  mergeInto(contactsForFiltering, phoneEntry.value, opContact);
+                  mergeInto(contactsForFiltering, this.normalizePhoneNumber(phoneEntry.value), opContact);
+                  mergeInto(openPhoneContactsByPhone, phoneEntry.value, opContact);
+                  mergeInto(openPhoneContactsByPhone, this.normalizePhoneNumber(phoneEntry.value), opContact);
                 }
               }
             }

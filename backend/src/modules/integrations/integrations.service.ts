@@ -578,17 +578,26 @@ export class IntegrationsService {
     const phoneIds = Array.from(phoneNumberMap.keys());
     this.logger.log(`Full sync: fetching ALL conversations for ${phoneIds.length} phone numbers in parallel`);
 
-    // Fetch OpenPhone contacts in parallel with conversations — build phone→contact map for company enrichment
+    // Fetch OpenPhone contacts in parallel with conversations — build phone→contact map for company enrichment.
+    // OpenPhone allows duplicate contacts with the same phone number. Merge by first-non-null-field-wins so
+    // the indexed entry for each phone has the best available company/firstName/lastName across duplicates.
     const normalizeDigits = (ph: string) => (ph || '').replace(/\D/g, '').slice(-10);
-    const contactByPhone = new Map<string, { company?: string; firstName?: string; lastName?: string }>();
+    const contactByPhone = new Map<string, { company: string | null; firstName: string | null; lastName: string | null }>();
+    const mergeContact = (key: string, c: { company?: string; firstName?: string; lastName?: string }) => {
+      const existing = contactByPhone.get(key);
+      contactByPhone.set(key, {
+        company:   (existing?.company ?? null) || c.company || null,
+        firstName: (existing?.firstName ?? null) || c.firstName || null,
+        lastName:  (existing?.lastName ?? null) || c.lastName || null,
+      });
+    };
     const contactsPromise = this.openPhoneProvider.getOpenPhoneContacts(credentials)
       .then(contacts => {
         for (const c of contacts) {
-          const fields = { company: c.company, firstName: c.firstName, lastName: c.lastName };
           for (const pn of c.phoneNumbers || []) {
             if (pn.value) {
-              contactByPhone.set(pn.value, fields);
-              contactByPhone.set(normalizeDigits(pn.value), fields);
+              mergeContact(pn.value, c);
+              mergeContact(normalizeDigits(pn.value), c);
             }
           }
         }
