@@ -587,6 +587,21 @@ export class IntegrationsService {
     // Used to infer company when it's null but stuffed into firstName/lastName by bad data imports.
     const companyValueCounts = new Map<string, number>();
     const companyTokenCounts = new Map<string, number>();
+    // Sibling-contact dictionary — OpenPhone users often create one contact per device
+    // (e.g. "Stephen Jaros" with company and "Stephen Jaros cell phone" without).
+    // Normalized name → company, so the empty sibling picks up its sibling's company.
+    const nameToCompany = new Map<string, string>();
+    const normalizeName = (first?: string | null, last?: string | null): string | null => {
+      const combined = `${first || ''} ${last || ''}`.trim().toLowerCase();
+      if (!combined) return null;
+      const stripped = combined
+        .replace(/\b(cell\s*phone|cell|mobile\s*phone|mobile|work\s*phone|work|home\s*phone|home|office\s*phone|office|other\s*phone|other|alt|alternate|2nd|second|#2)\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      // Need at least 2 name tokens of 2+ chars to avoid false positives on common single names
+      if (stripped.split(/\s+/).filter(t => t.length >= 2).length < 2) return null;
+      return stripped;
+    };
     const mergeContact = (key: string, c: { company?: string; firstName?: string; lastName?: string }) => {
       const existing = contactByPhone.get(key);
       contactByPhone.set(key, {
@@ -603,6 +618,8 @@ export class IntegrationsService {
             for (const tok of c.company.split(/\s+/)) {
               if (tok.length >= 3) companyTokenCounts.set(tok, (companyTokenCounts.get(tok) || 0) + 1);
             }
+            const name = normalizeName(c.firstName, c.lastName);
+            if (name && !nameToCompany.has(name)) nameToCompany.set(name, c.company);
           }
           for (const pn of c.phoneNumbers || []) {
             if (pn.value) {
@@ -611,7 +628,7 @@ export class IntegrationsService {
             }
           }
         }
-        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys, ${companyValueCounts.size} distinct companies) for enrichment`);
+        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys, ${companyValueCounts.size} distinct companies, ${nameToCompany.size} named siblings) for enrichment`);
       })
       .catch(e => { this.logger.warn(`Full sync: contacts fetch failed: ${e.message}`); });
 
@@ -625,11 +642,15 @@ export class IntegrationsService {
 
     await contactsPromise;
 
-    // Infer company from firstName/lastName when defaultFields.company is null by matching against
-    // values/tokens seen in 2+ other contacts' company fields (bad data imports stuff company into name fields).
+    // Infer company when defaultFields.company is null:
+    //   1. Sibling match — same normalized name ("Stephen Jaros" and "Stephen Jaros cell phone") shares company
+    //   2. Full-value match — lastName/firstName exactly equals a known company (2+ contacts have it)
+    //   3. Token match — name contains a token that appears in 2+ known company values
     const inferCompany = (c: { company: string | null; firstName: string | null; lastName: string | null } | undefined) => {
       if (!c) return null;
       if (c.company) return c.company;
+      const siblingName = normalizeName(c.firstName, c.lastName);
+      if (siblingName && nameToCompany.has(siblingName)) return nameToCompany.get(siblingName)!;
       const tryValue = (s: string | null) => (s && companyValueCounts.has(s) && (companyValueCounts.get(s) || 0) >= 2) ? s : null;
       const tryTokens = (s: string | null) => {
         if (!s) return null;
