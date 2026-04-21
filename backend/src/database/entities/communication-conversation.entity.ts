@@ -79,6 +79,18 @@ export class CommunicationConversation {
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 
+  // Participant correlation — populated by sync / conversation ingest. See plans/SIGCORE_OPENPHONE_CORRELATION.md
+  @Column({ name: 'participant_id', type: 'uuid', nullable: true })
+  @Index()
+  participantId?: string | null;
+
+  @Column({ name: 'participant_key', type: 'text', nullable: true })
+  @Index()
+  participantKey?: string | null;
+
+  @Column({ name: 'participant_phone_e164', nullable: true })
+  participantPhoneE164?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

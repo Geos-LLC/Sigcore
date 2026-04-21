@@ -22,3 +22,5 @@ export * from './product-workspace.entity';
 export * from './shared-communication-asset.entity';
 export * from './workspace-asset-link.entity';
 export * from './endpoint-route.entity';
+export * from './openphone-contact-snapshot.entity';
+export * from './communication-participant.entity';

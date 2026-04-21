@@ -6,6 +6,8 @@ import { CommunicationIntegration } from '../../database/entities/communication-
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { ContactIdentity } from '../../database/entities/contact-identity.entity';
+import { OpenPhoneContactSnapshot } from '../../database/entities/openphone-contact-snapshot.entity';
+import { CommunicationParticipant } from '../../database/entities/communication-participant.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
@@ -18,7 +20,14 @@ import { CommunicationModule } from '../communication/communication.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([CommunicationIntegration, TenantIntegration, Workspace, ContactIdentity]),
+    TypeOrmModule.forFeature([
+      CommunicationIntegration,
+      TenantIntegration,
+      Workspace,
+      ContactIdentity,
+      OpenPhoneContactSnapshot,
+      CommunicationParticipant,
+    ]),
     forwardRef(() => CommunicationModule),
   ],
   controllers: [IntegrationsController, WhatsAppController, SfWhatsAppController],
