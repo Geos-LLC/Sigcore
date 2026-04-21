@@ -583,6 +583,10 @@ export class IntegrationsService {
     // the indexed entry for each phone has the best available company/firstName/lastName across duplicates.
     const normalizeDigits = (ph: string) => (ph || '').replace(/\D/g, '').slice(-10);
     const contactByPhone = new Map<string, { company: string | null; firstName: string | null; lastName: string | null }>();
+    // Learned company dictionary — values/tokens that appear as company for >= 2 contacts.
+    // Used to infer company when it's null but stuffed into firstName/lastName by bad data imports.
+    const companyValueCounts = new Map<string, number>();
+    const companyTokenCounts = new Map<string, number>();
     const mergeContact = (key: string, c: { company?: string; firstName?: string; lastName?: string }) => {
       const existing = contactByPhone.get(key);
       contactByPhone.set(key, {
@@ -594,6 +598,12 @@ export class IntegrationsService {
     const contactsPromise = this.openPhoneProvider.getOpenPhoneContacts(credentials)
       .then(contacts => {
         for (const c of contacts) {
+          if (c.company) {
+            companyValueCounts.set(c.company, (companyValueCounts.get(c.company) || 0) + 1);
+            for (const tok of c.company.split(/\s+/)) {
+              if (tok.length >= 3) companyTokenCounts.set(tok, (companyTokenCounts.get(tok) || 0) + 1);
+            }
+          }
           for (const pn of c.phoneNumbers || []) {
             if (pn.value) {
               mergeContact(pn.value, c);
@@ -601,7 +611,7 @@ export class IntegrationsService {
             }
           }
         }
-        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys) for company enrichment`);
+        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys, ${companyValueCounts.size} distinct companies) for enrichment`);
       })
       .catch(e => { this.logger.warn(`Full sync: contacts fetch failed: ${e.message}`); });
 
@@ -614,6 +624,22 @@ export class IntegrationsService {
     );
 
     await contactsPromise;
+
+    // Infer company from firstName/lastName when defaultFields.company is null by matching against
+    // values/tokens seen in 2+ other contacts' company fields (bad data imports stuff company into name fields).
+    const inferCompany = (c: { company: string | null; firstName: string | null; lastName: string | null } | undefined) => {
+      if (!c) return null;
+      if (c.company) return c.company;
+      const tryValue = (s: string | null) => (s && companyValueCounts.has(s) && (companyValueCounts.get(s) || 0) >= 2) ? s : null;
+      const tryTokens = (s: string | null) => {
+        if (!s) return null;
+        for (const tok of s.split(/\s+/)) {
+          if (tok.length >= 3 && (companyTokenCounts.get(tok) || 0) >= 2) return tok;
+        }
+        return null;
+      };
+      return tryValue(c.lastName) || tryValue(c.firstName) || tryTokens(c.lastName) || tryTokens(c.firstName) || null;
+    };
 
     // Merge all conversations
     let allConvs: any[] = [];
@@ -633,7 +659,7 @@ export class IntegrationsService {
             lastMessageAt: conv.lastMessageAt,
             conversationName: conv.metadata?.conversationName,
             contactName: null, // Will be enriched below
-            company: opContact?.company || null,
+            company: inferCompany(opContact),
             firstName: opContact?.firstName || null,
             lastName: opContact?.lastName || null,
             externalId: conv.externalId,
