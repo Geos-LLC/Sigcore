@@ -12,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
+import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
 import { CommunicationService } from '../communication/communication.service';
 import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
@@ -40,6 +41,7 @@ export class IntegrationsController {
   constructor(
     private readonly integrationsService: IntegrationsService,
     private readonly communicationService: CommunicationService,
+    private readonly contactCache: OpenPhoneContactCacheService,
   ) {}
 
   // ==================== GENERAL INTEGRATION ENDPOINTS ====================
@@ -207,6 +209,47 @@ export class IntegrationsController {
   ) {
     const names = await this.integrationsService.lookupContactNamesByPhone(workspaceId, dto.phoneNumbers || []);
     return { data: names };
+  }
+
+  /**
+   * Populate openphone_contact_snapshot + cascade to participants.
+   * POST /integrations/openphone/contacts/sync
+   * Body: {}
+   */
+  @Post('openphone/contacts/sync')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async syncOpenPhoneContactsToCache(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+  ) {
+    if (!tenantId) {
+      throw new NotFoundException('Tenant-scoped key required for contact cache sync');
+    }
+    // Fire-and-forget; caller polls backfill endpoint or reads /participants to check progress.
+    this.contactCache.syncContactsFromOpenPhone(workspaceId, tenantId).catch((e) => {
+      console.error(`[contacts/sync] failed for tenant=${tenantId}:`, e);
+    });
+    return { data: { started: true } };
+  }
+
+  /**
+   * Backfill cache + participant rows for an entire tenant.
+   * Multi-step repair per plan §10. Idempotent, chunked, safe to rerun.
+   * POST /integrations/openphone/contacts/backfill
+   * Body: { dryRun?: boolean }
+   */
+  @Post('openphone/contacts/backfill')
+  @HttpCode(HttpStatus.OK)
+  async backfillOpenPhoneContactCache(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+    @Body() body?: { dryRun?: boolean },
+  ) {
+    if (!tenantId) {
+      throw new NotFoundException('Tenant-scoped key required for contact cache backfill');
+    }
+    const result = await this.contactCache.backfill(workspaceId, tenantId, { dryRun: body?.dryRun });
+    return { data: result };
   }
 
   /**
