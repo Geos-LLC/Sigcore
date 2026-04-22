@@ -11,10 +11,14 @@ import {
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { ContactIdentity } from '../../database/entities/contact-identity.entity';
+import { OpenPhoneContactSnapshot } from '../../database/entities/openphone-contact-snapshot.entity';
+import { CommunicationParticipant } from '../../database/entities/communication-participant.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioVoiceService } from '../communication/twilio-voice.service';
+import { normalizeToE164, last10Digits } from '../../common/util/phone';
+import { resolveDisplayName } from './openphone-contact-cache.service';
 import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
 
 export interface IntegrationInfo {
@@ -59,6 +63,10 @@ export class IntegrationsService {
     private workspaceRepo: Repository<Workspace>,
     @InjectRepository(ContactIdentity)
     private contactIdentityRepo: Repository<ContactIdentity>,
+    @InjectRepository(OpenPhoneContactSnapshot)
+    private snapshotRepo: Repository<OpenPhoneContactSnapshot>,
+    @InjectRepository(CommunicationParticipant)
+    private participantRepo: Repository<CommunicationParticipant>,
     private encryptionService: EncryptionService,
     private openPhoneProvider: OpenPhoneProvider,
     private twilioProvider: TwilioProvider,
@@ -610,27 +618,56 @@ export class IntegrationsService {
         lastName:  (existing?.lastName ?? null) || c.lastName || null,
       });
     };
-    const contactsPromise = this.openPhoneProvider.getOpenPhoneContacts(credentials)
-      .then(contacts => {
-        for (const c of contacts) {
-          if (c.company) {
-            companyValueCounts.set(c.company, (companyValueCounts.get(c.company) || 0) + 1);
-            for (const tok of c.company.split(/\s+/)) {
-              if (tok.length >= 3) companyTokenCounts.set(tok, (companyTokenCounts.get(tok) || 0) + 1);
+    // PR3 — read path cutover. Primary source: DB snapshot cache.
+    // Fallback: live /contacts pagination for tenants without any cached snapshots.
+    let usedLiveFallback = false;
+    const contactsPromise = (async () => {
+      const snapshots = await this.snapshotRepo.find({ where: { workspaceId } });
+      if (snapshots.length === 0) {
+        this.logger.warn(`openphone cache: no snapshots for workspace=${workspaceId}, falling back to live /contacts pagination`);
+        usedLiveFallback = true;
+        try {
+          const contacts = await this.openPhoneProvider.getOpenPhoneContacts(credentials);
+          for (const c of contacts) {
+            if (c.company) {
+              companyValueCounts.set(c.company, (companyValueCounts.get(c.company) || 0) + 1);
+              for (const tok of c.company.split(/\s+/)) {
+                if (tok.length >= 3) companyTokenCounts.set(tok, (companyTokenCounts.get(tok) || 0) + 1);
+              }
+              const name = normalizeName(c.firstName, c.lastName);
+              if (name && !nameToCompany.has(name)) nameToCompany.set(name, c.company);
             }
-            const name = normalizeName(c.firstName, c.lastName);
-            if (name && !nameToCompany.has(name)) nameToCompany.set(name, c.company);
-          }
-          for (const pn of c.phoneNumbers || []) {
-            if (pn.value) {
-              mergeContact(pn.value, c);
-              mergeContact(normalizeDigits(pn.value), c);
+            for (const pn of c.phoneNumbers || []) {
+              if (pn.value) {
+                mergeContact(pn.value, c);
+                mergeContact(normalizeDigits(pn.value), c);
+              }
             }
           }
+          this.logger.log(`Full sync (live fallback): indexed ${contacts.length} contacts`);
+        } catch (e: any) {
+          this.logger.warn(`Full sync: contacts fetch failed: ${e?.message}`);
         }
-        this.logger.log(`Full sync: indexed ${contacts.length} contacts (${contactByPhone.size} phone keys, ${companyValueCounts.size} distinct companies, ${nameToCompany.size} named siblings) for enrichment`);
-      })
-      .catch(e => { this.logger.warn(`Full sync: contacts fetch failed: ${e.message}`); });
+        return;
+      }
+
+      for (const s of snapshots) {
+        const company = s.providerCompany ?? null;
+        const firstName = s.providerFirstName ?? null;
+        const lastName = s.providerLastName ?? null;
+        if (company) {
+          companyValueCounts.set(company, (companyValueCounts.get(company) || 0) + 1);
+          for (const tok of company.split(/\s+/)) {
+            if (tok.length >= 3) companyTokenCounts.set(tok, (companyTokenCounts.get(tok) || 0) + 1);
+          }
+          const name = normalizeName(firstName, lastName);
+          if (name && !nameToCompany.has(name)) nameToCompany.set(name, company);
+        }
+        mergeContact(s.phoneE164, { company: company ?? undefined, firstName: firstName ?? undefined, lastName: lastName ?? undefined });
+        mergeContact(s.phoneLast10, { company: company ?? undefined, firstName: firstName ?? undefined, lastName: lastName ?? undefined });
+      }
+      this.logger.log(`Full sync (cache): indexed ${snapshots.length} snapshots (${contactByPhone.size} phone keys, ${companyValueCounts.size} distinct companies, ${nameToCompany.size} named siblings)`);
+    })();
 
     // Fetch conversations for all phone numbers in parallel
     const results = await Promise.allSettled(
@@ -662,6 +699,20 @@ export class IntegrationsService {
       return tryValue(c.lastName) || tryValue(c.firstName) || tryTokens(c.lastName) || tryTokens(c.firstName) || null;
     };
 
+    // Prefetch participants for this workspace — used to emit participantId/key + nested provider block.
+    // Indexed by normalized last-10 digits (covers any participant phone format discrepancy).
+    const participantsByPhone = new Map<string, CommunicationParticipant>();
+    if (!usedLiveFallback) {
+      const participantQuery: Record<string, unknown> = { workspaceId, provider: 'openphone' };
+      if (tenantId) participantQuery.tenantId = tenantId;
+      const participants = await this.participantRepo.find({ where: participantQuery });
+      for (const p of participants) {
+        const l10 = last10Digits(p.normalizedPhoneE164);
+        if (l10) participantsByPhone.set(l10, p);
+      }
+      this.logger.log(`Full sync (cache): loaded ${participants.length} participants for response join`);
+    }
+
     // Merge all conversations
     let allConvs: any[] = [];
     for (const result of results) {
@@ -669,20 +720,50 @@ export class IntegrationsService {
         for (const conv of result.value) {
           const meta = conv.metadata as Record<string, unknown> || {};
           const phoneInfo = phoneNumberMap.get(meta.phoneNumberId as string);
-          const participant = conv.participantPhoneNumber || '';
-          const opContact = contactByPhone.get(participant)
-            || contactByPhone.get(normalizeDigits(participant));
+          const participantPhone = conv.participantPhoneNumber || '';
+          const opContact = contactByPhone.get(participantPhone)
+            || contactByPhone.get(normalizeDigits(participantPhone));
+
+          const { e164: participantE164 } = normalizeToE164(participantPhone);
+          const l10 = last10Digits(participantPhone);
+          const participant = l10 ? participantsByPhone.get(l10) : undefined;
+
+          const company = inferCompany(opContact);
+          const displayName = participant?.providerDisplayName
+            ?? resolveDisplayName({
+              providerFirstName: opContact?.firstName ?? null,
+              providerLastName: opContact?.lastName ?? null,
+              providerCompany: company,
+            });
+
           allConvs.push({
-            participantPhone: participant,
+            participantPhone,
             phoneNumberId: conv.metadata?.phoneNumberId,
             phoneNumber: conv.phoneNumber || phoneInfo?.number || '',
             phoneNumberName: phoneInfo?.name || '',
             lastMessageAt: conv.lastMessageAt,
             conversationName: conv.metadata?.conversationName,
             contactName: null, // Will be enriched below
-            company: inferCompany(opContact),
+
+            // NEW (PR3) — participant identity
+            participantId: participant?.id ?? null,
+            participantKey: participant?.participantKey ?? null,
+            participantPhoneE164: participantE164 ?? null,
+
+            // NEW (PR3) — nested provider block (forward-compat)
+            provider: {
+              name: 'openphone',
+              accountId: participant?.providerAccountId || phoneInfo?.id || null,
+              contactId: participant?.providerContactId ?? null,
+              displayName: displayName ?? null,
+              company: company ?? null,
+            },
+
+            // Legacy flat fields (deprecated, kept for back-compat until SF cuts over)
+            company: company ?? null,
             firstName: opContact?.firstName || null,
             lastName: opContact?.lastName || null,
+
             externalId: conv.externalId,
           });
         }

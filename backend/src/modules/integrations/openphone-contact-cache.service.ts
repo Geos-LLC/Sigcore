@@ -465,6 +465,63 @@ export class OpenPhoneContactCacheService {
     return result;
   }
 
+  /**
+   * List participants for a workspace/tenant with nested `provider` block.
+   * Plan §8.2.
+   */
+  async listParticipants(
+    workspaceId: string,
+    tenantId: string | null,
+    options: { phone?: string; linked?: 'true' | 'false'; limit?: number } = {},
+  ): Promise<{ data: any[]; count: number }> {
+    const limit = Math.min(options.limit ?? 100, 500);
+    const qb = this.participantRepo
+      .createQueryBuilder('p')
+      .where('p.workspaceId = :ws', { ws: workspaceId })
+      .andWhere('p.provider = :provider', { provider: 'openphone' });
+    if (tenantId) qb.andWhere('p.tenantId = :t', { t: tenantId });
+    if (options.phone) {
+      const { e164 } = normalizeToE164(options.phone);
+      if (e164) qb.andWhere('p.normalizedPhoneE164 = :e164', { e164 });
+    }
+    if (options.linked === 'true') qb.andWhere('p.providerContactId IS NOT NULL');
+    else if (options.linked === 'false') qb.andWhere('p.providerContactId IS NULL');
+    qb.orderBy('p.lastSeenAt', 'DESC').limit(limit);
+
+    const rows = await qb.getMany();
+
+    // Count conversations per participant for the response (best-effort)
+    const counts = new Map<string, number>();
+    if (rows.length > 0) {
+      const ids = rows.map((r) => r.id);
+      const conversationCountRows: Array<{ id: string; c: string }> = await this.dataSource.query(
+        `SELECT participant_id::text AS id, COUNT(*)::int AS c
+         FROM communication_conversations
+         WHERE participant_id = ANY($1::uuid[])
+         GROUP BY participant_id`,
+        [ids],
+      );
+      for (const r of conversationCountRows) counts.set(r.id, Number(r.c));
+    }
+
+    const data = rows.map((p) => ({
+      id: p.id,
+      participantKey: p.participantKey,
+      phone: p.normalizedPhoneE164,
+      provider: {
+        name: 'openphone',
+        accountId: p.providerAccountId || null,
+        contactId: p.providerContactId ?? null,
+        displayName: p.providerDisplayName ?? null,
+        company: p.providerCompany ?? null,
+      },
+      conversationCount: counts.get(p.id) ?? 0,
+      firstSeenAt: p.firstSeenAt,
+      lastSeenAt: p.lastSeenAt,
+    }));
+    return { data, count: data.length };
+  }
+
   async sniffProviderAccountId(workspaceId: string, tenantId: string): Promise<string> {
     try {
       const credentials = await this.resolveCredentials(workspaceId, tenantId);

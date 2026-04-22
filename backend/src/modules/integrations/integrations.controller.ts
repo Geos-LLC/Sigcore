@@ -212,6 +212,26 @@ export class IntegrationsController {
   }
 
   /**
+   * List participants for the tenant with nested provider block.
+   * GET /integrations/openphone/participants?phone=+1...&linked=true|false&limit=100
+   */
+  @Get('openphone/participants')
+  async listParticipants(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+    @Query('phone') phone?: string,
+    @Query('linked') linked?: 'true' | 'false',
+    @Query('limit') limit?: string,
+  ) {
+    const result = await this.contactCache.listParticipants(workspaceId, tenantId, {
+      phone,
+      linked,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+    return { data: result.data, meta: { count: result.count } };
+  }
+
+  /**
    * Populate openphone_contact_snapshot + cascade to participants.
    * POST /integrations/openphone/contacts/sync
    * Body: {}
