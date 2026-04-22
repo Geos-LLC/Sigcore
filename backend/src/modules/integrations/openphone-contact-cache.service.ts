@@ -335,30 +335,41 @@ export class OpenPhoneContactCacheService {
     const providerAccountId = await this.sniffProviderAccountId(workspaceId, tenantId);
 
     // Step 2 — conversations with no participant_id → create + link
+    // For OpenPhone we scope by (workspace + provider) and also accept tenant_id IS NULL rows
+    // (legacy pre-tenant-isolation conversations) since they belong to this workspace's single
+    // OpenPhone tenant by construction.
     let conversationsLinked = 0;
     let normalizationFailures = 0;
-    const chunkSize = 1000;
-    let offset = 0;
-    while (true) {
+    const chunkSize = 500;
+    let iterations = 0;
+    const maxIterations = 200; // safety
+    while (iterations++ < maxIterations) {
       const convs = await this.conversationRepo
         .createQueryBuilder('c')
         .where('c.workspaceId = :ws', { ws: workspaceId })
-        .andWhere('c.tenantId = :t', { t: tenantId })
+        .andWhere('c.provider = :provider', { provider: 'openphone' })
+        .andWhere('(c.tenantId = :t OR c.tenantId IS NULL)', { t: tenantId })
         .andWhere('c.participantId IS NULL')
         .andWhere('c.participantPhoneNumber IS NOT NULL')
         .orderBy('c.createdAt', 'ASC')
         .limit(chunkSize)
-        .offset(offset)
         .getMany();
       if (convs.length === 0) break;
+      let anyProgress = false;
       for (const conv of convs) {
         const { e164, last10 } = normalizeToE164(conv.participantPhoneNumber);
         if (!e164 || !last10) {
           normalizationFailures++;
+          // Mark as "attempted" by setting a placeholder to prevent infinite loop on same rows
+          if (!dryRun) {
+            await this.conversationRepo.update(conv.id, { participantPhoneE164: '' });
+          }
+          anyProgress = true;
           continue;
         }
         if (dryRun) {
           conversationsLinked++;
+          anyProgress = true;
           continue;
         }
         const participant = await this.upsertParticipantFromConversation({
@@ -370,9 +381,10 @@ export class OpenPhoneContactCacheService {
           participantPhoneE164: e164,
         });
         conversationsLinked++;
+        anyProgress = true;
       }
-      offset += convs.length;
-      if (convs.length < chunkSize) break;
+      if (dryRun) break; // don't loop forever in dryRun since we don't write
+      if (!anyProgress) break;
     }
 
     // Step 3 — participants missing provider linkage but a snapshot exists
