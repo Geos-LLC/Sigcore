@@ -31,6 +31,10 @@ function buildService() {
   const twilioProvider = { sendMessage: jest.fn() };
   const whatsappWebProvider = { sendMessage: jest.fn() };
   const encryptionService = { decrypt: jest.fn().mockReturnValue('decrypted-creds'), encrypt: jest.fn() };
+  const openPhoneContactCache = {
+    upsertParticipantFromConversation: jest.fn(),
+    sniffProviderAccountId: jest.fn().mockResolvedValue(''),
+  };
 
   const service = new CommunicationService(
     integrationRepo as any,
@@ -44,6 +48,7 @@ function buildService() {
     twilioProvider as any,
     whatsappWebProvider as any,
     encryptionService as any,
+    openPhoneContactCache as any,
   );
 
   return {

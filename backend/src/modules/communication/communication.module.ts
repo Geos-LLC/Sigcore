@@ -2,6 +2,7 @@ import { Module, OnModuleInit, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WebhooksModule } from '../webhooks/webhooks.module';
 import { TenantsModule } from '../tenants/tenants.module';
+import { IntegrationsModule } from '../integrations/integrations.module';
 import { CommunicationController } from './communication.controller';
 import { ConversationsController } from './conversations.controller';
 import { CallsController } from './calls.controller';
@@ -46,6 +47,7 @@ import {
     ]),
     forwardRef(() => WebhooksModule),
     forwardRef(() => TenantsModule),
+    forwardRef(() => IntegrationsModule),
   ],
   controllers: [
     CommunicationController,

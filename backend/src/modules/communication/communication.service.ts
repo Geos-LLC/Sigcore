@@ -1,5 +1,7 @@
-import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { normalizeToE164 } from '../../common/util/phone';
+import { OpenPhoneContactCacheService } from '../integrations/openphone-contact-cache.service';
 import { Repository, In } from 'typeorm';
 import {
   CommunicationIntegration,
@@ -111,7 +113,55 @@ export class CommunicationService {
     private twilioProvider: TwilioProvider,
     private whatsappWebProvider: WhatsAppWebProvider,
     private encryptionService: EncryptionService,
+    @Inject(forwardRef(() => OpenPhoneContactCacheService))
+    private openPhoneContactCache: OpenPhoneContactCacheService,
   ) {}
+
+  /**
+   * Source C — link a freshly-saved OpenPhone conversation to its participant.
+   * Idempotent. Safe to call on existing conversations (upsert + no-op if already set).
+   */
+  private async linkOpenPhoneParticipant(conversation: CommunicationConversation): Promise<void> {
+    if (conversation.provider !== ProviderType.OPENPHONE) return;
+    if (!conversation.participantPhoneNumber) return;
+    const { e164 } = normalizeToE164(conversation.participantPhoneNumber);
+    if (!e164) return;
+
+    const tenantId = conversation.tenantId;
+    if (!tenantId) {
+      // Skip — participants require a tenant_id (non-null column).
+      // The backfill endpoint is workspace-scoped and handles tenant_id=NULL conversations.
+      return;
+    }
+
+    try {
+      const providerAccountId = (conversation.metadata as Record<string, unknown> | null)?.phoneNumberId as string | undefined
+        ?? await this.openPhoneContactCache.sniffProviderAccountId(conversation.workspaceId, tenantId);
+      const participant = await this.openPhoneContactCache.upsertParticipantFromConversation({
+        workspaceId: conversation.workspaceId,
+        tenantId,
+        providerAccountId,
+        phoneE164: e164,
+        rawPhone: conversation.participantPhoneNumber,
+      });
+      if (
+        conversation.participantId !== participant.id
+        || conversation.participantKey !== participant.participantKey
+        || conversation.participantPhoneE164 !== e164
+      ) {
+        await this.conversationRepo.update(conversation.id, {
+          participantId: participant.id,
+          participantKey: participant.participantKey,
+          participantPhoneE164: e164,
+        });
+        conversation.participantId = participant.id;
+        conversation.participantKey = participant.participantKey;
+        conversation.participantPhoneE164 = e164;
+      }
+    } catch (e) {
+      this.logger.warn(`linkOpenPhoneParticipant failed for conv ${conversation.id}: ${(e as Error).message}`);
+    }
+  }
 
   private getProvider(providerType: ProviderType): CommunicationProvider {
     switch (providerType) {
@@ -1599,6 +1649,7 @@ export class CommunicationService {
 
           const savedConv = await this.conversationRepo.save(conversation);
           this.logger.log(`Saved conversation: id=${savedConv.id}, externalId=${savedConv.externalId}, phoneNumber='${savedConv.phoneNumber}', participant=${savedConv.participantPhoneNumber}`);
+          await this.linkOpenPhoneParticipant(savedConv);
           result.conversationsSynced++;
 
           // Sync messages if enabled
@@ -1851,6 +1902,7 @@ export class CommunicationService {
             dbConv.metadata = opConv.metadata;
             dbConv.phoneNumber = opConv.phoneNumber;
             await this.conversationRepo.save(dbConv);
+            await this.linkOpenPhoneParticipant(dbConv);
 
             // Sync messages for this conversation
             // phoneNumberId comes from fresh OpenPhone API response (opConv.metadata)
