@@ -701,16 +701,27 @@ export class IntegrationsService {
 
     // Prefetch participants for this workspace — used to emit participantId/key + nested provider block.
     // Indexed by normalized last-10 digits (covers any participant phone format discrepancy).
+    // Index participants workspace-wide (not tenant-filtered) since /conversations/all
+    // itself returns the workspace's live OpenPhone conversations without tenant scoping.
+    // Prefer the caller's tenant when the same phone has rows across tenants (ambiguous dedup).
     const participantsByPhone = new Map<string, CommunicationParticipant>();
     if (!usedLiveFallback) {
-      const participantQuery: Record<string, unknown> = { workspaceId, provider: 'openphone' };
-      if (tenantId) participantQuery.tenantId = tenantId;
-      const participants = await this.participantRepo.find({ where: participantQuery });
+      const participants = await this.participantRepo.find({
+        where: { workspaceId, provider: 'openphone' },
+      });
       for (const p of participants) {
         const l10 = last10Digits(p.normalizedPhoneE164);
-        if (l10) participantsByPhone.set(l10, p);
+        if (!l10) continue;
+        const existing = participantsByPhone.get(l10);
+        if (!existing) {
+          participantsByPhone.set(l10, p);
+          continue;
+        }
+        if (tenantId && p.tenantId === tenantId && existing.tenantId !== tenantId) {
+          participantsByPhone.set(l10, p);
+        }
       }
-      this.logger.log(`Full sync (cache): loaded ${participants.length} participants for response join`);
+      this.logger.log(`Full sync (cache): loaded ${participants.length} participants for response join (${participantsByPhone.size} unique phones)`);
     }
 
     // Merge all conversations

@@ -475,11 +475,14 @@ export class OpenPhoneContactCacheService {
     options: { phone?: string; linked?: 'true' | 'false'; limit?: number } = {},
   ): Promise<{ data: any[]; count: number }> {
     const limit = Math.min(options.limit ?? 100, 500);
+    // Note: participants are tenant-scoped in storage but we return workspace-wide
+    // to mirror /conversations/all which isn't tenant-filtered either. A `tenantId`
+    // query param filter can be added later if needed.
     const qb = this.participantRepo
       .createQueryBuilder('p')
       .where('p.workspaceId = :ws', { ws: workspaceId })
       .andWhere('p.provider = :provider', { provider: 'openphone' });
-    if (tenantId) qb.andWhere('p.tenantId = :t', { t: tenantId });
+    void tenantId;
     if (options.phone) {
       const { e164 } = normalizeToE164(options.phone);
       if (e164) qb.andWhere('p.normalizedPhoneE164 = :e164', { e164 });
