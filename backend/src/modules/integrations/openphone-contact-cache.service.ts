@@ -79,6 +79,7 @@ export class OpenPhoneContactCacheService {
       providerCompany: input.providerCompany,
     });
 
+    const accountId = input.providerAccountId ?? '';
     await this.dataSource.transaction(async (tx) => {
       await tx.query(
         `
@@ -89,9 +90,9 @@ export class OpenPhoneContactCacheService {
            "provider_first_name", "provider_last_name", "provider_company",
            "provider_updated_at", "metadata", "created_at", "updated_at")
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now())
-        ON CONFLICT ("workspace_id", "tenant_id", "phone_e164")
+        ON CONFLICT ("workspace_id", "provider_account_id", "phone_e164")
         DO UPDATE SET
-          "provider_account_id" = COALESCE(EXCLUDED."provider_account_id", "openphone_contact_snapshot"."provider_account_id"),
+          "tenant_id"           = COALESCE(EXCLUDED."tenant_id", "openphone_contact_snapshot"."tenant_id"),
           "provider_contact_id" = EXCLUDED."provider_contact_id",
           "provider_first_name" = EXCLUDED."provider_first_name",
           "provider_last_name"  = EXCLUDED."provider_last_name",
@@ -105,8 +106,8 @@ export class OpenPhoneContactCacheService {
         `,
         [
           input.workspaceId,
-          input.tenantId,
-          input.providerAccountId ?? null,
+          input.tenantId ?? null,
+          accountId,
           input.phoneE164,
           input.phoneLast10,
           input.providerContactId ?? null,
@@ -118,26 +119,27 @@ export class OpenPhoneContactCacheService {
         ],
       );
 
+      // Cascade to ALL tenants' participants sharing this phone in this workspace.
+      // Snapshots are workspace-scoped; participants are tenant-scoped; all tenants
+      // that see this phone should reflect the latest snapshot.
       await tx.query(
         `
         UPDATE "communication_participants"
-        SET "provider_contact_id"   = $4,
-            "provider_display_name" = $5,
-            "provider_company"      = $6,
+        SET "provider_contact_id"   = $3,
+            "provider_display_name" = $4,
+            "provider_company"      = $5,
             "updated_at"            = now()
         WHERE "workspace_id" = $1
-          AND "tenant_id" = $2
           AND "provider" = 'openphone'
-          AND "normalized_phone_e164" = $3
+          AND "normalized_phone_e164" = $2
           AND (
-            "provider_contact_id"   IS DISTINCT FROM $4
-            OR "provider_display_name" IS DISTINCT FROM $5
-            OR "provider_company"   IS DISTINCT FROM $6
+            "provider_contact_id"   IS DISTINCT FROM $3
+            OR "provider_display_name" IS DISTINCT FROM $4
+            OR "provider_company"   IS DISTINCT FROM $5
           )
         `,
         [
           input.workspaceId,
-          input.tenantId,
           input.phoneE164,
           input.providerContactId ?? null,
           displayName,
@@ -151,7 +153,7 @@ export class OpenPhoneContactCacheService {
    * Source B — contact.deleted webhook. Nulls provider fields on snapshot + participants
    * but keeps the rows (conversations may still reference them).
    */
-  async deleteSnapshotAndCascade(workspaceId: string, tenantId: string, phoneE164: string): Promise<void> {
+  async deleteSnapshotAndCascade(workspaceId: string, phoneE164: string): Promise<void> {
     await this.dataSource.transaction(async (tx) => {
       await tx.query(
         `
@@ -161,9 +163,9 @@ export class OpenPhoneContactCacheService {
             "provider_last_name"  = NULL,
             "provider_company"    = NULL,
             "updated_at"          = now()
-        WHERE "workspace_id" = $1 AND "tenant_id" = $2 AND "phone_e164" = $3
+        WHERE "workspace_id" = $1 AND "phone_e164" = $2
         `,
-        [workspaceId, tenantId, phoneE164],
+        [workspaceId, phoneE164],
       );
       await tx.query(
         `
@@ -173,11 +175,10 @@ export class OpenPhoneContactCacheService {
             "provider_company"      = NULL,
             "updated_at"            = now()
         WHERE "workspace_id" = $1
-          AND "tenant_id" = $2
           AND "provider" = 'openphone'
-          AND "normalized_phone_e164" = $3
+          AND "normalized_phone_e164" = $2
         `,
-        [workspaceId, tenantId, phoneE164],
+        [workspaceId, phoneE164],
       );
     });
   }
@@ -191,7 +192,7 @@ export class OpenPhoneContactCacheService {
     const participantKey = `openphone:${input.tenantId}:${accountId}:${input.phoneE164}`;
 
     const snapshot = await this.snapshotRepo.findOne({
-      where: { workspaceId: input.workspaceId, tenantId: input.tenantId, phoneE164: input.phoneE164 },
+      where: { workspaceId: input.workspaceId, phoneE164: input.phoneE164 },
     });
 
     const providerFields = snapshot
@@ -396,7 +397,6 @@ export class OpenPhoneContactCacheService {
         FROM communication_participants p
         JOIN openphone_contact_snapshot s
           ON s.workspace_id = p.workspace_id
-         AND s.tenant_id = p.tenant_id
          AND s.phone_e164 = p.normalized_phone_e164
         WHERE p.workspace_id = $1
           AND p.tenant_id = $2
@@ -430,7 +430,6 @@ export class OpenPhoneContactCacheService {
         FROM communication_participants p
         JOIN openphone_contact_snapshot s
           ON s.workspace_id = p.workspace_id
-         AND s.tenant_id = p.tenant_id
          AND s.phone_e164 = p.normalized_phone_e164
         WHERE p.workspace_id = $1
           AND p.tenant_id = $2

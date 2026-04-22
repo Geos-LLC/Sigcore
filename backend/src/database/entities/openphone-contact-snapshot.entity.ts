@@ -13,9 +13,9 @@ import {
  * See plans/SIGCORE_OPENPHONE_CORRELATION.md §4.1.
  */
 @Entity('openphone_contact_snapshot')
-@Index(['workspaceId', 'tenantId', 'phoneE164'], { unique: true })
-@Index(['workspaceId', 'tenantId', 'phoneLast10'])
-@Index(['workspaceId', 'tenantId', 'providerContactId'])
+@Index(['workspaceId', 'providerAccountId', 'phoneE164'], { unique: true })
+@Index(['workspaceId', 'phoneLast10'])
+@Index(['workspaceId', 'providerContactId'])
 @Index(['providerUpdatedAt'])
 export class OpenPhoneContactSnapshot {
   @PrimaryGeneratedColumn('uuid')
@@ -24,11 +24,11 @@ export class OpenPhoneContactSnapshot {
   @Column({ name: 'workspace_id' })
   workspaceId: string;
 
-  @Column({ name: 'tenant_id' })
-  tenantId: string;
+  @Column({ name: 'tenant_id', type: 'varchar', nullable: true })
+  tenantId?: string;
 
-  @Column({ name: 'provider_account_id', nullable: true })
-  providerAccountId?: string;
+  @Column({ name: 'provider_account_id', default: '' })
+  providerAccountId: string;
 
   @Column({ name: 'phone_e164' })
   phoneE164: string;
