@@ -127,11 +127,17 @@ export class CommunicationService {
     const { e164 } = normalizeToE164(conversation.participantPhoneNumber);
     if (!e164) return;
 
-    const tenantId = conversation.tenantId;
+    // Resolve tenant_id. Null-tenant conversations (legacy / webhook-created) get
+    // attached to the workspace's OpenPhone tenant so a participant can be created.
+    let tenantId = conversation.tenantId;
+    let tenantWasBackfilled = false;
     if (!tenantId) {
-      // Skip — participants require a tenant_id (non-null column).
-      // The backfill endpoint is workspace-scoped and handles tenant_id=NULL conversations.
-      return;
+      tenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
+      if (!tenantId) {
+        this.logger.warn(`linkOpenPhoneParticipant: no OpenPhone tenant for workspace ${conversation.workspaceId}, skip conv ${conversation.id}`);
+        return;
+      }
+      tenantWasBackfilled = true;
     }
 
     try {
@@ -144,19 +150,21 @@ export class CommunicationService {
         phoneE164: e164,
         rawPhone: conversation.participantPhoneNumber,
       });
-      if (
-        conversation.participantId !== participant.id
-        || conversation.participantKey !== participant.participantKey
-        || conversation.participantPhoneE164 !== e164
-      ) {
-        await this.conversationRepo.update(conversation.id, {
-          participantId: participant.id,
-          participantKey: participant.participantKey,
-          participantPhoneE164: e164,
-        });
-        conversation.participantId = participant.id;
-        conversation.participantKey = participant.participantKey;
-        conversation.participantPhoneE164 = e164;
+
+      // Self-healing: if we just created a participant with no snapshot match,
+      // schedule a background contact sync so the next request has company/name.
+      if (!participant.providerContactId) {
+        this.openPhoneContactCache.scheduleBackgroundSync(conversation.workspaceId, tenantId);
+      }
+
+      const updates: Partial<CommunicationConversation> = {};
+      if (conversation.participantId !== participant.id) updates.participantId = participant.id;
+      if (conversation.participantKey !== participant.participantKey) updates.participantKey = participant.participantKey;
+      if (conversation.participantPhoneE164 !== e164) updates.participantPhoneE164 = e164;
+      if (tenantWasBackfilled) updates.tenantId = tenantId;
+      if (Object.keys(updates).length > 0) {
+        await this.conversationRepo.update(conversation.id, updates as any);
+        Object.assign(conversation, updates);
       }
     } catch (e) {
       this.logger.warn(`linkOpenPhoneParticipant failed for conv ${conversation.id}: ${(e as Error).message}`);

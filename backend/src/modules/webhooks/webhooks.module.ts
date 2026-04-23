@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { WebhooksController } from './webhooks.controller';
 import { WebhookSubscriptionsController, WebhookSubscriptionsV1Controller, WebhookSubscriptionsAliasController } from './webhook-subscriptions.controller';
@@ -13,6 +13,7 @@ import { OpenPhoneProvider } from '../communication/providers/openphone.provider
 import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
 import { MessagingModule } from '../messaging/messaging.module';
+import { IntegrationsModule } from '../integrations/integrations.module';
 import {
   CommunicationIntegration,
   CommunicationConversation,
@@ -33,6 +34,7 @@ import {
 @Module({
   imports: [
     MessagingModule,
+    forwardRef(() => IntegrationsModule),
     TypeOrmModule.forFeature([
       CommunicationIntegration,
       CommunicationConversation,

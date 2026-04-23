@@ -18,7 +18,7 @@ import { OpenPhoneProvider } from '../communication/providers/openphone.provider
 import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioVoiceService } from '../communication/twilio-voice.service';
 import { normalizeToE164, last10Digits } from '../../common/util/phone';
-import { resolveDisplayName } from './openphone-contact-cache.service';
+import { OpenPhoneContactCacheService, resolveDisplayName } from './openphone-contact-cache.service';
 import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
 
 export interface IntegrationInfo {
@@ -67,6 +67,7 @@ export class IntegrationsService {
     private snapshotRepo: Repository<OpenPhoneContactSnapshot>,
     @InjectRepository(CommunicationParticipant)
     private participantRepo: Repository<CommunicationParticipant>,
+    private readonly openPhoneContactCache: OpenPhoneContactCacheService,
     private encryptionService: EncryptionService,
     private openPhoneProvider: OpenPhoneProvider,
     private twilioProvider: TwilioProvider,
@@ -618,6 +619,16 @@ export class IntegrationsService {
         lastName:  (existing?.lastName ?? null) || c.lastName || null,
       });
     };
+    // Self-healing — kick off a debounced background contact sync. Picks up
+    // new Quo contacts + stale company updates without manual intervention.
+    // No-op if the last sync was <5 min ago.
+    if (tenantId) {
+      this.openPhoneContactCache.scheduleBackgroundSync(workspaceId, tenantId);
+    } else {
+      const resolved = await this.openPhoneContactCache.resolveOpenPhoneTenant(workspaceId);
+      if (resolved) this.openPhoneContactCache.scheduleBackgroundSync(workspaceId, resolved);
+    }
+
     // PR3 — read path cutover. Primary source: DB snapshot cache.
     // Fallback: live /contacts pagination for tenants without any cached snapshots.
     let usedLiveFallback = false;

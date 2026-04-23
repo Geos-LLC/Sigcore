@@ -51,6 +51,12 @@ export function resolveDisplayName(
 @Injectable()
 export class OpenPhoneContactCacheService {
   private readonly logger = new Logger(OpenPhoneContactCacheService.name);
+  /**
+   * Debounce map for `scheduleBackgroundSync` — prevents inbound webhook storms
+   * from hammering OpenPhone's /contacts endpoint. Keyed by workspaceId + tenantId.
+   */
+  private readonly lastBackgroundSyncAt = new Map<string, number>();
+  private readonly BACKGROUND_SYNC_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor(
     @InjectRepository(OpenPhoneContactSnapshot)
@@ -523,6 +529,42 @@ export class OpenPhoneContactCacheService {
       lastSeenAt: p.lastSeenAt,
     }));
     return { data, count: data.length };
+  }
+
+  /**
+   * Fire-and-forget contact sync, debounced per (workspace, tenant). Safe to call
+   * from webhook handlers and request paths — never blocks, never throws to caller.
+   * Catches new Quo contacts and refreshes stale `provider_company` fields across
+   * the cache without requiring manual intervention.
+   */
+  scheduleBackgroundSync(workspaceId: string, tenantId: string): void {
+    const key = `${workspaceId}:${tenantId}`;
+    const last = this.lastBackgroundSyncAt.get(key) ?? 0;
+    const now = Date.now();
+    if (now - last < this.BACKGROUND_SYNC_COOLDOWN_MS) return;
+    this.lastBackgroundSyncAt.set(key, now);
+    setImmediate(() => {
+      this.syncContactsFromOpenPhone(workspaceId, tenantId)
+        .then((r) => this.logger.log(
+          `bg sync ws=${workspaceId.slice(0, 8)} t=${tenantId.slice(0, 8)}: ` +
+          `${r.snapshotsWritten} snapshots, ${r.phoneNormalizationFailures} bad phones`))
+        .catch((e: unknown) => this.logger.warn(
+          `bg sync ws=${workspaceId.slice(0, 8)} t=${tenantId.slice(0, 8)} failed: ${(e as Error).message}`));
+    });
+  }
+
+  /**
+   * Resolve the tenant_id that owns the OpenPhone integration for this workspace.
+   * Used when a conversation has tenant_id=NULL (legacy rows / webhook-created rows
+   * that weren't tagged yet) but we still need to create a tenant-scoped participant.
+   * Picks the tenant_integration with the OpenPhone provider, newest first.
+   */
+  async resolveOpenPhoneTenant(workspaceId: string): Promise<string | null> {
+    const ti = await this.tenantIntegrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.OPENPHONE },
+      order: { createdAt: 'DESC' },
+    });
+    return ti?.tenantId ?? null;
   }
 
   async sniffProviderAccountId(workspaceId: string, tenantId: string): Promise<string> {

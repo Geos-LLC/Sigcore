@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as crypto from 'crypto';
@@ -32,6 +32,8 @@ import { IdempotencyService } from './idempotency.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { S3Service } from '../../shared/storage/s3.service';
+import { OpenPhoneContactCacheService } from '../integrations/openphone-contact-cache.service';
+import { normalizeToE164 } from '../../common/util/phone';
 
 export interface OpenPhoneMessageObject {
   id: string;
@@ -101,7 +103,65 @@ export class WebhooksService {
     private idempotencyService: IdempotencyService,
     private outboundWebhooksService: OutboundWebhooksService,
     private s3Service: S3Service,
+    @Optional()
+    @Inject(forwardRef(() => OpenPhoneContactCacheService))
+    private openPhoneContactCache?: OpenPhoneContactCacheService,
   ) {}
+
+  /**
+   * Called after every inbound OpenPhone message/call webhook. Creates or updates
+   * a participant for the conversation and schedules a debounced background
+   * contact sync so new/updated Quo contacts land in Sigcore's cache without
+   * manual intervention.
+   */
+  private async linkOpenPhoneParticipantFromWebhook(
+    conversation: CommunicationConversation,
+  ): Promise<void> {
+    if (!this.openPhoneContactCache) return;
+    if (conversation.provider !== ProviderType.OPENPHONE) return;
+    if (!conversation.participantPhoneNumber) return;
+
+    const { e164 } = normalizeToE164(conversation.participantPhoneNumber);
+    if (!e164) return;
+
+    let tenantId = conversation.tenantId;
+    let tenantWasBackfilled = false;
+    if (!tenantId) {
+      tenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
+      if (!tenantId) return;
+      tenantWasBackfilled = true;
+    }
+
+    try {
+      const providerAccountId = (conversation.metadata as Record<string, unknown> | null)?.phoneNumberId as string | undefined
+        ?? await this.openPhoneContactCache.sniffProviderAccountId(conversation.workspaceId, tenantId);
+
+      const participant = await this.openPhoneContactCache.upsertParticipantFromConversation({
+        workspaceId: conversation.workspaceId,
+        tenantId,
+        providerAccountId,
+        phoneE164: e164,
+        rawPhone: conversation.participantPhoneNumber,
+      });
+
+      const updates: Partial<CommunicationConversation> = {};
+      if (conversation.participantId !== participant.id) updates.participantId = participant.id;
+      if (conversation.participantKey !== participant.participantKey) updates.participantKey = participant.participantKey;
+      if (conversation.participantPhoneE164 !== e164) updates.participantPhoneE164 = e164;
+      if (tenantWasBackfilled) updates.tenantId = tenantId;
+      if (Object.keys(updates).length > 0) {
+        await this.conversationRepo.update(conversation.id, updates as any);
+        Object.assign(conversation, updates);
+      }
+
+      // Refresh snapshot cache in the background (debounced). Self-healing:
+      // new contacts created in Quo between syncs become available to subsequent
+      // reads within a few seconds of an inbound webhook.
+      this.openPhoneContactCache.scheduleBackgroundSync(conversation.workspaceId, tenantId);
+    } catch (e) {
+      this.logger.warn(`linkOpenPhoneParticipantFromWebhook failed for conv ${conversation.id}: ${(e as Error).message}`);
+    }
+  }
 
   async getWorkspaceByWebhookId(webhookId: string): Promise<Workspace | null> {
     return this.workspaceRepo.findOne({
@@ -425,6 +485,12 @@ export class WebhooksService {
       isNewConversation = true;
     }
 
+    // Source C — link participant for every inbound message, regardless of
+    // whether the conversation existed or was just created.
+    if (conversation) {
+      await this.linkOpenPhoneParticipantFromWebhook(conversation);
+    }
+
     if (!conversation) {
       this.logger.warn(`Could not find or create conversation - missing participant number. Data: ${JSON.stringify(msgData)}`);
       return;
@@ -589,6 +655,11 @@ export class WebhooksService {
 
       await this.conversationRepo.save(conversation);
       isNewConversation = true;
+    }
+
+    // Source C — link participant for every inbound call.
+    if (conversation) {
+      await this.linkOpenPhoneParticipantFromWebhook(conversation);
     }
 
     // SECURITY: Include workspace context in deduplication to prevent cross-workspace data leaks
