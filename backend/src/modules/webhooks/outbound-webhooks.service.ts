@@ -50,17 +50,35 @@ export class OutboundWebhooksService {
       sub.events.includes(eventType),
     );
 
-    // When tenantId is provided, only deliver to subscriptions scoped to that
-    // tenant or unscoped (tenantId IS NULL) subscriptions.
     if (tenantId) {
+      // Deliver to subscriptions scoped to this tenant + unscoped subscriptions.
       relevantSubscriptions = relevantSubscriptions.filter(
         (sub) => !sub.tenantId || sub.tenantId === tenantId,
       );
+    } else {
+      // Without tenantId we cannot tell which tenant-scoped subscription owns
+      // this event. Restrict delivery to unscoped subscriptions only — never
+      // broadcast across every tenant in the workspace (Issue #114 fan-out).
+      const droppedScoped = relevantSubscriptions.filter((s) => s.tenantId).length;
+      if (droppedScoped > 0) {
+        this.logger.warn(
+          `[emitEvent] Missing tenantId — restricting to unscoped subscriptions ` +
+            `(event=${eventType} workspace=${workspaceId} skipped=${droppedScoped})`,
+        );
+      }
+      relevantSubscriptions = relevantSubscriptions.filter((sub) => !sub.tenantId);
     }
 
     if (relevantSubscriptions.length === 0) {
       this.logger.debug(`No active subscriptions for event ${eventType} in workspace ${workspaceId}`);
       return;
+    }
+
+    if (relevantSubscriptions.length > 1) {
+      this.logger.warn(
+        `[emitEvent] ${relevantSubscriptions.length} subscriptions matched ` +
+          `(event=${eventType} workspace=${workspaceId} tenantId=${tenantId ?? 'unscoped'})`,
+      );
     }
 
     const payload: WebhookPayload = {

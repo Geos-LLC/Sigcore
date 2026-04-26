@@ -82,9 +82,36 @@ export class WebhooksController {
   // ==================== LeadBridge SMS WEBHOOKS ====================
 
   /**
-   * Incoming SMS for LeadBridge bot numbers.
-   * Business is identified by the To number via phone_number_assignments.
-   * IMPORTANT: Defined BEFORE twilio/sms/:webhookId to avoid route conflicts.
+   * Incoming SMS for LeadBridge bot numbers — tenant-scoped variant.
+   * Each LeadBridge SavedAccount registers its Twilio webhook against its own
+   * tenantId so Sigcore can deliver only to that tenant's subscription
+   * (Issue #114 — prevents cross-tenant fan-out).
+   *
+   * POST /webhooks/twilio/sms/lb/:tenantId
+   *
+   * IMPORTANT: 3-segment path so it does not collide with the BYO route
+   * twilio/sms/:webhookId (2 segments).
+   */
+  @Post('twilio/sms/lb/:tenantId')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioSmsInboundForTenant(
+    @Param('tenantId') tenantId: string,
+    @Body('From') from: string,
+    @Body('To') to: string,
+    @Body('Body') body: string,
+    @Body('MessageSid') messageSid: string,
+  ) {
+    this.logger.log(`Inbound SMS from ${from} to ${to} (${messageSid}) tenant=${tenantId}`);
+    await this.messagingService.handleIncomingSms(to, from, body, messageSid, tenantId);
+    return '';
+  }
+
+  /**
+   * Legacy LeadBridge bot inbound SMS — no tenant context in the URL.
+   * Kept for backward compatibility with already-registered Twilio webhooks.
+   * Treated as UNSAFE: emitEvent will restrict delivery to unscoped
+   * subscriptions only, never tenant-scoped ones (Issue #114).
+   * New SavedAccount registrations should use /twilio/sms/lb/:tenantId.
    *
    * POST /webhooks/twilio/sms
    */
@@ -96,7 +123,10 @@ export class WebhooksController {
     @Body('Body') body: string,
     @Body('MessageSid') messageSid: string,
   ) {
-    this.logger.log(`Inbound SMS from ${from} to ${to} (${messageSid})`);
+    this.logger.warn(
+      `[legacy route] Inbound SMS from ${from} to ${to} (${messageSid}) — no tenantId, ` +
+        `delivery restricted to unscoped subs`,
+    );
     await this.messagingService.handleIncomingSms(to, from, body, messageSid);
     return '';
   }

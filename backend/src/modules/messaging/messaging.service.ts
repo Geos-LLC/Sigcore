@@ -72,6 +72,7 @@ export class MessagingService {
     fromNumber: string,
     body: string,
     messageSid: string,
+    tenantId?: string,
   ): Promise<void> {
     const assignment = await this.assignmentRepo.findOne({
       where: { numberE164: toNumber, active: true },
@@ -92,7 +93,10 @@ export class MessagingService {
       providerSid: messageSid,
     });
 
-    this.logger.log(`Inbound SMS saved: ${messageSid} from ${fromNumber} → business ${assignment.businessId}`);
+    this.logger.log(
+      `Inbound SMS saved: ${messageSid} from ${fromNumber} → business ${assignment.businessId} ` +
+        `(tenantId=${tenantId ?? 'unscoped'})`,
+    );
 
     await this.outboundWebhooks.emitEvent(
       assignment.businessId,
@@ -108,6 +112,7 @@ export class MessagingService {
         providerSid: messageSid,
         receivedAt: saved.createdAt.toISOString(),
       },
+      tenantId,
     );
   }
 

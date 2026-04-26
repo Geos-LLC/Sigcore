@@ -13,6 +13,7 @@ import {
   HttpStatus,
   Request,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { TenantsService, CreateTenantDto, AllocatePhoneNumberDto, ConnectTenantIntegrationDto } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
@@ -469,6 +470,43 @@ export class TenantsController {
     }
     const result = await this.provisioningService.refreshPhoneWebhooks(workspaceId, tenantId);
     return { data: result };
+  }
+
+  /**
+   * Set the SMS webhook URL on every Twilio number allocated to a tenant.
+   * Unlike refresh-webhooks (which writes the BYO workspace-scoped URL), this
+   * endpoint accepts an explicit URL and is used by LeadBridge to migrate to
+   * the tenant-scoped /webhooks/twilio/sms/lb/:tenantId route (Issue #114).
+   * Voice webhook configuration is NOT modified.
+   *
+   * Platform key only. Idempotent.
+   * POST /api/tenants/:id/phone-numbers/set-webhook-url
+   */
+  @Post(':id/phone-numbers/set-webhook-url')
+  @HttpCode(HttpStatus.OK)
+  async setPhoneSmsWebhookUrl(
+    @WorkspaceId() workspaceId: string,
+    @Request() req: any,
+    @Param('id') tenantId: string,
+    @Body() dto: { smsUrl: string; smsMethod?: string },
+  ) {
+    if (req.apiKeyScope === 'tenant') {
+      throw new ForbiddenException('Tenant keys cannot set phone webhook URLs');
+    }
+    if (!dto?.smsUrl || typeof dto.smsUrl !== 'string') {
+      throw new BadRequestException('smsUrl is required');
+    }
+    const method = dto.smsMethod ?? 'POST';
+    if (method !== 'POST' && method !== 'GET') {
+      throw new BadRequestException('smsMethod must be POST or GET');
+    }
+    const result = await this.provisioningService.setSmsWebhookUrl(
+      workspaceId,
+      tenantId,
+      dto.smsUrl,
+      method,
+    );
+    return { success: result.success, results: result.results };
   }
 
   /**

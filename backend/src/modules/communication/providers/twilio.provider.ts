@@ -577,6 +577,30 @@ export class TwilioProvider implements CommunicationProvider {
   }
 
   /**
+   * Update only the SMS webhook URL on a Twilio number — leaves voice config untouched.
+   * Idempotent: calling repeatedly with the same URL is safe.
+   */
+  async updateSmsWebhook(
+    credentialsString: string,
+    phoneNumberSid: string,
+    smsUrl: string,
+    smsMethod: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const credentials = JSON.parse(credentialsString) as TwilioCredentials;
+      const client = this.createClient(credentials);
+      await client.incomingPhoneNumbers(phoneNumberSid).update({
+        smsUrl,
+        smsMethod: smsMethod as 'POST' | 'GET',
+      });
+      return { success: true };
+    } catch (error) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
    * Look up a single phone number's Twilio SID by E.164 phone number string.
    * Used when creating a new tenant_phone_numbers record for a number that was not
    * provisioned through Sigcore (e.g. imported or pre-existing Twilio numbers).

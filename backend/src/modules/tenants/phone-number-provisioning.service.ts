@@ -703,6 +703,81 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
+   * Set the SMS webhook URL on every Twilio number allocated to a tenant.
+   * Unlike refreshPhoneWebhooks, the URL is supplied by the caller and the
+   * voice webhook is NOT touched — used by LeadBridge to migrate to the
+   * tenant-scoped /webhooks/twilio/sms/lb/:tenantId route (Issue #114).
+   *
+   * Idempotent. Per-number failures do not abort the loop; each result is
+   * reported individually.
+   */
+  async setSmsWebhookUrl(
+    workspaceId: string,
+    tenantId: string,
+    smsUrl: string,
+    smsMethod: string,
+  ): Promise<{
+    success: boolean;
+    results: Array<{ phoneNumberSid: string; updated: boolean; error?: string }>;
+  }> {
+    const integration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+    });
+    if (!integration?.credentialsEncrypted) {
+      this.logger.warn(
+        `[setSmsWebhookUrl] No active Twilio integration for workspace=${workspaceId} tenant=${tenantId}`,
+      );
+      return { success: false, results: [] };
+    }
+
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+    const allocations = await this.tenantPhoneRepo.find({
+      where: { workspaceId, tenantId },
+    });
+
+    this.logger.log(
+      `[setSmsWebhookUrl] tenant=${tenantId} workspace=${workspaceId} ` +
+        `numbers=${allocations.length} smsUrl=${smsUrl}`,
+    );
+
+    const results: Array<{ phoneNumberSid: string; updated: boolean; error?: string }> = [];
+
+    for (const allocation of allocations) {
+      if (!allocation.providerId) {
+        this.logger.warn(
+          `[setSmsWebhookUrl] Skipping ${allocation.phoneNumber} — missing providerId (Twilio SID)`,
+        );
+        continue;
+      }
+      const r = await this.twilioProvider.updateSmsWebhook(
+        credentials,
+        allocation.providerId,
+        smsUrl,
+        smsMethod,
+      );
+      if (r.success) {
+        this.logger.log(
+          `[setSmsWebhookUrl] OK tenant=${tenantId} sid=${allocation.providerId} ` +
+            `phone=${allocation.phoneNumber} smsUrl=${smsUrl}`,
+        );
+        results.push({ phoneNumberSid: allocation.providerId, updated: true });
+      } else {
+        this.logger.error(
+          `[setSmsWebhookUrl] FAIL tenant=${tenantId} sid=${allocation.providerId} ` +
+            `phone=${allocation.phoneNumber} error=${r.error}`,
+        );
+        results.push({
+          phoneNumberSid: allocation.providerId,
+          updated: false,
+          error: r.error,
+        });
+      }
+    }
+
+    return { success: true, results };
+  }
+
+  /**
    * Set the call-forwarding number on a specific phone allocation's metadata.
    * Finds the allocation by phoneNumber across all tenants in the workspace.
    * This is the authoritative way to set callForwardingNumber — handleIncomingCall
