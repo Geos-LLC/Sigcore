@@ -490,10 +490,49 @@ export class IntegrationsService {
       this.logger.log(`${conversations.length} conversations (contact lookup skipped)`);
     }
 
-    // Enrich: use conversationName first, then contact lookup, then null
+    // Enrich: use conversationName first, then contact lookup, then null.
+    // Also attach `provider.company` from the snapshot table so SF (and any
+    // other consumer) can read the OpenPhone "Company" custom field without
+    // calling /participants separately. Snapshot is workspace-scoped and
+    // populated by /openphone/contacts/sync (or webhook upserts).
+    const phonesForCompanyLookup = Array.from(new Set(
+      conversations.map(c => c.participantPhone).filter(Boolean) as string[]
+    ));
+    const companyByPhone = new Map<string, { contactId: string | null; company: string | null; displayName: string | null }>();
+    if (phonesForCompanyLookup.length > 0) {
+      const e164s = phonesForCompanyLookup
+        .map(p => { const { e164 } = normalizeToE164(p); return e164; })
+        .filter(Boolean) as string[];
+      if (e164s.length > 0) {
+        const snapshots = await this.snapshotRepo
+          .createQueryBuilder('s')
+          .where('s.workspaceId = :ws', { ws: workspaceId })
+          .andWhere('s.phoneE164 IN (:...phones)', { phones: e164s })
+          .getMany();
+        for (const s of snapshots) {
+          companyByPhone.set(s.phoneE164, {
+            contactId: s.providerContactId ?? null,
+            company: s.providerCompany ?? null,
+            displayName: [s.providerFirstName, s.providerLastName].filter(Boolean).join(' ') || s.providerCompany || null,
+          });
+        }
+      }
+    }
+
     const enriched: any[] = conversations.map(conv => {
       const contactName = conv.conversationName || contactNames.get(conv.participantPhone) || null;
-      return { ...conv, contactName };
+      const { e164 } = normalizeToE164(conv.participantPhone);
+      const snap = e164 ? companyByPhone.get(e164) : null;
+      return {
+        ...conv,
+        contactName,
+        provider: {
+          name: 'openphone',
+          contactId: snap?.contactId ?? null,
+          displayName: snap?.displayName ?? null,
+          company: snap?.company ?? null,
+        },
+      };
     });
 
     // If includeMessages requested, fetch messages + calls for each conversation in parallel batches
