@@ -8,6 +8,8 @@ import { WebhookSubscription } from '../../database/entities/webhook-subscriptio
 import { CommunicationConversation } from '../../database/entities/communication-conversation.entity';
 import { CommunicationMessage } from '../../database/entities/communication-message.entity';
 import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
+import { Business } from '../../database/entities/business.entity';
+import { PhoneNumberAssignment } from '../../database/entities/phone-number-assignment.entity';
 import {
   attributePlatforms,
   tenantsByPlatform,
@@ -17,6 +19,11 @@ import {
   AttributionTenant,
 } from './platform-attribution';
 import {
+  groupWorkspaces,
+  GroupingTenant,
+  GroupingBusiness,
+} from './workspace-grouping';
+import {
   PlatformId,
   PlatformSummary,
   PlatformDetail,
@@ -24,6 +31,7 @@ import {
   PlatformPhoneRow,
   PlatformApiKeyRow,
   PlatformWebhookRow,
+  WorkspaceGroup,
 } from './dto/admin-views.types';
 
 const ALL_PLATFORM_IDS: PlatformId[] = [
@@ -58,6 +66,10 @@ export class PlatformsService {
     private readonly messageRepo: Repository<CommunicationMessage>,
     @InjectRepository(ProductWorkspace)
     private readonly productWorkspaceRepo: Repository<ProductWorkspace>,
+    @InjectRepository(Business)
+    private readonly businessRepo: Repository<Business>,
+    @InjectRepository(PhoneNumberAssignment)
+    private readonly pnaRepo: Repository<PhoneNumberAssignment>,
   ) {}
 
   /**
@@ -98,16 +110,21 @@ export class PlatformsService {
       return {
         ...summary,
         workspaces: [],
+        workspaceGroups: [],
         phoneNumbers: [],
         apiKeys: [],
         webhooks: [],
       };
     }
 
-    const [phones, apiKeys, webhooks] = await Promise.all([
+    const [phones, apiKeys, webhooks, legacyAssignments] = await Promise.all([
       this.phoneRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
       this.apiKeyRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
       this.webhookRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
+      this.pnaRepo
+        .createQueryBuilder('p')
+        .where('p.business_id IN (:...tenantIds)', { tenantIds })
+        .getMany(),
     ]);
 
     const tenantNameById = new Map<string, string>(
@@ -166,13 +183,88 @@ export class PlatformsService {
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
+    // Build the customer-workspace tree (business_identity → name prefix → standalone).
+    const workspaceGroups = await this.buildWorkspaceGroups({
+      tenantIds,
+      tenantById,
+      attribution: bundle.attribution,
+      phones,
+      legacyAssignments,
+    });
+
     return {
       ...summary,
       workspaces: workspaceRows,
+      workspaceGroups,
       phoneNumbers: phoneRows,
       apiKeys: apiKeyRows,
       webhooks: webhookRows,
     };
+  }
+
+  /**
+   * Group the platform's tenants into customer workspaces and dedup'd profiles.
+   * Pure derivation on top of already-loaded data plus a businesses lookup.
+   */
+  private async buildWorkspaceGroups(input: {
+    tenantIds: string[];
+    tenantById: Map<string, Tenant>;
+    attribution: AttributionResult;
+    phones: TenantPhoneNumber[];
+    legacyAssignments: PhoneNumberAssignment[];
+  }): Promise<WorkspaceGroup[]> {
+    const { tenantIds, tenantById, attribution, phones, legacyAssignments } = input;
+
+    // Distinct business_identity_ids referenced by these tenants.
+    const businessIds = Array.from(
+      new Set(
+        tenantIds
+          .map((tid) => tenantById.get(tid)?.businessIdentityId)
+          .filter((bid): bid is string => Boolean(bid)),
+      ),
+    );
+    const businesses =
+      businessIds.length > 0
+        ? await this.businessRepo.find({ where: { id: In(businessIds) } })
+        : [];
+    const businessesById = new Map<string, GroupingBusiness>(
+      businesses.map((b) => [b.id, { id: b.id, name: b.name }]),
+    );
+
+    // Per-tenant phone counts (current).
+    const phoneCountByTenant = new Map<string, number>();
+    for (const p of phones) {
+      phoneCountByTenant.set(
+        p.tenantId,
+        (phoneCountByTenant.get(p.tenantId) ?? 0) + 1,
+      );
+    }
+
+    // Per-tenant legacy presence (any phone_number_assignments row whose
+    // business_id == this tenant_id).
+    const legacyByTenant = new Set<string>();
+    for (const a of legacyAssignments) {
+      if (a.businessId) legacyByTenant.add(a.businessId);
+    }
+
+    const groupingTenants: GroupingTenant[] = tenantIds
+      .map((tid) => tenantById.get(tid))
+      .filter((t): t is Tenant => Boolean(t))
+      .map((t) => {
+        const phoneNumbersCount = phoneCountByTenant.get(t.id) ?? 0;
+        return {
+          id: t.id,
+          name: t.name,
+          businessIdentityId: t.businessIdentityId ?? null,
+          attributionReason:
+            attribution.reasonByTenantId.get(t.id) ?? 'unclassified',
+          phoneNumbersCount,
+          hasLegacy: legacyByTenant.has(t.id),
+          hasCurrent: phoneNumbersCount > 0,
+        };
+      });
+
+    return groupWorkspaces(groupingTenants, businessesById).groups;
   }
 
   /**

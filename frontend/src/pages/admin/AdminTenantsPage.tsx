@@ -21,6 +21,24 @@ import type { Tenant, TenantApiKeyInfo } from '../../types';
 
 const STORED_KEYS_KEY = 'tenantApiFullKeys';
 
+/**
+ * Platform anchor tenant names — these are the four canonical platforms
+ * (LeadBridge, HireFunnel, Service Flow, Callio). They live alongside
+ * customer tenants in the tenants table but are surfaced under the
+ * dedicated Platforms page, so we filter them out of the Workspaces list
+ * to match the new admin information architecture.
+ */
+const ANCHOR_TENANT_NAMES = new Set<string>([
+  'leadbridge',
+  'hirefunnel',
+  'service flow',
+  'callio',
+]);
+
+function isAnchorTenant(t: Tenant): boolean {
+  return ANCHOR_TENANT_NAMES.has((t.name || '').trim().toLowerCase());
+}
+
 function loadStoredKeys(): Record<string, string> {
   try {
     return JSON.parse(localStorage.getItem(STORED_KEYS_KEY) || '{}');
@@ -200,13 +218,28 @@ export default function AdminTenantsPage() {
     );
   }
 
+  const visibleTenants = tenants.filter((t) => !isAnchorTenant(t));
+  const hiddenAnchorCount = tenants.length - visibleTenants.length;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Tenants</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Workspaces</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Create tenants and generate API keys for portal access
+            Customer workspaces backed by the tenants table.
+            {hiddenAnchorCount > 0 && (
+              <>
+                {' '}
+                <span className="text-gray-400">
+                  · {hiddenAnchorCount} platform anchor
+                  {hiddenAnchorCount === 1 ? '' : 's'} hidden — see{' '}
+                  <a href="/admin/platforms" className="text-primary-600 hover:underline">
+                    Platforms
+                  </a>
+                </span>
+              </>
+            )}
           </p>
         </div>
         <button
@@ -214,7 +247,7 @@ export default function AdminTenantsPage() {
           className="btn btn-primary flex items-center gap-2"
         >
           <Plus className="h-4 w-4" />
-          Add Tenant
+          Add Workspace
         </button>
       </div>
 
@@ -237,25 +270,25 @@ export default function AdminTenantsPage() {
             <Building2 className="h-5 w-5 text-blue-600" />
           </div>
           <div>
-            <p className="text-sm text-gray-500">Total Tenants</p>
-            <p className="text-2xl font-bold">{tenants.length}</p>
+            <p className="text-sm text-gray-500">Total Workspaces</p>
+            <p className="text-2xl font-bold">{visibleTenants.length}</p>
           </div>
         </div>
       </div>
 
-      {/* Tenants List */}
+      {/* Workspaces List */}
       <div className="bg-white rounded-lg shadow">
         <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold">Tenants</h2>
+          <h2 className="text-lg font-semibold">Workspaces</h2>
         </div>
-        {tenants.length === 0 ? (
+        {visibleTenants.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
             <Building2 className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-            <p>No tenants yet. Create your first tenant to get started.</p>
+            <p>No workspaces yet. Create your first workspace to get started.</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-200">
-            {tenants.map((tenant) => (
+            {visibleTenants.map((tenant) => (
               <div key={tenant.id} className="p-4">
                 <div className="flex items-center justify-between">
                   <div

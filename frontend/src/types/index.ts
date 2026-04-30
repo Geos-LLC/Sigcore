@@ -273,8 +273,48 @@ export interface PlatformWebhookRow {
   tenantName: string | null;
 }
 
+/**
+ * Profile under a customer workspace. Multiple tenants with the same
+ * (case-insensitive) profile name collapse into one row with duplicateCount > 1.
+ * Mirrors backend ProfileRow.
+ */
+export interface ProfileRow {
+  name: string;
+  duplicateCount: number;
+  tenantIds: string[];
+  phoneNumbersCount: number;
+  hasLegacy: boolean;
+  hasCurrent: boolean;
+  attributionReasons: string[];
+}
+
+export type WorkspaceGroupSource =
+  | 'business_identity'
+  | 'name_prefix'
+  | 'standalone';
+
+/**
+ * Customer workspace inferred from tenant signals. UI-only, derived layer —
+ * no schema change. Mirrors backend WorkspaceGroup.
+ */
+export interface WorkspaceGroup {
+  name: string;
+  source: WorkspaceGroupSource;
+  businessIdentityId: string | null;
+  profiles: ProfileRow[];
+  profileCount: number;
+  totalTenantCount: number;
+  totalPhoneNumbersCount: number;
+  attributionReasons: string[];
+}
+
 export interface PlatformDetail extends PlatformSummary {
   workspaces: PlatformWorkspaceRow[];
+  /**
+   * Customer workspace grouping (derived). Additive on the wire — the
+   * flat `workspaces` array is unchanged.
+   */
+  workspaceGroups: WorkspaceGroup[];
   phoneNumbers: PlatformPhoneRow[];
   apiKeys: PlatformApiKeyRow[];
   webhooks: PlatformWebhookRow[];

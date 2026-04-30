@@ -13,9 +13,17 @@ import {
   ChevronUp,
   AlertCircle,
   HelpCircle,
+  Building2,
+  MapPin,
+  Archive,
+  CheckCircle2,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type { PlatformDetail } from '../../types';
+import type {
+  PlatformDetail,
+  ProfileRow,
+  WorkspaceGroup,
+} from '../../types';
 
 type Section = 'workspaces' | 'phoneNumbers' | 'apiKeys' | 'webhooks';
 
@@ -123,43 +131,23 @@ export default function AdminPlatformDetailPage() {
         />
       </div>
 
-      {/* Workspaces */}
+      {/* Workspaces (grouped tree: Workspace → Profiles) */}
       <Collapsible
         title="Workspaces"
         icon={<Users className="h-4 w-4" />}
-        count={detail?.workspaces.length ?? 0}
+        count={detail?.workspaceGroups?.length ?? 0}
         open={expanded.workspaces}
         onToggle={() => toggle('workspaces')}
       >
-        {detail && detail.workspaces.length > 0 ? (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-xs uppercase text-gray-500">
-              <tr>
-                <th className="text-left px-4 py-2">Name</th>
-                <th className="text-left px-4 py-2">Matched via</th>
-                <th className="text-left px-4 py-2">Status</th>
-                <th className="text-left px-4 py-2">Created</th>
-                <th className="text-left px-4 py-2">ID</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {detail.workspaces.map((w) => (
-                <tr key={w.id}>
-                  <td className="px-4 py-2 font-medium text-gray-900">{w.name}</td>
-                  <td className="px-4 py-2">
-                    <AttributionReasonBadge reason={w.attributionReason} />
-                  </td>
-                  <td className="px-4 py-2">
-                    <StatusBadge value={w.status} />
-                  </td>
-                  <td className="px-4 py-2 text-gray-500">
-                    {new Date(w.createdAt).toLocaleDateString()}
-                  </td>
-                  <td className="px-4 py-2 font-mono text-xs text-gray-400">{w.id}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {detail && detail.workspaceGroups && detail.workspaceGroups.length > 0 ? (
+          <div className="divide-y divide-gray-200">
+            {detail.workspaceGroups.map((wg, idx) => (
+              <WorkspaceGroupRow
+                key={`${wg.source}-${wg.businessIdentityId ?? wg.name}-${idx}`}
+                group={wg}
+              />
+            ))}
+          </div>
         ) : (
           <Empty message="No workspaces attributed to this platform." />
         )}
@@ -349,6 +337,126 @@ function Collapsible({
 
 function Empty({ message }: { message: string }) {
   return <div className="px-4 py-6 text-center text-sm text-gray-400">{message}</div>;
+}
+
+/**
+ * Renders one customer workspace (with N profiles inside). Source-coded:
+ *   business_identity → blue (highest confidence — schema-linked)
+ *   name_prefix       → indigo (heuristic match on tenants.name)
+ *   standalone        → gray (1 tenant = 1 workspace = 1 profile)
+ */
+function WorkspaceGroupRow({ group }: { group: WorkspaceGroup }) {
+  const [open, setOpen] = useState(true);
+
+  const sourceCls =
+    group.source === 'business_identity'
+      ? 'bg-blue-50 text-blue-700 border border-blue-200'
+      : group.source === 'name_prefix'
+      ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+      : 'bg-gray-100 text-gray-600 border border-gray-200';
+
+  const sourceLabel =
+    group.source === 'business_identity'
+      ? 'business identity'
+      : group.source === 'name_prefix'
+      ? 'name prefix'
+      : 'standalone';
+
+  return (
+    <div className="px-4 py-3">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-3 hover:bg-gray-50 -mx-2 px-2 py-1 rounded"
+      >
+        <Building2 className="h-4 w-4 text-gray-400 flex-shrink-0" />
+        <span className="font-medium text-gray-900 truncate">{group.name}</span>
+        <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono ${sourceCls}`}>
+          {sourceLabel}
+        </span>
+        <span className="text-xs text-gray-500 ml-auto flex-shrink-0">
+          <span className="tabular-nums">{group.profileCount}</span>{' '}
+          profile{group.profileCount === 1 ? '' : 's'}
+          {group.totalTenantCount !== group.profileCount && (
+            <>
+              {' '}
+              <span className="text-amber-600">
+                · {group.totalTenantCount} tenant rows
+              </span>
+            </>
+          )}
+          {group.totalPhoneNumbersCount > 0 && (
+            <>
+              {' '}
+              · <Phone className="h-3 w-3 inline -mt-0.5" /> {group.totalPhoneNumbersCount}
+            </>
+          )}
+        </span>
+        {open ? (
+          <ChevronUp className="h-4 w-4 text-gray-400 flex-shrink-0" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-gray-400 flex-shrink-0" />
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-2 ml-7 space-y-1.5">
+          {group.profiles.map((p, i) => (
+            <ProfileItem key={`${p.name}-${i}`} profile={p} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProfileItem({ profile }: { profile: ProfileRow }) {
+  const isDup = profile.duplicateCount > 1;
+  return (
+    <div className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50">
+      <MapPin className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+      <span className="text-gray-900">{profile.name}</span>
+
+      {isDup && (
+        <span
+          className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-100 text-amber-700 border border-amber-200"
+          title={`${profile.duplicateCount} tenant rows collapsed: ${profile.tenantIds.join(', ')}`}
+        >
+          ×{profile.duplicateCount} duplicates
+        </span>
+      )}
+
+      <span className="ml-auto flex items-center gap-2 text-xs">
+        {profile.hasCurrent && (
+          <span
+            className="inline-flex items-center gap-0.5 text-green-700"
+            title="Has rows in tenant_phone_numbers"
+          >
+            <CheckCircle2 className="h-3 w-3" />
+            <span className="tabular-nums">{profile.phoneNumbersCount}</span>
+          </span>
+        )}
+        {profile.hasLegacy && (
+          <span
+            className="inline-flex items-center gap-0.5 text-amber-700"
+            title="Has rows in phone_number_assignments (legacy)"
+          >
+            <Archive className="h-3 w-3" />
+            legacy
+          </span>
+        )}
+        {profile.attributionReasons.length === 1 ? (
+          <AttributionReasonBadge reason={profile.attributionReasons[0]} />
+        ) : profile.attributionReasons.length > 1 ? (
+          <span
+            className="px-1.5 py-0.5 text-[10px] rounded bg-gray-100 text-gray-600 border border-gray-200"
+            title={profile.attributionReasons.join(', ')}
+          >
+            {profile.attributionReasons.length} reasons
+          </span>
+        ) : null}
+      </span>
+    </div>
+  );
 }
 
 function StatusBadge({ value }: { value: string }) {

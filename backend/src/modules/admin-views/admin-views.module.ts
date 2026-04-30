@@ -10,6 +10,7 @@ import { SmsMessage } from '../../database/entities/sms-message.entity';
 import { CommunicationConversation } from '../../database/entities/communication-conversation.entity';
 import { CommunicationMessage } from '../../database/entities/communication-message.entity';
 import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
+import { Business } from '../../database/entities/business.entity';
 import { PlatformsController } from './platforms.controller';
 import { PlatformsService } from './platforms.service';
 import { InventoryController } from './inventory.controller';
@@ -39,6 +40,7 @@ import { LegacyService } from './legacy.service';
       CommunicationConversation,
       CommunicationMessage,
       ProductWorkspace,
+      Business,
     ]),
   ],
   controllers: [PlatformsController, InventoryController, LegacyController],

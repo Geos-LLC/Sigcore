@@ -66,8 +66,49 @@ export interface PlatformWebhookRow {
   tenantName: string | null;
 }
 
+/**
+ * Profile under a customer workspace. Multiple tenants with the same
+ * (case-insensitive) profile name collapse into one row with duplicateCount > 1.
+ */
+export interface ProfileRow {
+  name: string;
+  duplicateCount: number;
+  tenantIds: string[];
+  phoneNumbersCount: number;
+  hasLegacy: boolean;
+  hasCurrent: boolean;
+  attributionReasons: string[];
+}
+
+/** Source rule that produced this workspace group. */
+export type WorkspaceGroupSource =
+  | 'business_identity'
+  | 'name_prefix'
+  | 'standalone';
+
+/**
+ * Customer workspace inferred from tenant signals (business_identity_id
+ * → name prefix → standalone fallback). UI-only, derived layer — no schema.
+ */
+export interface WorkspaceGroup {
+  name: string;
+  source: WorkspaceGroupSource;
+  businessIdentityId: string | null;
+  profiles: ProfileRow[];
+  profileCount: number;
+  totalTenantCount: number;
+  totalPhoneNumbersCount: number;
+  attributionReasons: string[];
+}
+
 export interface PlatformDetail extends PlatformSummary {
   workspaces: PlatformWorkspaceRow[];
+  /**
+   * Customer workspaces inferred from tenant signals — see workspace-grouping.ts.
+   * Additive on the wire: the flat `workspaces` array above is unchanged so any
+   * existing consumers keep working.
+   */
+  workspaceGroups: WorkspaceGroup[];
   phoneNumbers: PlatformPhoneRow[];
   apiKeys: PlatformApiKeyRow[];
   webhooks: PlatformWebhookRow[];
