@@ -13,6 +13,12 @@ import type {
   WorkspaceApiKey,
   WorkspaceApiKeyCreateResponse,
   ApiResponse,
+  PlatformSummary,
+  PlatformDetail,
+  InventoryRow,
+  InventoryFilters,
+  LegacyAssignmentGroup,
+  LegacySmsRow,
 } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -358,6 +364,45 @@ class AdminApiService {
     if (options?.provider) params.append('provider', options.provider);
     const response = await this.client.get<{ data: any[]; meta: any }>(`/conversations?${params.toString()}`);
     return { conversations: response.data.data, meta: response.data.meta };
+  }
+
+  // ==================== Admin Views (read-only) ====================
+  // Backed by backend/src/modules/admin-views — no write paths.
+
+  async getPlatforms(): Promise<PlatformSummary[]> {
+    const response = await this.client.get<ApiResponse<PlatformSummary[]>>('/admin/platforms');
+    return response.data.data;
+  }
+
+  async getPlatform(id: string): Promise<PlatformDetail> {
+    const response = await this.client.get<ApiResponse<PlatformDetail>>(`/admin/platforms/${encodeURIComponent(id)}`);
+    return response.data.data;
+  }
+
+  async getPhoneNumberInventory(filters?: InventoryFilters): Promise<InventoryRow[]> {
+    const params = new URLSearchParams();
+    if (filters?.model) params.append('model', filters.model);
+    if (filters?.provider) params.append('provider', filters.provider);
+    if (filters?.limit) params.append('limit', String(filters.limit));
+    const qs = params.toString();
+    const response = await this.client.get<ApiResponse<InventoryRow[]>>(`/admin/inventory/phone-numbers${qs ? `?${qs}` : ''}`);
+    return response.data.data;
+  }
+
+  async getLegacyAssignments(): Promise<LegacyAssignmentGroup[]> {
+    const response = await this.client.get<ApiResponse<LegacyAssignmentGroup[]>>('/admin/legacy/assignments');
+    return response.data.data;
+  }
+
+  async getLegacyDuplications(): Promise<InventoryRow[]> {
+    const response = await this.client.get<ApiResponse<InventoryRow[]>>('/admin/legacy/duplications');
+    return response.data.data;
+  }
+
+  async getLegacySmsMessages(limit?: number): Promise<LegacySmsRow[]> {
+    const qs = limit ? `?limit=${limit}` : '';
+    const response = await this.client.get<ApiResponse<LegacySmsRow[]>>(`/admin/legacy/sms-messages${qs}`);
+    return response.data.data;
   }
 }
 
