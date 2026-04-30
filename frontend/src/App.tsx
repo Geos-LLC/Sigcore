@@ -16,6 +16,10 @@ import AdminSmsTestPage from './pages/admin/AdminSmsTestPage';
 import AdminProvisioningTestPage from './pages/admin/AdminProvisioningTestPage';
 import AdminSyncMonitorPage from './pages/admin/AdminSyncMonitorPage';
 import AdminWhatsAppTestPage from './pages/admin/AdminWhatsAppTestPage';
+import AdminPlatformsPage from './pages/admin/AdminPlatformsPage';
+import AdminPlatformDetailPage from './pages/admin/AdminPlatformDetailPage';
+import AdminPhoneNumbersInventoryPage from './pages/admin/AdminPhoneNumbersInventoryPage';
+import AdminLegacyPage from './pages/admin/AdminLegacyPage';
 
 // Portal
 import TenantPortalLoginPage from './pages/portal/TenantPortalLoginPage';
@@ -51,6 +55,10 @@ export default function App() {
         <Route path="whatsapp" element={<AdminWhatsAppTestPage />} />
         <Route path="provisioning" element={<AdminProvisioningTestPage />} />
         <Route path="sync-monitor" element={<AdminSyncMonitorPage />} />
+        <Route path="platforms" element={<AdminPlatformsPage />} />
+        <Route path="platforms/:id" element={<AdminPlatformDetailPage />} />
+        <Route path="phone-numbers" element={<AdminPhoneNumbersInventoryPage />} />
+        <Route path="legacy" element={<AdminLegacyPage />} />
       </Route>
 
       {/* Portal */}
