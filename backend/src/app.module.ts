@@ -11,6 +11,7 @@ import { TenantsModule } from './modules/tenants/tenants.module';
 import { ApiModule } from './modules/api/api.module';
 import { EmailModule } from './modules/email/email.module';
 import { BusinessIdentityModule } from './modules/business-identity/business-identity.module';
+import { AdminViewsModule } from './modules/admin-views/admin-views.module';
 import { S3Module } from './shared/storage/s3.module';
 import { APP_GUARD } from '@nestjs/core';
 import { HealthController } from './health.controller';
@@ -58,6 +59,7 @@ import { RequireTenantScopeGuard } from './modules/auth/require-tenant-scope.gua
     ApiModule,
     EmailModule,
     BusinessIdentityModule,
+    AdminViewsModule,
     S3Module,
   ],
   controllers: [HealthController, DocsController, BootstrapController],
