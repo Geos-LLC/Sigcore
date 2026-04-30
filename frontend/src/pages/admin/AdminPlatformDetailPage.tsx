@@ -136,6 +136,7 @@ export default function AdminPlatformDetailPage() {
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
                 <th className="text-left px-4 py-2">Name</th>
+                <th className="text-left px-4 py-2">Matched via</th>
                 <th className="text-left px-4 py-2">Status</th>
                 <th className="text-left px-4 py-2">Created</th>
                 <th className="text-left px-4 py-2">ID</th>
@@ -145,6 +146,9 @@ export default function AdminPlatformDetailPage() {
               {detail.workspaces.map((w) => (
                 <tr key={w.id}>
                   <td className="px-4 py-2 font-medium text-gray-900">{w.name}</td>
+                  <td className="px-4 py-2">
+                    <AttributionReasonBadge reason={w.attributionReason} />
+                  </td>
                   <td className="px-4 py-2">
                     <StatusBadge value={w.status} />
                   </td>
@@ -359,5 +363,45 @@ function StatusBadge({ value }: { value: string }) {
       : 'bg-blue-50 text-blue-600';
   return (
     <span className={`px-2 py-0.5 text-xs rounded-full ${cls}`}>{value}</span>
+  );
+}
+
+/**
+ * Renders the platform-attribution reason returned by the backend
+ * (lexicon: 'anchor_name' | 'product_workspace:<type>' |
+ *           'webhook_url:<host>' | 'api_key_name:<token>' | 'unclassified').
+ *
+ * Color encodes confidence — anchor (highest) is green, then product_workspace
+ * (blue), webhook_url (indigo), api_key_name (amber), unclassified (gray).
+ */
+function AttributionReasonBadge({ reason }: { reason: string }) {
+  if (!reason || reason === 'unclassified') {
+    return (
+      <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-500" title="No signal matched">
+        unclassified
+      </span>
+    );
+  }
+
+  const [head, tail] = reason.split(':', 2);
+  const cls =
+    head === 'anchor_name'
+      ? 'bg-green-100 text-green-700 border border-green-200'
+      : head === 'product_workspace'
+      ? 'bg-blue-50 text-blue-700 border border-blue-200'
+      : head === 'webhook_url'
+      ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+      : head === 'api_key_name'
+      ? 'bg-amber-50 text-amber-700 border border-amber-200'
+      : 'bg-gray-100 text-gray-600';
+
+  const label = tail ? `${head.replace(/_/g, ' ')}: ${tail}` : head.replace(/_/g, ' ');
+  return (
+    <span
+      className={`px-2 py-0.5 text-xs rounded-full font-mono ${cls}`}
+      title={`Attribution signal: ${reason}`}
+    >
+      {label}
+    </span>
   );
 }

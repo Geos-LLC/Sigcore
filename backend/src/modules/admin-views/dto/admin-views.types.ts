@@ -26,6 +26,15 @@ export interface PlatformWorkspaceRow {
   name: string;
   status: string;
   createdAt: string;
+  /**
+   * Why this tenant was attributed to this platform. Lexicon:
+   *   'anchor_name'                       — tenants.name == platform anchor
+   *   'product_workspace:<type>'          — product_workspaces.product_type
+   *   'webhook_url:<host-token>'          — webhook URL hostname pattern
+   *   'api_key_name:<token>'              — api_keys.name pattern
+   *   'unclassified'                      — no signal matched
+   */
+  attributionReason: string;
 }
 
 export interface PlatformPhoneRow {

@@ -9,6 +9,7 @@ import { WebhookSubscription } from '../../database/entities/webhook-subscriptio
 import { SmsMessage } from '../../database/entities/sms-message.entity';
 import { CommunicationConversation } from '../../database/entities/communication-conversation.entity';
 import { CommunicationMessage } from '../../database/entities/communication-message.entity';
+import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
 import { PlatformsController } from './platforms.controller';
 import { PlatformsService } from './platforms.service';
 import { InventoryController } from './inventory.controller';
@@ -37,6 +38,7 @@ import { LegacyService } from './legacy.service';
       SmsMessage,
       CommunicationConversation,
       CommunicationMessage,
+      ProductWorkspace,
     ]),
   ],
   controllers: [PlatformsController, InventoryController, LegacyController],

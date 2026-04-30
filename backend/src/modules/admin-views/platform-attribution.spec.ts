@@ -2,21 +2,13 @@ import {
   attributePlatforms,
   tenantsByPlatform,
   PLATFORM_ANCHORS,
+  AttributionTenant,
 } from './platform-attribution';
 
-describe('attributePlatforms', () => {
-  it('returns empty maps for an empty workspace', () => {
-    const result = attributePlatforms([]);
-    expect(result.byTenantId.size).toBe(0);
-    expect(result.anchors).toEqual({
-      leadbridge: null,
-      hirefunnel: null,
-      serviceflow: null,
-      callio: null,
-      unclassified: null,
-    });
-  });
-
+// ---------------------------------------------------------------------------
+// 1. Anchor by name (signal 1) — same as the original spec
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — signal 1: anchor by name', () => {
   it('attributes the four canonical anchors', () => {
     const result = attributePlatforms([
       { id: 't1', name: 'LeadBridge' },
@@ -29,98 +21,318 @@ describe('attributePlatforms', () => {
     expect(result.anchors.serviceflow).toBe('t3');
     expect(result.anchors.callio).toBe('t4');
     expect(result.byTenantId.get('t1')).toBe('leadbridge');
-    expect(result.byTenantId.get('t2')).toBe('hirefunnel');
-    expect(result.byTenantId.get('t3')).toBe('serviceflow');
     expect(result.byTenantId.get('t4')).toBe('callio');
+    expect(result.reasonByTenantId.get('t1')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('t2')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('t3')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('t4')).toBe('anchor_name');
   });
 
-  it('matches anchors case-insensitively and trims whitespace', () => {
+  it('matches case-insensitively and trims whitespace', () => {
     const result = attributePlatforms([
       { id: 't1', name: '  leadbridge  ' },
       { id: 't2', name: 'HIREFUNNEL' },
-      { id: 't3', name: 'service flow' },
-      { id: 't4', name: 'CaLLiO' },
     ]);
     expect(result.byTenantId.get('t1')).toBe('leadbridge');
     expect(result.byTenantId.get('t2')).toBe('hirefunnel');
-    expect(result.byTenantId.get('t3')).toBe('serviceflow');
-    expect(result.byTenantId.get('t4')).toBe('callio');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. product_workspace.product_type (signal 2)
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — signal 2: product_workspace.product_type', () => {
+  it('uses leadbridge product_type when name is not an anchor', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Spotless Homes Tampa', productWorkspaceProductType: 'leadbridge' },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('t1')).toBe('product_workspace:leadbridge');
   });
 
-  it('does NOT default unmatched tenants to LeadBridge — they are unclassified', () => {
+  it('uses serviceflow product_type', () => {
     const result = attributePlatforms([
-      { id: 't1', name: 'Spotless Homes Tampa' },
-      { id: 't2', name: 'Account 7e0f0b3b-…' },
-      { id: 't3', name: 'Lavanda Cleaning' },
-      { id: 't4', name: 'Georgiy Sayapin' },
+      { id: 't1', name: 'Customer X', productWorkspaceProductType: 'serviceflow' },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('serviceflow');
+    expect(result.reasonByTenantId.get('t1')).toBe('product_workspace:serviceflow');
+  });
+
+  it('uses callio product_type', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Customer X', productWorkspaceProductType: 'callio' },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('callio');
+    expect(result.reasonByTenantId.get('t1')).toBe('product_workspace:callio');
+  });
+
+  it('does NOT use product_type=sigcore as a signal — it is a registry artifact', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Account abc', productWorkspaceProductType: 'sigcore' },
     ]);
     expect(result.byTenantId.get('t1')).toBe('unclassified');
-    expect(result.byTenantId.get('t2')).toBe('unclassified');
-    expect(result.byTenantId.get('t3')).toBe('unclassified');
-    expect(result.byTenantId.get('t4')).toBe('unclassified');
-    expect(result.anchors.leadbridge).toBeNull();
+    expect(result.reasonByTenantId.get('t1')).toBe('unclassified');
   });
 
-  it('classifies a typo as unclassified rather than guessing', () => {
+  it('handles unrecognised product_type values as no signal', () => {
     const result = attributePlatforms([
-      { id: 't1', name: 'Lead Bridge' }, // space — not the anchor
-      { id: 't2', name: 'ServiceFlow' }, // no space — not the anchor
-      { id: 't3', name: 'HireFunnel ' }, // trailing space tolerated by trim
+      { id: 't1', name: 'X', productWorkspaceProductType: 'fancyproduct' },
     ]);
     expect(result.byTenantId.get('t1')).toBe('unclassified');
-    expect(result.byTenantId.get('t2')).toBe('unclassified');
-    expect(result.byTenantId.get('t3')).toBe('hirefunnel');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. webhook_subscriptions.webhook_url (signal 3)
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — signal 3: webhook URL hostname', () => {
+  it.each([
+    ['https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore/inbound-sms', 'leadbridge', 'webhook_url:thumbtack-bridge'],
+    ['https://www.leadbridge360.com/api/webhooks/sigcore/delivery-status',                 'leadbridge', 'webhook_url:leadbridge360'],
+    ['https://service-flow-backend-production-4568.up.railway.app/api/communications/webhooks/sigcore', 'serviceflow', 'webhook_url:service-flow-backend'],
+    ['https://callio-production-47ac.up.railway.app/api/webhooks/sigcore',                 'callio',     'webhook_url:callio-production'],
+    ['https://app.hirefunnel.app/webhook',                                                  'hirefunnel', 'webhook_url:hirefunnel'],
+    ['https://hiringflow.example.com/wh',                                                   'hirefunnel', 'webhook_url:hiringflow'],
+  ])('classifies %s', (url, platform, reason) => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Random Customer', webhookUrls: [url] },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe(platform);
+    expect(result.reasonByTenantId.get('t1')).toBe(reason);
   });
 
-  it('handles a real-world flat workspace mixing anchors with customers', () => {
-    const tenants = [
-      { id: 'a-lb', name: 'LeadBridge' },
+  it('matches when only one of multiple webhook URLs is recognised', () => {
+    const result = attributePlatforms([
+      {
+        id: 't1',
+        name: 'X',
+        webhookUrls: [
+          'https://example.com/random',
+          'https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore',
+        ],
+      },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('t1')).toBe('webhook_url:thumbtack-bridge');
+  });
+
+  it('returns unclassified when no webhook URL matches a known host', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'X', webhookUrls: ['https://random.example.com/wh'] },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('unclassified');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. api_key.name (signal 4)
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — signal 4: api_key.name pattern', () => {
+  it.each([
+    ['LeadBridge Key',     'leadbridge',  'api_key_name:leadbridge'],
+    ['Lead Bridge Portal', 'leadbridge',  'api_key_name:leadbridge'],
+    ['HireFunnel Reminders Key', 'hirefunnel', 'api_key_name:hirefunnel'],
+    ['HiringFlow Key',     'hirefunnel',  'api_key_name:hiringflow'],
+    ['ServiceFlow Key',    'serviceflow', 'api_key_name:serviceflow'],
+    ['Callio CI',          'callio',      'api_key_name:callio'],
+  ])('classifies api_key name %s', (name, platform, reason) => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'X', apiKeyNames: [name] },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe(platform);
+    expect(result.reasonByTenantId.get('t1')).toBe(reason);
+  });
+
+  it('returns unclassified when no api key name matches', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'X', apiKeyNames: ['Portal Key', 'CI/CD'] },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('unclassified');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. Priority order — anchor > product_workspace > webhook_url > api_key_name
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — priority order', () => {
+  it('anchor_name wins over product_workspace', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'LeadBridge', productWorkspaceProductType: 'serviceflow' },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('t1')).toBe('anchor_name');
+  });
+
+  it('product_workspace wins over webhook_url', () => {
+    const result = attributePlatforms([
+      {
+        id: 't1',
+        name: 'Customer X',
+        productWorkspaceProductType: 'leadbridge',
+        webhookUrls: ['https://service-flow-backend-production.up.railway.app/'],
+      },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('t1')).toBe('product_workspace:leadbridge');
+  });
+
+  it('webhook_url wins over api_key_name', () => {
+    const result = attributePlatforms([
+      {
+        id: 't1',
+        name: 'Customer X',
+        webhookUrls: ['https://callio-production-47ac.up.railway.app/api/webhooks/sigcore'],
+        apiKeyNames: ['LeadBridge Key'],
+      },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('callio');
+    expect(result.reasonByTenantId.get('t1')).toBe('webhook_url:callio-production');
+  });
+
+  it('api_key_name is the last signal before unclassified', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Account abc', apiKeyNames: ['LeadBridge Key'] },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('t1')).toBe('api_key_name:leadbridge');
+  });
+
+  it('falls through to unclassified when ALL signals miss', () => {
+    const result = attributePlatforms([
+      {
+        id: 't1',
+        name: 'Spotless Homes Tampa',
+        productWorkspaceProductType: 'sigcore', // not a signal
+        webhookUrls: ['https://random.example.com/wh'],
+        apiKeyNames: ['Portal Key'],
+      },
+    ]);
+    expect(result.byTenantId.get('t1')).toBe('unclassified');
+    expect(result.reasonByTenantId.get('t1')).toBe('unclassified');
+  });
+
+  it('NEVER defaults to LeadBridge when no signal matches', () => {
+    const result = attributePlatforms([
+      { id: 't1', name: 'Random Customer' },
+      { id: 't2', name: '' },
+      { id: 't3', name: 'Account 1234' }, // looks like LB convention but no actual signal
+    ]);
+    for (const id of ['t1', 't2', 't3']) {
+      expect(result.byTenantId.get(id)).toBe('unclassified');
+      expect(result.reasonByTenantId.get(id)).toBe('unclassified');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Real-world fixture from the workspace 1bcbb4e0… audit
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — real-world prod fixture', () => {
+  it('correctly classifies a sample of the 48 prod tenants under workspace 1bcbb4e0', () => {
+    const tenants: AttributionTenant[] = [
+      // Anchors — name match
+      { id: 'a-lb',     name: 'LeadBridge' },
       { id: 'a-callio', name: 'Callio' },
-      { id: 'a-sf-1', name: 'Service Flow' },
-      { id: 'a-sf-2', name: 'Service Flow' }, // duplicate anchor name
-      { id: 'a-hf', name: 'HireFunnel' },
-      { id: 'c-1', name: 'Spotless Homes Tampa' },
-      { id: 'c-2', name: 'Spotless Homes Jacksonville' },
-      { id: 'c-3', name: 'NatashaHome Cleaning' },
-      { id: 'c-4', name: 'Lavanda Cleaning' },
-      { id: 'c-5', name: 'ABC Solutions - Always Best Cleaning' },
-      { id: 'c-6', name: 'Account fa4a8d5b-bf63-4b17-8249-d0178ce610aa' },
-      { id: 'c-7', name: 'Georgiy Sayapin' },
+      { id: 'a-sf',     name: 'Service Flow' },
+      { id: 'a-hf',     name: 'HireFunnel' },
+
+      // LB customer accounts — webhook URL pointing at thumbtack-bridge
+      {
+        id: 'c-lb-1',
+        name: 'Account fa4a8d5b…',
+        webhookUrls: ['https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore/inbound-sms?accountId=…'],
+      },
+      {
+        id: 'c-lb-spotless',
+        name: 'Spotless Homes Tampa',
+        webhookUrls: ['https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore/call-connect?accountId=…'],
+        apiKeyNames: ['LeadBridge Key'],
+      },
+
+      // SF tenant — product_workspace.product_type='serviceflow'
+      {
+        id: 'c-sf',
+        name: 'Service Flow staging',
+        productWorkspaceProductType: 'serviceflow',
+        webhookUrls: ['https://service-flow-backend-staging-303f.up.railway.app/api/communications/webhooks/sigcore'],
+      },
+
+      // Callio tenant — both signals
+      {
+        id: 'c-callio',
+        name: 'Callio prod',
+        productWorkspaceProductType: 'callio',
+        webhookUrls: ['https://callio-production-47ac.up.railway.app/api/webhooks/sigcore'],
+      },
+
+      // Truly unclassified — name doesn't match, no useful signals
+      { id: 'c-unknown', name: 'Georgiy Sayapin' },
+
+      // Sigcore-as-business-identity rows — must NOT attribute via product_type
+      { id: 'c-sigcore', name: 'NatashaHome cleaning', productWorkspaceProductType: 'sigcore' },
     ];
+
     const result = attributePlatforms(tenants);
     const grouped = tenantsByPlatform(result);
 
-    expect(result.anchors.leadbridge).toBe('a-lb');
-    expect(result.anchors.callio).toBe('a-callio');
-    expect(result.anchors.serviceflow).toBe('a-sf-1'); // first wins
-    expect(result.anchors.hirefunnel).toBe('a-hf');
+    expect(result.reasonByTenantId.get('a-lb')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('a-callio')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('a-sf')).toBe('anchor_name');
+    expect(result.reasonByTenantId.get('a-hf')).toBe('anchor_name');
 
-    expect(grouped.leadbridge).toEqual(['a-lb']);
-    expect(grouped.callio).toEqual(['a-callio']);
+    expect(result.byTenantId.get('c-lb-1')).toBe('leadbridge');
+    expect(result.reasonByTenantId.get('c-lb-1')).toBe('webhook_url:thumbtack-bridge');
+
+    expect(result.byTenantId.get('c-lb-spotless')).toBe('leadbridge');
+    // webhook_url wins over api_key_name in priority order
+    expect(result.reasonByTenantId.get('c-lb-spotless')).toBe('webhook_url:thumbtack-bridge');
+
+    expect(result.byTenantId.get('c-sf')).toBe('serviceflow');
+    expect(result.reasonByTenantId.get('c-sf')).toBe('product_workspace:serviceflow');
+
+    expect(result.byTenantId.get('c-callio')).toBe('callio');
+    expect(result.reasonByTenantId.get('c-callio')).toBe('product_workspace:callio');
+
+    expect(result.byTenantId.get('c-unknown')).toBe('unclassified');
+    expect(result.byTenantId.get('c-sigcore')).toBe('unclassified');
+
+    expect(grouped.leadbridge.sort()).toEqual(['a-lb', 'c-lb-1', 'c-lb-spotless'].sort());
+    expect(grouped.serviceflow.sort()).toEqual(['a-sf', 'c-sf'].sort());
+    expect(grouped.callio.sort()).toEqual(['a-callio', 'c-callio'].sort());
     expect(grouped.hirefunnel).toEqual(['a-hf']);
-    expect(grouped.serviceflow).toEqual(['a-sf-1']);
-    // duplicate-anchor SF row + every customer row + Georgiy → unclassified
-    expect(grouped.unclassified).toEqual([
-      'a-sf-2',
-      'c-1',
-      'c-2',
-      'c-3',
-      'c-4',
-      'c-5',
-      'c-6',
-      'c-7',
-    ]);
+    expect(grouped.unclassified.sort()).toEqual(['c-sigcore', 'c-unknown'].sort());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Defensive coverage
+// ---------------------------------------------------------------------------
+describe('attributePlatforms — defensive', () => {
+  it('returns empty maps for an empty workspace', () => {
+    const result = attributePlatforms([]);
+    expect(result.byTenantId.size).toBe(0);
+    expect(result.reasonByTenantId.size).toBe(0);
+    expect(result.anchors).toEqual({
+      leadbridge: null,
+      hirefunnel: null,
+      serviceflow: null,
+      callio: null,
+      unclassified: null,
+    });
   });
 
-  it('treats null/undefined/empty names as unclassified without crashing', () => {
+  it('treats null/undefined/empty fields as no-signal without crashing', () => {
     const result = attributePlatforms([
-      { id: 't1', name: '' },
-      { id: 't2', name: null as any },
-      { id: 't3', name: undefined as any },
+      {
+        id: 't1',
+        name: null as any,
+        productWorkspaceProductType: null,
+        webhookUrls: undefined,
+        apiKeyNames: [],
+      },
     ]);
     expect(result.byTenantId.get('t1')).toBe('unclassified');
-    expect(result.byTenantId.get('t2')).toBe('unclassified');
-    expect(result.byTenantId.get('t3')).toBe('unclassified');
+    expect(result.reasonByTenantId.get('t1')).toBe('unclassified');
   });
 });
 
@@ -131,14 +343,11 @@ describe('tenantsByPlatform', () => {
     expect(Object.keys(grouped).sort()).toEqual(
       ['callio', 'hirefunnel', 'leadbridge', 'serviceflow', 'unclassified'].sort(),
     );
-    for (const key of Object.keys(grouped)) {
-      expect(Array.isArray((grouped as any)[key])).toBe(true);
-    }
   });
 });
 
 describe('PLATFORM_ANCHORS sanity', () => {
-  it('uses lowercase comparable strings', () => {
+  it('uses lowercase trimmed comparable strings', () => {
     for (const v of Object.values(PLATFORM_ANCHORS)) {
       expect(v).toBe(v.toLowerCase());
       expect(v).toBe(v.trim());

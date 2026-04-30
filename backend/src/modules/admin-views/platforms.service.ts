@@ -7,12 +7,14 @@ import { ApiKey } from '../../database/entities/api-key.entity';
 import { WebhookSubscription } from '../../database/entities/webhook-subscription.entity';
 import { CommunicationConversation } from '../../database/entities/communication-conversation.entity';
 import { CommunicationMessage } from '../../database/entities/communication-message.entity';
+import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
 import {
   attributePlatforms,
   tenantsByPlatform,
   PLATFORM_ANCHORS,
   PLATFORM_DISPLAY_NAMES,
   AttributionResult,
+  AttributionTenant,
 } from './platform-attribution';
 import {
   PlatformId,
@@ -32,6 +34,11 @@ const ALL_PLATFORM_IDS: PlatformId[] = [
   'unclassified',
 ];
 
+interface SignalBundle {
+  attribution: AttributionResult;
+  tenants: Tenant[];
+}
+
 @Injectable()
 export class PlatformsService {
   private readonly logger = new Logger(PlatformsService.name);
@@ -49,6 +56,8 @@ export class PlatformsService {
     private readonly conversationRepo: Repository<CommunicationConversation>,
     @InjectRepository(CommunicationMessage)
     private readonly messageRepo: Repository<CommunicationMessage>,
+    @InjectRepository(ProductWorkspace)
+    private readonly productWorkspaceRepo: Repository<ProductWorkspace>,
   ) {}
 
   /**
@@ -56,13 +65,12 @@ export class PlatformsService {
    * counts scoped to the calling workspace.
    */
   async listPlatforms(workspaceId: string): Promise<PlatformSummary[]> {
-    const attribution = await this.getAttribution(workspaceId);
-    const grouped = tenantsByPlatform(attribution);
+    const bundle = await this.loadSignals(workspaceId);
+    const grouped = tenantsByPlatform(bundle.attribution);
 
     const summaries: PlatformSummary[] = [];
     for (const id of ALL_PLATFORM_IDS) {
-      const tenantIds = grouped[id];
-      summaries.push(await this.buildSummary(id, workspaceId, tenantIds, attribution));
+      summaries.push(await this.buildSummary(id, workspaceId, grouped[id], bundle.attribution));
     }
     return summaries;
   }
@@ -80,11 +88,11 @@ export class PlatformsService {
     }
     const id = platformId as PlatformId;
 
-    const attribution = await this.getAttribution(workspaceId);
-    const grouped = tenantsByPlatform(attribution);
+    const bundle = await this.loadSignals(workspaceId);
+    const grouped = tenantsByPlatform(bundle.attribution);
     const tenantIds = grouped[id];
 
-    const summary = await this.buildSummary(id, workspaceId, tenantIds, attribution);
+    const summary = await this.buildSummary(id, workspaceId, tenantIds, bundle.attribution);
 
     if (tenantIds.length === 0) {
       return {
@@ -96,21 +104,29 @@ export class PlatformsService {
       };
     }
 
-    const [tenants, phones, apiKeys, webhooks] = await Promise.all([
-      this.tenantRepo.find({ where: { workspaceId, id: In(tenantIds) } }),
+    const [phones, apiKeys, webhooks] = await Promise.all([
       this.phoneRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
       this.apiKeyRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
       this.webhookRepo.find({ where: { workspaceId, tenantId: In(tenantIds) } }),
     ]);
 
-    const tenantNameById = new Map<string, string>(tenants.map((t) => [t.id, t.name]));
+    const tenantNameById = new Map<string, string>(
+      bundle.tenants.map((t) => [t.id, t.name]),
+    );
+    const tenantById = new Map<string, Tenant>(
+      bundle.tenants.map((t) => [t.id, t]),
+    );
 
-    const workspaceRows: PlatformWorkspaceRow[] = tenants
+    const workspaceRows: PlatformWorkspaceRow[] = tenantIds
+      .map((tid) => tenantById.get(tid))
+      .filter((t): t is Tenant => Boolean(t))
       .map((t) => ({
         id: t.id,
         name: t.name,
         status: String(t.status),
         createdAt: t.createdAt instanceof Date ? t.createdAt.toISOString() : String(t.createdAt),
+        attributionReason:
+          bundle.attribution.reasonByTenantId.get(t.id) ?? 'unclassified',
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -160,15 +176,69 @@ export class PlatformsService {
   }
 
   /**
-   * Cached-per-call attribution: load every tenant for the workspace once and
-   * pass the same result to both list and detail builders.
+   * Load every signal needed for attribution in a single bundle, in parallel:
+   *   - tenants for the workspace
+   *   - product_workspaces joined to those tenants (via tenants.product_workspace_id)
+   *   - webhook_subscriptions for the workspace, indexed by tenant_id
+   *   - api_keys for the workspace, indexed by tenant_id
+   *
+   * Joining product_workspaces in JS rather than SQL because tenants.product_workspace_id
+   * is varchar in the DB while product_workspaces.id is uuid (uuid = varchar
+   * type mismatch in raw SQL joins).
    */
-  private async getAttribution(workspaceId: string): Promise<AttributionResult> {
+  private async loadSignals(workspaceId: string): Promise<SignalBundle> {
     const tenants = await this.tenantRepo.find({
       where: { workspaceId },
-      select: ['id', 'name'],
     });
-    return attributePlatforms(tenants);
+
+    const productWorkspaceIds = Array.from(
+      new Set(
+        tenants
+          .map((t) => t.productWorkspaceId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    const [productWorkspaces, webhooks, apiKeys] = await Promise.all([
+      productWorkspaceIds.length > 0
+        ? this.productWorkspaceRepo.find({ where: { id: In(productWorkspaceIds) } })
+        : Promise.resolve([] as ProductWorkspace[]),
+      this.webhookRepo.find({ where: { workspaceId } }),
+      this.apiKeyRepo.find({ where: { workspaceId } }),
+    ]);
+
+    const productTypeById = new Map<string, string>(
+      productWorkspaces.map((pw) => [pw.id, String(pw.productType)]),
+    );
+
+    const webhookUrlsByTenantId = new Map<string, string[]>();
+    for (const w of webhooks) {
+      if (!w.tenantId || !w.webhookUrl) continue;
+      const list = webhookUrlsByTenantId.get(w.tenantId) ?? [];
+      list.push(w.webhookUrl);
+      webhookUrlsByTenantId.set(w.tenantId, list);
+    }
+
+    const apiKeyNamesByTenantId = new Map<string, string[]>();
+    for (const k of apiKeys) {
+      if (!k.tenantId || !k.name) continue;
+      const list = apiKeyNamesByTenantId.get(k.tenantId) ?? [];
+      list.push(k.name);
+      apiKeyNamesByTenantId.set(k.tenantId, list);
+    }
+
+    const attributionInput: AttributionTenant[] = tenants.map((t) => ({
+      id: t.id,
+      name: t.name,
+      productWorkspaceProductType: t.productWorkspaceId
+        ? productTypeById.get(t.productWorkspaceId) ?? null
+        : null,
+      webhookUrls: webhookUrlsByTenantId.get(t.id) ?? [],
+      apiKeyNames: apiKeyNamesByTenantId.get(t.id) ?? [],
+    }));
+
+    const attribution = attributePlatforms(attributionInput);
+    return { attribution, tenants };
   }
 
   private async buildSummary(
