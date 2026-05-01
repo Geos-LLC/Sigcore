@@ -27,6 +27,8 @@ import { TwilioProvider } from './providers/twilio.provider';
 import { WhatsAppWebProvider } from './providers/whatsapp-web.provider';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { CommunicationProvider } from './interfaces/communication-provider.interface';
+import { ResolveProfileForOutboundService } from '../routing/resolve-profile-for-outbound.service';
+import { RoutingError, RoutingErrorCode } from '../routing/routing-errors';
 
 export interface SyncProgress {
   status: 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -74,6 +76,28 @@ export class CommunicationService {
   private syncProgress: Map<string, SyncProgress> = new Map();
   private syncCancelled: Map<string, boolean> = new Map();
 
+  /**
+   * Idempotent: write profile/business onto a conversation when the outbound
+   * resolver chose them. PR4 — explicit profileId/profileSlug sends count as
+   * 'operator_set' confidence so subsequent inbound stickiness routes back
+   * to the operator's chosen profile.
+   */
+  private async tagConversationWithResolvedProfile(
+    conversation: CommunicationConversation,
+    resolvedProfileId: string | null,
+    resolvedBusinessId: string | null,
+  ): Promise<void> {
+    if (!resolvedProfileId) return;
+    const same =
+      conversation.communicationProfileId === resolvedProfileId &&
+      (conversation.communicationBusinessId ?? null) === (resolvedBusinessId ?? null);
+    if (same) return;
+    conversation.communicationProfileId = resolvedProfileId;
+    conversation.communicationBusinessId = resolvedBusinessId ?? undefined;
+    conversation.profileConfidence = 'operator_set';
+    await this.conversationRepo.save(conversation);
+  }
+
   // Normalize phone number to E.164-like format for comparison
   private normalizePhoneNumber(phone: string): string {
     if (!phone) return '';
@@ -115,6 +139,7 @@ export class CommunicationService {
     private encryptionService: EncryptionService,
     @Inject(forwardRef(() => OpenPhoneContactCacheService))
     private openPhoneContactCache: OpenPhoneContactCacheService,
+    private resolveOutbound?: ResolveProfileForOutboundService,
   ) {}
 
   /**
@@ -640,7 +665,64 @@ export class CommunicationService {
     tenantId?: string,
     phoneNumberId?: string,
     metadata?: Record<string, unknown>,
+    profileHint: { profileId?: string; profileSlug?: string } = {},
   ): Promise<CommunicationMessage> {
+    // PR4 — outbound profile resolution. When profileId/profileSlug is given,
+    // OR a fromNumber is given without a phoneNumberId override, run the
+    // outbound resolver to determine which profile owns the send and which
+    // fromNumber to use. Resolver throws RoutingError for invalid inputs;
+    // controller maps these to HTTP status codes.
+    let resolvedProfileId: string | null = null;
+    let resolvedBusinessId: string | null = null;
+    const wantsResolver =
+      !!profileHint.profileId ||
+      !!profileHint.profileSlug ||
+      (!!fromNumber && !phoneNumberId);
+
+    if (wantsResolver && this.resolveOutbound) {
+      if (!tenantId) {
+        throw new RoutingError(
+          RoutingErrorCode.AMBIGUOUS_FROM_NUMBER,
+          'tenantId is required for profile-based outbound routing',
+        );
+      }
+      try {
+        const r = await this.resolveOutbound.resolve({
+          tenantId,
+          profileId: profileHint.profileId,
+          profileSlug: profileHint.profileSlug,
+          fromNumber: fromNumber || undefined,
+        });
+        resolvedProfileId = r.profileId;
+        resolvedBusinessId = r.businessId;
+        // Resolver chose the actual sender phone — overwrite caller's
+        // fromNumber so the rest of the routing uses the right one.
+        fromNumber = r.fromNumber;
+        this.logger.log(
+          `[outbound] resolved profile=${r.profileId.slice(0, 8)} business=${r.businessId.slice(0, 8)} from=${r.fromNumber} source=${r.source}`,
+        );
+      } catch (err) {
+        if (err instanceof RoutingError) {
+          // Legacy fallback: when phoneNumberId is provided AND the resolver
+          // failed for non-ambiguous reasons, allow the OpenPhone direct
+          // path below to handle it (back-compat for SF/Callio callers
+          // that have phones not yet in profile_phone_assignments).
+          const fallbackOk =
+            phoneNumberId &&
+            (err.code === RoutingErrorCode.INVALID_PROFILE_PHONE ||
+              err.code === RoutingErrorCode.PROFILE_NOT_FOUND);
+          if (!fallbackOk) {
+            throw err;
+          }
+          this.logger.warn(
+            `[outbound] resolver ${err.code} — falling back to phoneNumberId=${phoneNumberId} for OpenPhone direct send`,
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
+
     // Normalize phone numbers to E.164 format
     const normalizedFrom = this.normalizePhoneNumber(fromNumber);
     const normalizedTo = this.normalizePhoneNumber(toNumber);
@@ -702,6 +784,7 @@ export class CommunicationService {
           conversation.tenantId = tenantId;
           await this.conversationRepo.save(conversation);
         }
+        await this.tagConversationWithResolvedProfile(conversation, resolvedProfileId, resolvedBusinessId);
 
         const result = await this.openPhoneProvider.sendMessage({
           from: normalizedFrom, to: normalizedTo, body,
@@ -759,6 +842,7 @@ export class CommunicationService {
             conversation.tenantId = tenantId;
             await this.conversationRepo.save(conversation);
           }
+          await this.tagConversationWithResolvedProfile(conversation, resolvedProfileId, resolvedBusinessId);
 
           const result = await this.openPhoneProvider.sendMessage({
             from: normalizedFrom, to: normalizedTo, body,
@@ -820,6 +904,7 @@ export class CommunicationService {
         conversation.tenantId = tenantId;
         await this.conversationRepo.save(conversation);
       }
+      await this.tagConversationWithResolvedProfile(conversation, resolvedProfileId, resolvedBusinessId);
 
       const result = await this.twilioProvider.sendMessage({
         from: normalizedFrom, to: normalizedTo, body,
@@ -934,6 +1019,7 @@ export class CommunicationService {
       });
       await this.conversationRepo.save(conversation);
     }
+    await this.tagConversationWithResolvedProfile(conversation, resolvedProfileId, resolvedBusinessId);
 
     // Send the message via provider (use normalized numbers)
     const result = await provider.sendMessage({

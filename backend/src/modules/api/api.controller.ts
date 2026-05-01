@@ -9,14 +9,35 @@ import {
   Request,
   HttpCode,
   HttpStatus,
+  HttpException,
 } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { CommunicationService } from '../communication/communication.service';
+import { RoutingError, RoutingErrorCode } from '../routing/routing-errors';
 
 interface ApiRequest {
   workspaceId: string;
   tenantId?: string;
   apiKeyScope?: string;
+}
+
+/**
+ * Convert a RoutingError thrown from the outbound resolver into a structured
+ * HttpException. The response body carries the error code so callers can
+ * distinguish 422-class errors (ambiguous, invalid, unconfigured) without
+ * parsing message strings.
+ */
+function routingErrorToHttp(err: RoutingError): HttpException {
+  const status =
+    err.code === RoutingErrorCode.CROSS_TENANT_PROFILE
+      ? HttpStatus.FORBIDDEN
+      : err.code === RoutingErrorCode.PROFILE_NOT_FOUND
+      ? HttpStatus.NOT_FOUND
+      : HttpStatus.UNPROCESSABLE_ENTITY;
+  return new HttpException(
+    { statusCode: status, code: err.code, message: err.message },
+    status,
+  );
 }
 
 @Controller('v1')
@@ -142,35 +163,45 @@ export class ApiController {
   async sendMessageToPhoneNumber(
     @Request() req: ApiRequest,
     @Body() dto: {
-      fromNumber: string;
+      fromNumber?: string;            // optional when profileId/profileSlug given
       toNumber: string;
       body: string;
       channel?: string;
       phoneNumberId?: string;
+      profileId?: string;             // PR4 — preferred (explicit profile UUID)
+      profileSlug?: string;           // PR4 — alternative (tenant-scoped slug)
       metadata?: Record<string, unknown>;
     },
   ) {
-    const message = await this.communicationService.sendMessageToPhoneNumber(
-      req.workspaceId,
-      dto.fromNumber,
-      dto.toNumber,
-      dto.body,
-      dto.channel || 'sms',
-      req.tenantId,
-      dto.phoneNumberId,
-      dto.metadata,
-    );
+    try {
+      const message = await this.communicationService.sendMessageToPhoneNumber(
+        req.workspaceId,
+        dto.fromNumber || '',
+        dto.toNumber,
+        dto.body,
+        dto.channel || 'sms',
+        req.tenantId,
+        dto.phoneNumberId,
+        dto.metadata,
+        { profileId: dto.profileId, profileSlug: dto.profileSlug },
+      );
 
-    // Include the provider so callers can verify correct routing
-    const conversation = await this.communicationService.getConversationById(message.conversationId);
+      // Include the provider so callers can verify correct routing
+      const conversation = await this.communicationService.getConversationById(message.conversationId);
 
-    return {
-      success: true,
-      data: {
-        ...message,
-        provider: conversation?.provider || null,
-      },
-    };
+      return {
+        success: true,
+        data: {
+          ...message,
+          provider: conversation?.provider || null,
+        },
+      };
+    } catch (err) {
+      if (err instanceof RoutingError) {
+        throw routingErrorToHttp(err);
+      }
+      throw err;
+    }
   }
 
   // ==================== PHONE NUMBERS ====================
