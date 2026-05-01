@@ -674,10 +674,12 @@ export class CommunicationService {
     // controller maps these to HTTP status codes.
     let resolvedProfileId: string | null = null;
     let resolvedBusinessId: string | null = null;
-    const wantsResolver =
-      !!profileHint.profileId ||
-      !!profileHint.profileSlug ||
-      (!!fromNumber && !phoneNumberId);
+    // Run the resolver unless the caller is explicitly using the legacy
+    // phoneNumberId direct-send path (preserved for SF/Callio back-compat).
+    // When NO inputs are provided at all (no profileId/Slug, no fromNumber,
+    // no phoneNumberId), the resolver fires with empty input and returns
+    // AMBIGUOUS_FROM_NUMBER — the structured 422 the user expects.
+    const wantsResolver = !phoneNumberId;
 
     if (wantsResolver && this.resolveOutbound) {
       if (!tenantId) {
