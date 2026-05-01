@@ -88,6 +88,19 @@ export class WebhookSubscription {
   @Column({ name: 'last_error', type: 'text', nullable: true })
   lastError?: string;
 
+  /**
+   * Optional scope — when populated, the subscription receives only events
+   * for this profile / business. Additive fan-out: profile- AND
+   * business- AND tenant-scoped subscriptions all fire for matching events.
+   */
+  @Column({ name: 'communication_business_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationBusinessId?: string;
+
+  @Column({ name: 'communication_profile_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationProfileId?: string;
+
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 

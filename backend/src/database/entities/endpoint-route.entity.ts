@@ -80,6 +80,17 @@ export class EndpointRoute {
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 
+  // Optional explicit override — when set, overrides the resolver's
+  // best-guess profile/business for this endpoint. Null today; populated
+  // by future operator UI work.
+  @Column({ name: 'communication_business_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationBusinessId?: string;
+
+  @Column({ name: 'communication_profile_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationProfileId?: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

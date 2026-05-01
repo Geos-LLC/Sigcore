@@ -91,6 +91,21 @@ export class CommunicationConversation {
   @Column({ name: 'participant_phone_e164', type: 'varchar', nullable: true })
   participantPhoneE164?: string;
 
+  // Profile/business association — populated by the inbound resolver and
+  // by /api/v1/messages outbound. Nullable for back-compat with rows
+  // created before the real-profiles migration.
+  @Column({ name: 'communication_business_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationBusinessId?: string;
+
+  @Column({ name: 'communication_profile_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationProfileId?: string;
+
+  /** 'sticky' | 'phone_default' | 'operator_set' — see backend/src/modules/routing */
+  @Column({ name: 'profile_confidence', type: 'varchar', length: 32, nullable: true })
+  profileConfidence?: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
