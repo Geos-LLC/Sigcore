@@ -20,6 +20,7 @@ import AdminPlatformsPage from './pages/admin/AdminPlatformsPage';
 import AdminPlatformDetailPage from './pages/admin/AdminPlatformDetailPage';
 import AdminPhoneNumbersInventoryPage from './pages/admin/AdminPhoneNumbersInventoryPage';
 import AdminLegacyPage from './pages/admin/AdminLegacyPage';
+import AdminWorkspacesPage from './pages/admin/AdminWorkspacesPage';
 
 // Portal
 import TenantPortalLoginPage from './pages/portal/TenantPortalLoginPage';
@@ -57,8 +58,11 @@ export default function App() {
         <Route path="sync-monitor" element={<AdminSyncMonitorPage />} />
         <Route path="platforms" element={<AdminPlatformsPage />} />
         <Route path="platforms/:id" element={<AdminPlatformDetailPage />} />
+        <Route path="workspaces" element={<AdminWorkspacesPage />} />
         <Route path="phone-numbers" element={<AdminPhoneNumbersInventoryPage />} />
         <Route path="legacy" element={<AdminLegacyPage />} />
+        {/* Raw flat tenants table — kept available for debugging only. */}
+        <Route path="legacy/tenants" element={<AdminTenantsPage />} />
       </Route>
 
       {/* Portal */}

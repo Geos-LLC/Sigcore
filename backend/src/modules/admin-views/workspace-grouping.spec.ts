@@ -153,11 +153,11 @@ describe('groupWorkspaces — Rule 2: name prefix', () => {
 // 3. Standalone fallback
 // ---------------------------------------------------------------------------
 describe('groupWorkspaces — Rule 3: standalone', () => {
-  it('treats unrecognised tenants as their own workspace + only profile', () => {
+  it('treats unrecognised tenants with distinct names as separate workspaces', () => {
     const result = groupWorkspaces(
       [
         tenant({ id: 't1', name: 'Account fa4a8d5b-…' }),
-        tenant({ id: 't2', name: 'Georgiy Sayapin' }),
+        tenant({ id: 't2', name: 'Account 027fafe3-…' }),
       ],
       NO_BUSINESSES,
     );
@@ -169,7 +169,43 @@ describe('groupWorkspaces — Rule 3: standalone', () => {
     }
   });
 
-  it('handles empty / null tenant names gracefully', () => {
+  it('merges standalone tenants with the same normalized name into one workspace', () => {
+    const result = groupWorkspaces(
+      [
+        tenant({ id: 'gs1', name: 'Georgiy Sayapin' }),
+        tenant({ id: 'gs2', name: 'Georgiy Sayapin' }),
+        tenant({ id: 'gs3', name: 'georgiy sayapin' }),
+        tenant({ id: 'gs4', name: '  Georgiy Sayapin  ' }),
+        tenant({ id: 'gs5', name: 'Georgiy Sayapin' }),
+      ],
+      NO_BUSINESSES,
+    );
+    expect(result.groups).toHaveLength(1);
+    const g = result.groups[0];
+    expect(g.source).toBe('standalone');
+    expect(g.name).toBe('Georgiy Sayapin'); // first contributor's casing
+    expect(g.profiles).toHaveLength(1);
+    expect(g.profiles[0].duplicateCount).toBe(5);
+    expect(g.profiles[0].tenantIds).toEqual(['gs1', 'gs2', 'gs3', 'gs4', 'gs5']);
+    expect(g.totalTenantCount).toBe(5);
+  });
+
+  it('does NOT merge empty-named tenants with each other', () => {
+    const result = groupWorkspaces(
+      [
+        tenant({ id: 'aaa11111-1111', name: '' as any }),
+        tenant({ id: 'bbb22222-2222', name: '' as any }),
+      ],
+      NO_BUSINESSES,
+    );
+    expect(result.groups).toHaveLength(2);
+    for (const g of result.groups) {
+      expect(g.source).toBe('standalone');
+      expect(g.name).toMatch(/^\(unnamed /);
+    }
+  });
+
+  it('handles empty / null tenant names gracefully (single tenant)', () => {
     const result = groupWorkspaces(
       [tenant({ id: 'abc12345-aaaa', name: '' as any })],
       NO_BUSINESSES,
@@ -346,12 +382,15 @@ describe('groupWorkspaces — real-world fixture (workspace 1bcbb4e0…)', () =>
     expect(byName.get('ABC Solutions')!.profileCount).toBe(1);
     expect(byName.get('ABC Solutions')!.profiles[0].name).toBe('Always Best Cleaning');
 
-    // Georgiy Sayapin — 5 standalone with same name → 5 separate workspaces (each its own row)
+    // Georgiy Sayapin — 5 same-name tenants merge into ONE standalone
+    // workspace (single profile with duplicateCount=5)
     const georgiyGroups = result.groups.filter((g) => g.name === 'Georgiy Sayapin');
-    expect(georgiyGroups).toHaveLength(5);
-    for (const g of georgiyGroups) expect(g.source).toBe('standalone');
+    expect(georgiyGroups).toHaveLength(1);
+    expect(georgiyGroups[0].source).toBe('standalone');
+    expect(georgiyGroups[0].profiles).toHaveLength(1);
+    expect(georgiyGroups[0].profiles[0].duplicateCount).toBe(5);
 
-    // Account rows — 3 distinct standalone workspaces
+    // Account rows — 3 distinct names → 3 separate standalone workspaces
     const accountGroups = result.groups.filter((g) => g.name.startsWith('Account '));
     expect(accountGroups).toHaveLength(3);
     for (const g of accountGroups) expect(g.source).toBe('standalone');

@@ -25,6 +25,7 @@ import { useAdminAuthStore } from '../../store/adminAuthStore';
 // startsWith match keeps the parent highlighted while a child route is open.
 const STARTS_WITH_PATHS = new Set<string>([
   '/admin/platforms',
+  '/admin/workspaces',
   '/admin/phone-numbers',
   '/admin/legacy',
 ]);
@@ -94,7 +95,7 @@ export default function AdminLayout() {
                   <Layers className="h-4 w-4" />
                   Platforms
                 </Link>
-                <Link to="/admin/tenants" className={navLinkClass('/admin/tenants')}>
+                <Link to="/admin/workspaces" className={navLinkClass('/admin/workspaces')}>
                   <Users className="h-4 w-4" />
                   Workspaces
                 </Link>
@@ -108,7 +109,7 @@ export default function AdminLayout() {
               <NavGroup label="Provisioning">
                 <Link to="/admin/provisioning" className={navLinkClass('/admin/provisioning')}>
                   <PhoneIncoming className="h-4 w-4" />
-                  Provisioning
+                  Setup Wizard
                 </Link>
                 <Link to="/admin/orders" className={navLinkClass('/admin/orders')}>
                   <ClipboardList className="h-4 w-4" />
@@ -157,6 +158,13 @@ export default function AdminLayout() {
                 <Link to="/admin/legacy" className={navLinkClass('/admin/legacy')}>
                   <Archive className="h-4 w-4" />
                   Legacy
+                </Link>
+                <Link
+                  to="/admin/legacy/tenants"
+                  className={navLinkClass('/admin/legacy/tenants')}
+                >
+                  <Users className="h-4 w-4" />
+                  Raw Tenants
                 </Link>
                 <a href="/api-docs" className={navLinkClass('/api-docs')}>
                   <Book className="h-4 w-4" />

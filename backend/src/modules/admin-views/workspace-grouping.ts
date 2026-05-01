@@ -219,10 +219,20 @@ function classifyTenant(
   }
 
   // Rule 3 — standalone fallthrough.
+  // Standalone tenants sharing the same normalized name (e.g. "Georgiy
+  // Sayapin" × 5) merge into a single workspace; the duplicate-collapsing
+  // pass then folds them into one profile with duplicateCount > 1. This
+  // matches operator expectation that exact-name repeats represent a single
+  // logical entity, not multiple distinct workspaces.
+  //
+  // Empty-named tenants keep their own workspace per tenant id so we don't
+  // accidentally merge unrelated rows that all happen to have a blank name.
   const standaloneName = name || `(unnamed ${t.id.slice(0, 8)}…)`;
+  const normalized = name.toLowerCase();
+  const groupKey = normalized.length > 0 ? `sa:${normalized}` : `sa-id:${t.id}`;
   return {
     source: 'standalone',
-    groupKey: `sa:${t.id}`,
+    groupKey,
     workspaceName: standaloneName,
     businessIdentityId: null,
     profileName: standaloneName,
