@@ -28,16 +28,35 @@ export class OutboundWebhooksService {
   ) {}
 
   /**
-   * Emit an event to active subscriptions for a workspace.
-   * When tenantId is provided, only subscriptions scoped to that tenant
-   * (or unscoped subscriptions) receive the event — prevents fan-out noise.
+   * Emit an event with additive scope-based fan-out.
+   *
+   * Each subscription has at most one narrow scope. A sub fires when its
+   * narrowest scope matches the event scope:
+   *   - profile-scoped sub  → fires iff scope.profileId === sub.communicationProfileId
+   *   - business-scoped sub → fires iff scope.businessId === sub.communicationBusinessId
+   *   - tenant-scoped sub   → fires iff scope.tenantId === sub.tenantId
+   *   - workspace-scoped sub (no narrower scope) → fires for every event in the workspace
+   *
+   * Multiple subs at different scopes can all fire for the same event (the
+   * "additive" behavior locked in by decision #4 / #10).
+   *
+   * Issue #114 (cross-tenant fan-out) is preserved — tenant-scoped subs
+   * only fire when their tenant_id matches the event's tenant_id.
+   *
+   * Backward compatibility: the 4th arg accepts either a string (legacy
+   * tenantId-only) or a scope object.
    */
   async emitEvent(
     workspaceId: string,
     eventType: WebhookEventType,
     data: Record<string, unknown>,
-    tenantId?: string,
+    scopeArg?:
+      | string
+      | { tenantId?: string; businessId?: string; profileId?: string },
   ): Promise<void> {
+    const scope: { tenantId?: string; businessId?: string; profileId?: string } =
+      typeof scopeArg === 'string' ? { tenantId: scopeArg } : scopeArg ?? {};
+
     const subscriptions = await this.subscriptionRepo.find({
       where: [
         { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
@@ -45,39 +64,44 @@ export class OutboundWebhooksService {
       ],
     });
 
-    // Filter to only subscriptions that listen for this event
+    // Filter to only subscriptions that listen for this event.
     let relevantSubscriptions = subscriptions.filter((sub) =>
       sub.events.includes(eventType),
     );
 
-    if (tenantId) {
-      // Deliver to subscriptions scoped to this tenant + unscoped subscriptions.
-      relevantSubscriptions = relevantSubscriptions.filter(
-        (sub) => !sub.tenantId || sub.tenantId === tenantId,
-      );
-    } else {
-      // Without tenantId we cannot tell which tenant-scoped subscription owns
-      // this event. Restrict delivery to unscoped subscriptions only — never
-      // broadcast across every tenant in the workspace (Issue #114 fan-out).
-      const droppedScoped = relevantSubscriptions.filter((s) => s.tenantId).length;
-      if (droppedScoped > 0) {
-        this.logger.warn(
-          `[emitEvent] Missing tenantId — restricting to unscoped subscriptions ` +
-            `(event=${eventType} workspace=${workspaceId} skipped=${droppedScoped})`,
+    // Per-sub scope match (additive — narrowest scope wins per sub, but
+    // multiple subs at different scopes can all match the same event).
+    relevantSubscriptions = relevantSubscriptions.filter((sub) => {
+      if (sub.communicationProfileId) {
+        return (
+          !!scope.profileId && scope.profileId === sub.communicationProfileId
         );
       }
-      relevantSubscriptions = relevantSubscriptions.filter((sub) => !sub.tenantId);
-    }
+      if (sub.communicationBusinessId) {
+        return (
+          !!scope.businessId && scope.businessId === sub.communicationBusinessId
+        );
+      }
+      if (sub.tenantId) {
+        return !!scope.tenantId && scope.tenantId === sub.tenantId;
+      }
+      // workspace-scoped sub: fires for every event in this workspace.
+      return true;
+    });
 
     if (relevantSubscriptions.length === 0) {
-      this.logger.debug(`No active subscriptions for event ${eventType} in workspace ${workspaceId}`);
+      this.logger.debug(
+        `No matching subscriptions for event ${eventType} in workspace ${workspaceId} (scope=${JSON.stringify(
+          scope,
+        )})`,
+      );
       return;
     }
 
     if (relevantSubscriptions.length > 1) {
-      this.logger.warn(
+      this.logger.log(
         `[emitEvent] ${relevantSubscriptions.length} subscriptions matched ` +
-          `(event=${eventType} workspace=${workspaceId} tenantId=${tenantId ?? 'unscoped'})`,
+          `(event=${eventType} workspace=${workspaceId} scope=${JSON.stringify(scope)})`,
       );
     }
 
@@ -94,15 +118,23 @@ export class OutboundWebhooksService {
   }
 
   /**
-   * Emit message event
+   * Emit message event. The 5th arg accepts either a tenantId string
+   * (legacy callers) or a `{ tenantId, businessId, profileId }` scope
+   * object so callers wired through the routing resolver can fan out
+   * additively across all matching scopes.
    */
   async emitMessageEvent(
     workspaceId: string,
     eventType: WebhookEventType,
     message: CommunicationMessage,
     additionalData?: Record<string, unknown>,
-    tenantId?: string,
+    scopeArg?:
+      | string
+      | { tenantId?: string; businessId?: string; profileId?: string },
   ): Promise<void> {
+    const scope: { tenantId?: string; businessId?: string; profileId?: string } =
+      typeof scopeArg === 'string' ? { tenantId: scopeArg } : scopeArg ?? {};
+
     const data = {
       messageId: message.id,
       conversationId: message.conversationId,
@@ -117,9 +149,14 @@ export class OutboundWebhooksService {
       // Include metadata (contains tenantId, leadId from LeadBridge)
       ...(message.metadata || {}),
       ...(additionalData || {}),
+      // Surface the resolved scope on the wire so subscribers can route
+      // by profile/business without needing a separate lookup.
+      ...(scope.tenantId && { tenantId: scope.tenantId }),
+      ...(scope.businessId && { communicationBusinessId: scope.businessId }),
+      ...(scope.profileId && { communicationProfileId: scope.profileId }),
     };
 
-    await this.emitEvent(workspaceId, eventType, data, tenantId);
+    await this.emitEvent(workspaceId, eventType, data, scope);
   }
 
   /**

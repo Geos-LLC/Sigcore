@@ -32,6 +32,7 @@ import { TenantWebhooksService } from './tenant-webhooks.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { CallConnectService } from './call-connect.service';
+import { ResolveProfileForInboundService } from '../routing/resolve-profile-for-inbound.service';
 
 export interface TwilioSmsWebhookPayload {
   MessageSid: string;
@@ -141,6 +142,8 @@ export class TwilioWebhooksService {
     private outboundWebhooksService?: OutboundWebhooksService,
     @Optional()
     private callConnectService?: CallConnectService,
+    @Optional()
+    private inboundResolver?: ResolveProfileForInboundService,
   ) {}
 
   /**
@@ -403,25 +406,56 @@ export class TwilioWebhooksService {
       });
     }
 
-    // Emit outbound webhook to subscriptions so LeadBridge (and other subscribers)
-    // receive inbound SMS events — same as OpenPhone's handleMessageEvent does.
-    // Include conversation metadata so receivers can determine the purpose of the
-    // conversation (e.g., ICC vs customer texting) for proper routing.
-    // Resolve tenantId from the receiving phone number so webhooks go only to the relevant account.
-    if (this.outboundWebhooksService) {
-      const convMeta = (conversation.metadata as Record<string, unknown>) || {};
-      let tenantId: string | undefined;
+    // Tag the conversation with profile + business via the routing resolver
+    // (sticky → phone-default → unknown), then emit the webhook with the
+    // full scope so additive fan-out (profile + business + tenant + workspace)
+    // can match all relevant subscriptions.
+    let resolved: {
+      tenantId: string | null;
+      profileId: string | null;
+      businessId: string | null;
+    } = { tenantId: null, profileId: null, businessId: null };
+
+    if (this.inboundResolver) {
+      try {
+        const r = await this.inboundResolver.resolveAndApplyToConversation(conversation);
+        resolved = { tenantId: r.tenantId, profileId: r.profileId, businessId: r.businessId };
+        if (r.tenantId) {
+          this.logger.log(
+            `[twilio] resolved scope tenant=${r.tenantId.slice(0, 8)} profile=${r.profileId?.slice(0, 8) ?? '-'} business=${r.businessId?.slice(0, 8) ?? '-'} confidence=${r.confidence}`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(`[twilio] inbound resolver failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Fall back to the legacy tenant_phone_numbers lookup if the resolver
+    // didn't produce a tenantId (e.g. resolver not injected in tests).
+    if (!resolved.tenantId) {
       const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
         where: { workspaceId, phoneNumber: ourNumber },
       });
       if (tenantPhone) {
-        tenantId = tenantPhone.tenantId;
-        this.logger.log(`Resolved tenantId=${tenantId} from Twilio number ${ourNumber}`);
+        resolved.tenantId = tenantPhone.tenantId;
       }
+    }
+
+    // Emit outbound webhook with full scope for additive fan-out.
+    if (this.outboundWebhooksService) {
+      const convMeta = (conversation.metadata as Record<string, unknown>) || {};
       this.outboundWebhooksService
-        .emitMessageEvent(workspaceId, WebhookEventType.MESSAGE_INBOUND, message, {
-          conversationMetadata: convMeta,
-        }, tenantId)
+        .emitMessageEvent(
+          workspaceId,
+          WebhookEventType.MESSAGE_INBOUND,
+          message,
+          { conversationMetadata: convMeta },
+          {
+            tenantId: resolved.tenantId ?? undefined,
+            businessId: resolved.businessId ?? undefined,
+            profileId: resolved.profileId ?? undefined,
+          },
+        )
         .catch((err) => {
           this.logger.error(`Failed to emit inbound SMS webhook for message ${message.id}: ${err.message}`);
         });

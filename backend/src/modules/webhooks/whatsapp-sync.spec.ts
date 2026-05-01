@@ -620,7 +620,6 @@ describe('WhatsApp Sync — Webhook Payload Contract', () => {
       'whatsapp.message.inbound',
       expect.objectContaining({
         provider: 'whatsapp',
-        tenantId: null,
         conversation: expect.objectContaining({
           externalChatId: '15551234567@c.us',
           participantPhone: '+15551234567',
@@ -632,7 +631,8 @@ describe('WhatsApp Sync — Webhook Payload Contract', () => {
           timestamp: '2026-04-08T14:30:00Z',
         }),
       }),
-      undefined, // resolvedTenantId (null → undefined when no tenant_integration)
+      // PR3: scope object replaces positional tenantId.
+      expect.objectContaining({ tenantId: undefined }),
     );
   });
 });

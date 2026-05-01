@@ -14,6 +14,7 @@ import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
 import { MessagingModule } from '../messaging/messaging.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
+import { RoutingModule } from '../routing/routing.module';
 import {
   CommunicationIntegration,
   CommunicationConversation,
@@ -35,6 +36,7 @@ import {
   imports: [
     MessagingModule,
     forwardRef(() => IntegrationsModule),
+    RoutingModule,
     TypeOrmModule.forFeature([
       CommunicationIntegration,
       CommunicationConversation,

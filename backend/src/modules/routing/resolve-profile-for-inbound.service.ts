@@ -100,4 +100,84 @@ export class ResolveProfileForInboundService {
     );
     return { profileId: null, businessId: null, confidence: 'unknown' };
   }
+
+  /**
+   * Resolve and write profile/business onto a conversation row in one shot.
+   * Idempotent — if the conversation already has communicationProfileId
+   * set (sticky), nothing changes.
+   *
+   * Also resolves the conversation's tenant via tenant_phone_numbers when
+   * tenantId is null on the row (older conversations created before the
+   * tenant_id column existed). When neither tenant nor profile can be
+   * resolved, returns confidence='unknown' and saves nothing.
+   *
+   * Used by the inbound webhook paths (TwilioWebhooksService /
+   * WebhooksService for OpenPhone + WhatsApp). Returns the resolved
+   * (tenantId, profileId, businessId, confidence) so the caller can pass
+   * them to OutboundWebhooksService.emitMessageEvent for additive fan-out.
+   */
+  async resolveAndApplyToConversation(
+    conversation: CommunicationConversation,
+  ): Promise<{
+    tenantId: string | null;
+    profileId: string | null;
+    businessId: string | null;
+    confidence: InboundConfidence;
+  }> {
+    // Already tagged — sticky, no-op.
+    if (conversation.communicationProfileId) {
+      return {
+        tenantId: conversation.tenantId ?? null,
+        profileId: conversation.communicationProfileId,
+        businessId: conversation.communicationBusinessId ?? null,
+        confidence:
+          (conversation.profileConfidence as InboundConfidence) || 'sticky',
+      };
+    }
+
+    // Resolve tenantId from the conversation's phone number if it's missing.
+    let tenantId = conversation.tenantId ?? null;
+    if (!tenantId && conversation.phoneNumber) {
+      const tpn = await this.tpnRepo.findOne({
+        where: {
+          workspaceId: conversation.workspaceId,
+          phoneNumber: conversation.phoneNumber,
+        },
+      });
+      if (tpn) tenantId = tpn.tenantId;
+    }
+
+    if (!tenantId || !conversation.participantPhoneNumber) {
+      return { tenantId, profileId: null, businessId: null, confidence: 'unknown' };
+    }
+
+    const resolved = await this.resolve({
+      workspaceId: conversation.workspaceId,
+      tenantId,
+      ourPhone: conversation.phoneNumber,
+      theirPhone: conversation.participantPhoneNumber,
+    });
+
+    let dirty = false;
+    if (!conversation.tenantId && tenantId) {
+      conversation.tenantId = tenantId;
+      dirty = true;
+    }
+    if (resolved.profileId && !conversation.communicationProfileId) {
+      conversation.communicationProfileId = resolved.profileId;
+      conversation.communicationBusinessId = resolved.businessId ?? undefined;
+      conversation.profileConfidence = resolved.confidence;
+      dirty = true;
+    }
+    if (dirty) {
+      await this.conversationRepo.save(conversation);
+    }
+
+    return {
+      tenantId,
+      profileId: resolved.profileId,
+      businessId: resolved.businessId,
+      confidence: resolved.confidence,
+    };
+  }
 }

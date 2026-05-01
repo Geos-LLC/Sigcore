@@ -34,6 +34,7 @@ import { WebhookEventType } from '../../database/entities/webhook-subscription.e
 import { S3Service } from '../../shared/storage/s3.service';
 import { OpenPhoneContactCacheService } from '../integrations/openphone-contact-cache.service';
 import { normalizeToE164 } from '../../common/util/phone';
+import { ResolveProfileForInboundService } from '../routing/resolve-profile-for-inbound.service';
 
 export interface OpenPhoneMessageObject {
   id: string;
@@ -106,6 +107,8 @@ export class WebhooksService {
     @Optional()
     @Inject(forwardRef(() => OpenPhoneContactCacheService))
     private openPhoneContactCache?: OpenPhoneContactCacheService,
+    @Optional()
+    private inboundResolver?: ResolveProfileForInboundService,
   ) {}
 
   /**
@@ -508,13 +511,17 @@ export class WebhooksService {
       existingMessage.status = this.mapMessageStatus(msgData.status);
       await this.messageRepo.save(existingMessage);
 
-      // Fire outbound webhook for status updates (delivered, failed) so LeadBridge
-      // subscribers receive delivery receipts — not just initial message.sent events.
+      // Status-update path: pass through profile/business already on the
+      // conversation so additive fan-out works for delivery receipts too.
       const statusEventType = existingMessage.status === MessageStatus.DELIVERED
         ? WebhookEventType.MESSAGE_DELIVERED
         : WebhookEventType.MESSAGE_SENT;
       this.outboundWebhooksService
-        .emitMessageEvent(workspaceId, statusEventType, existingMessage, undefined, resolvedTenantId)
+        .emitMessageEvent(workspaceId, statusEventType, existingMessage, undefined, {
+          tenantId: conversation.tenantId ?? resolvedTenantId ?? undefined,
+          businessId: conversation.communicationBusinessId ?? undefined,
+          profileId: conversation.communicationProfileId ?? undefined,
+        })
         .catch((err) => {
           this.logger.error(`Failed to emit status-update webhook for message ${existingMessage.id}: ${err.message}`);
         });
@@ -577,6 +584,37 @@ export class WebhooksService {
       });
     }
 
+    // Tag conversation with profile/business via the routing resolver, then
+    // emit the webhook with full scope for additive fan-out.
+    let resolvedScope: {
+      tenantId?: string;
+      businessId?: string;
+      profileId?: string;
+    } = { tenantId: resolvedTenantId };
+
+    if (this.inboundResolver) {
+      try {
+        // Pre-set tenantId on the conversation so the resolver doesn't have
+        // to look it up again via tenant_phone_numbers.
+        if (resolvedTenantId && !conversation.tenantId) {
+          conversation.tenantId = resolvedTenantId;
+        }
+        const r = await this.inboundResolver.resolveAndApplyToConversation(conversation);
+        resolvedScope = {
+          tenantId: r.tenantId ?? resolvedTenantId,
+          businessId: r.businessId ?? undefined,
+          profileId: r.profileId ?? undefined,
+        };
+        if (r.profileId) {
+          this.logger.log(
+            `[openphone] resolved scope tenant=${r.tenantId?.slice(0, 8) ?? '-'} profile=${r.profileId.slice(0, 8)} business=${r.businessId?.slice(0, 8) ?? '-'} confidence=${r.confidence}`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(`[openphone] inbound resolver failed: ${(err as Error).message}`);
+      }
+    }
+
     // Emit outbound webhook to subscriptions (fire and forget)
     const webhookEventType = message.direction === MessageDirection.IN
       ? WebhookEventType.MESSAGE_INBOUND
@@ -585,7 +623,7 @@ export class WebhooksService {
         : WebhookEventType.MESSAGE_SENT;
 
     this.outboundWebhooksService
-      .emitMessageEvent(workspaceId, webhookEventType, message, undefined, resolvedTenantId)
+      .emitMessageEvent(workspaceId, webhookEventType, message, undefined, resolvedScope)
       .catch((err) => {
         this.logger.error(`Failed to emit outbound webhook for OpenPhone message: ${err.message}`);
       });
@@ -1255,14 +1293,43 @@ export class WebhooksService {
       },
     });
 
-    // Fan out to tenant webhook subscribers (scoped to resolvedTenantId so other
-    // tenants on the same workspace don't receive messages that aren't theirs)
+    // Tag conversation with profile/business via the routing resolver, then
+    // fan out additively across profile + business + tenant + workspace scopes.
+    let resolvedScope: {
+      tenantId?: string;
+      businessId?: string;
+      profileId?: string;
+    } = { tenantId: resolvedTenantId || undefined };
+
+    if (this.inboundResolver) {
+      try {
+        if (resolvedTenantId && !conversation.tenantId) {
+          conversation.tenantId = resolvedTenantId;
+        }
+        const r = await this.inboundResolver.resolveAndApplyToConversation(conversation);
+        resolvedScope = {
+          tenantId: r.tenantId ?? resolvedTenantId ?? undefined,
+          businessId: r.businessId ?? undefined,
+          profileId: r.profileId ?? undefined,
+        };
+        if (r.profileId) {
+          this.logger.log(
+            `[whatsapp] resolved scope tenant=${r.tenantId?.slice(0, 8) ?? '-'} profile=${r.profileId.slice(0, 8)} business=${r.businessId?.slice(0, 8) ?? '-'} confidence=${r.confidence}`,
+          );
+        }
+      } catch (err) {
+        this.logger.error(`[whatsapp] inbound resolver failed: ${(err as Error).message}`);
+      }
+    }
+
     await this.outboundWebhooksService.emitEvent(
       workspaceId,
       WebhookEventType.WHATSAPP_MESSAGE_INBOUND,
       {
         provider: 'whatsapp',
-        tenantId: resolvedTenantId,
+        tenantId: resolvedScope.tenantId,
+        communicationBusinessId: resolvedScope.businessId,
+        communicationProfileId: resolvedScope.profileId,
         conversation: {
           id: conversation.id,
           externalChatId,
@@ -1285,7 +1352,7 @@ export class WebhooksService {
           contactName,
         },
       },
-      resolvedTenantId || undefined,
+      resolvedScope,
     );
   }
 

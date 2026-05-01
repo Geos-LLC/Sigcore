@@ -198,10 +198,11 @@ describe('WebhooksService – WhatsApp webhook handler', () => {
         'whatsapp.message.inbound',
         expect.objectContaining({
           provider: 'whatsapp',
-          tenantId: null,
           message: expect.objectContaining({ text: 'Webhook test', direction: 'in' }),
         }),
-        undefined, // resolvedTenantId
+        // PR3: scope object replaces positional tenantId. With no tenant
+        // integration available the scope is empty (all fields undefined).
+        expect.objectContaining({ tenantId: undefined }),
       );
     });
 
