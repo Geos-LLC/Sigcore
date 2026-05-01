@@ -40,6 +40,30 @@ const PLATFORM_ORDER: PlatformId[] = [
   'unclassified',
 ];
 
+/**
+ * Workspaces named "Account <hex-uuid…>" are LeadBridge SavedAccount stubs —
+ * each maps 1:1 to a customer account in LB and almost always has a single
+ * profile with the same name. Hidden by default to keep the tree readable;
+ * "Show raw accounts" toggle reveals them.
+ */
+const RAW_ACCOUNT_PATTERN = /^Account [0-9a-f-]{8,}/i;
+function isRawAccountWorkspace(g: WorkspaceGroup): boolean {
+  return RAW_ACCOUNT_PATTERN.test(g.name);
+}
+
+function normalizeName(s: string): string {
+  return (s || '').trim().toLowerCase();
+}
+
+/** Single-profile workspace whose only profile shares the workspace's name. */
+function isSingleDefaultProfile(g: WorkspaceGroup): boolean {
+  return (
+    g.profileCount === 1 &&
+    !!g.profiles[0] &&
+    normalizeName(g.profiles[0].name) === normalizeName(g.name)
+  );
+}
+
 export default function AdminWorkspacesPage() {
   const [buckets, setBuckets] = useState<PlatformBucket[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,6 +74,7 @@ export default function AdminWorkspacesPage() {
   const [hasPhones, setHasPhones] = useState(false);
   const [hasDuplicates, setHasDuplicates] = useState(false);
   const [unclassifiedOnly, setUnclassifiedOnly] = useState(false);
+  const [showRawAccounts, setShowRawAccounts] = useState(false);
   const [search, setSearch] = useState('');
 
   const load = async () => {
@@ -90,6 +115,7 @@ export default function AdminWorkspacesPage() {
       .map((b) => ({
         ...b,
         groups: b.groups
+          .filter((g) => showRawAccounts || !isRawAccountWorkspace(g))
           .filter((g) => !hasPhones || g.totalPhoneNumbersCount > 0)
           .filter(
             (g) => !hasDuplicates || g.profiles.some((p) => p.duplicateCount > 1),
@@ -106,7 +132,18 @@ export default function AdminWorkspacesPage() {
           }),
       }))
       .filter((b) => b.groups.length > 0 || (q.length === 0 && !hasPhones && !hasDuplicates));
-  }, [buckets, platformFilter, hasPhones, hasDuplicates, unclassifiedOnly, search]);
+  }, [buckets, platformFilter, hasPhones, hasDuplicates, unclassifiedOnly, showRawAccounts, search]);
+
+  // Count raw accounts present in the source data so the footer can hint
+  // at how many are hidden when the toggle is off.
+  const rawAccountCount = useMemo(
+    () =>
+      buckets.reduce(
+        (acc, b) => acc + b.groups.filter(isRawAccountWorkspace).length,
+        0,
+      ),
+    [buckets],
+  );
 
   const totalGroups = filtered.reduce((acc, b) => acc + b.groups.length, 0);
   const totalProfiles = filtered.reduce(
@@ -185,6 +222,12 @@ export default function AdminWorkspacesPage() {
             onClick={() => setUnclassifiedOnly((v) => !v)}
             icon={<HelpCircle className="h-3 w-3" />}
           />
+          <ToggleChip
+            label="Show raw accounts"
+            on={showRawAccounts}
+            onClick={() => setShowRawAccounts((v) => !v)}
+            icon={<Building2 className="h-3 w-3" />}
+          />
 
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
@@ -213,6 +256,21 @@ export default function AdminWorkspacesPage() {
           <span className="tabular-nums">{totalProfiles}</span> profile
           {totalProfiles === 1 ? '' : 's'} across {filtered.length} platform
           {filtered.length === 1 ? '' : 's'}.
+          {!showRawAccounts && rawAccountCount > 0 && (
+            <>
+              {' '}
+              <span className="text-gray-500">
+                {rawAccountCount} raw Account workspaces hidden — toggle{' '}
+                <button
+                  className="underline hover:text-gray-700"
+                  onClick={() => setShowRawAccounts(true)}
+                >
+                  Show raw accounts
+                </button>
+                .
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -309,7 +367,16 @@ function PlatformBucketBlock({ bucket }: { bucket: PlatformBucket }) {
 }
 
 function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
-  const [open, setOpen] = useState(true);
+  const isDefault = isSingleDefaultProfile(group);
+  // When the workspace collapses to one same-named profile we hide the
+  // child row entirely — but we still need to surface profile-level signals
+  // (legacy / current presence, duplicate count) that would otherwise be
+  // lost. Aggregate them onto the workspace header.
+  const onlyProfile = isDefault ? group.profiles[0] : null;
+  const aggHasLegacy = group.profiles.some((p) => p.hasLegacy);
+  const aggHasCurrent = group.profiles.some((p) => p.hasCurrent);
+
+  const [open, setOpen] = useState(!isDefault);
 
   const sourceCls =
     group.source === 'business_identity'
@@ -327,38 +394,81 @@ function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
   return (
     <div className="px-4 py-3">
       <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-3 hover:bg-gray-50 -mx-2 px-2 py-1 rounded text-left"
+        onClick={isDefault ? undefined : () => setOpen((o) => !o)}
+        className={`w-full flex items-center gap-3 -mx-2 px-2 py-1 rounded text-left ${
+          isDefault ? 'cursor-default' : 'hover:bg-gray-50'
+        }`}
       >
         <Building2 className="h-4 w-4 text-gray-400 flex-shrink-0" />
         <span className="font-medium text-gray-900 truncate">{group.name}</span>
         <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono border ${sourceCls}`}>
           {sourceLabel}
         </span>
-        <span className="text-xs text-gray-500 ml-auto flex-shrink-0">
-          <span className="tabular-nums">{group.profileCount}</span> profile
-          {group.profileCount === 1 ? '' : 's'}
-          {group.totalTenantCount !== group.profileCount && (
+
+        {isDefault && (
+          <span
+            className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-gray-500 border border-gray-200"
+            title={
+              onlyProfile
+                ? `tenant id: ${onlyProfile.tenantIds.join(', ')}`
+                : 'Single profile, same name as workspace'
+            }
+          >
+            1 default profile
+            {onlyProfile && onlyProfile.duplicateCount > 1 && (
+              <> · ×{onlyProfile.duplicateCount} dup</>
+            )}
+          </span>
+        )}
+
+        <span className="text-xs text-gray-500 ml-auto flex-shrink-0 flex items-center gap-2">
+          {!isDefault && (
             <>
-              {' '}
-              <span className="text-amber-600">· {group.totalTenantCount} tenants</span>
+              <span className="tabular-nums">{group.profileCount}</span> profile
+              {group.profileCount === 1 ? '' : 's'}
+              {group.totalTenantCount !== group.profileCount && (
+                <>
+                  {' '}
+                  <span className="text-amber-600">· {group.totalTenantCount} tenants</span>
+                </>
+              )}
             </>
           )}
           {group.totalPhoneNumbersCount > 0 && (
-            <>
-              {' '}
-              · <Phone className="h-3 w-3 inline -mt-0.5" /> {group.totalPhoneNumbersCount}
-            </>
+            <span className="inline-flex items-center gap-0.5 text-green-700">
+              <Phone className="h-3 w-3" />
+              <span className="tabular-nums">{group.totalPhoneNumbersCount}</span>
+            </span>
+          )}
+          {/* Aggregate phone/legacy markers when collapsed-by-default row hides them. */}
+          {isDefault && aggHasCurrent && group.totalPhoneNumbersCount === 0 && (
+            <span
+              className="inline-flex items-center gap-0.5 text-green-700"
+              title="Has rows in tenant_phone_numbers"
+            >
+              <CheckCircle2 className="h-3 w-3" />
+            </span>
+          )}
+          {aggHasLegacy && (
+            <span
+              className="inline-flex items-center gap-0.5 text-amber-700"
+              title="Has rows in phone_number_assignments (legacy)"
+            >
+              <Archive className="h-3 w-3" />
+              legacy
+            </span>
           )}
         </span>
-        {open ? (
-          <ChevronUp className="h-4 w-4 text-gray-400 flex-shrink-0" />
-        ) : (
-          <ChevronDown className="h-4 w-4 text-gray-400 flex-shrink-0" />
-        )}
+
+        {!isDefault &&
+          (open ? (
+            <ChevronUp className="h-4 w-4 text-gray-400 flex-shrink-0" />
+          ) : (
+            <ChevronDown className="h-4 w-4 text-gray-400 flex-shrink-0" />
+          ))}
       </button>
 
-      {open && (
+      {!isDefault && open && (
         <div className="mt-2 ml-7 space-y-1.5">
           {group.profiles.map((p, i) => (
             <ProfileItem key={`${p.name}-${i}`} profile={p} />
