@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   Filter,
   X,
+  Users,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type {
@@ -391,6 +392,13 @@ function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
       ? 'name prefix'
       : 'standalone';
 
+  // Single-default profile that is also backed by a real profile row gets a
+  // direct link to its detail page from the workspace header.
+  const collapsedProfileLink =
+    isDefault && onlyProfile?.communicationProfileId
+      ? `/admin/profiles/${onlyProfile.communicationProfileId}`
+      : null;
+
   return (
     <div className="px-4 py-3">
       <button
@@ -399,26 +407,58 @@ function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
           isDefault ? 'cursor-default' : 'hover:bg-gray-50'
         }`}
       >
-        <Building2 className="h-4 w-4 text-gray-400 flex-shrink-0" />
+        <Users className="h-4 w-4 text-gray-400 flex-shrink-0" />
         <span className="font-medium text-gray-900 truncate">{group.name}</span>
         <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono border ${sourceCls}`}>
           {sourceLabel}
         </span>
 
-        {isDefault && (
-          <span
-            className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-gray-500 border border-gray-200"
-            title={
-              onlyProfile
-                ? `tenant id: ${onlyProfile.tenantIds.join(', ')}`
-                : 'Single profile, same name as workspace'
-            }
+        {/* Business link — Track 1 has 1 business per workspace. */}
+        {group.communicationBusinessId && (
+          <Link
+            to={`/admin/businesses/${group.communicationBusinessId}`}
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 font-mono"
+            title="View business detail"
           >
-            1 default profile
-            {onlyProfile && onlyProfile.duplicateCount > 1 && (
-              <> · ×{onlyProfile.duplicateCount} dup</>
-            )}
-          </span>
+            <Building2 className="h-3 w-3" />
+            business
+          </Link>
+        )}
+
+        {isDefault && (
+          collapsedProfileLink ? (
+            <Link
+              to={collapsedProfileLink}
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+              title={
+                onlyProfile
+                  ? `Profile id: ${onlyProfile.communicationProfileId}`
+                  : 'Default profile'
+              }
+            >
+              <MapPin className="h-3 w-3" />
+              1 default profile
+              {onlyProfile && onlyProfile.duplicateCount > 1 && (
+                <> · ×{onlyProfile.duplicateCount} dup</>
+              )}
+            </Link>
+          ) : (
+            <span
+              className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-gray-500 border border-gray-200"
+              title={
+                onlyProfile
+                  ? `tenant id: ${onlyProfile.tenantIds.join(', ')}`
+                  : 'Single profile, same name as workspace'
+              }
+            >
+              1 default profile
+              {onlyProfile && onlyProfile.duplicateCount > 1 && (
+                <> · ×{onlyProfile.duplicateCount} dup</>
+              )}
+            </span>
+          )
         )}
 
         <span className="text-xs text-gray-500 ml-auto flex-shrink-0 flex items-center gap-2">
@@ -481,10 +521,16 @@ function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
 
 function ProfileItem({ profile }: { profile: ProfileRow }) {
   const isDup = profile.duplicateCount > 1;
-  return (
-    <div className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50">
+  const profileLink = profile.communicationProfileId
+    ? `/admin/profiles/${profile.communicationProfileId}`
+    : null;
+
+  const inner = (
+    <>
       <MapPin className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
-      <span className="text-gray-900">{profile.name}</span>
+      <span className={profileLink ? 'text-gray-900 hover:text-primary-700' : 'text-gray-900'}>
+        {profile.name}
+      </span>
 
       {isDup && (
         <span
@@ -515,6 +561,22 @@ function ProfileItem({ profile }: { profile: ProfileRow }) {
           </span>
         )}
       </span>
+    </>
+  );
+
+  if (profileLink) {
+    return (
+      <Link
+        to={profileLink}
+        className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50"
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return (
+    <div className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50">
+      {inner}
     </div>
   );
 }

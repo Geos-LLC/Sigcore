@@ -19,6 +19,12 @@ import type {
   InventoryFilters,
   LegacyAssignmentGroup,
   LegacySmsRow,
+  BusinessSummary,
+  BusinessDetail,
+  BusinessFilters,
+  ProfileSummary,
+  ProfileDetail,
+  ProfileFilters,
 } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -402,6 +408,55 @@ class AdminApiService {
   async getLegacySmsMessages(limit?: number): Promise<LegacySmsRow[]> {
     const qs = limit ? `?limit=${limit}` : '';
     const response = await this.client.get<ApiResponse<LegacySmsRow[]>>(`/admin/legacy/sms-messages${qs}`);
+    return response.data.data;
+  }
+
+  // ==================== Businesses + Profiles (PR5) ====================
+
+  async getBusinesses(filters?: BusinessFilters): Promise<BusinessSummary[]> {
+    const params = new URLSearchParams();
+    if (filters?.platformId) params.append('platformId', filters.platformId);
+    if (filters?.source) params.append('source', filters.source);
+    if (filters?.hasPhones) params.append('hasPhones', 'true');
+    if (filters?.hasSharedPhone) params.append('hasSharedPhone', 'true');
+    if (filters?.hasExternalId) params.append('hasExternalId', 'true');
+    const qs = params.toString();
+    const response = await this.client.get<ApiResponse<BusinessSummary[]>>(
+      `/admin/businesses${qs ? `?${qs}` : ''}`,
+    );
+    return response.data.data;
+  }
+
+  async getBusiness(id: string): Promise<BusinessDetail> {
+    const response = await this.client.get<ApiResponse<BusinessDetail>>(
+      `/admin/businesses/${encodeURIComponent(id)}`,
+    );
+    return response.data.data;
+  }
+
+  async getProfiles(filters?: ProfileFilters): Promise<ProfileSummary[]> {
+    const params = new URLSearchParams();
+    if (filters?.platformId) params.append('platformId', filters.platformId);
+    if (filters?.source) params.append('source', filters.source);
+    if (filters?.businessId) params.append('businessId', filters.businessId);
+    if (filters?.tenantId) params.append('tenantId', filters.tenantId);
+    if (filters?.hasPhones) params.append('hasPhones', 'true');
+    if (filters?.hasSharedPhone) params.append('hasSharedPhone', 'true');
+    if (filters?.hasExternalId) params.append('hasExternalId', 'true');
+    if (filters?.isDefault !== undefined) {
+      params.append('isDefault', String(filters.isDefault));
+    }
+    const qs = params.toString();
+    const response = await this.client.get<ApiResponse<ProfileSummary[]>>(
+      `/admin/profiles${qs ? `?${qs}` : ''}`,
+    );
+    return response.data.data;
+  }
+
+  async getProfile(id: string): Promise<ProfileDetail> {
+    const response = await this.client.get<ApiResponse<ProfileDetail>>(
+      `/admin/profiles/${encodeURIComponent(id)}`,
+    );
     return response.data.data;
   }
 }

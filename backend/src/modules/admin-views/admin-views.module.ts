@@ -20,6 +20,10 @@ import { InventoryController } from './inventory.controller';
 import { InventoryService } from './inventory.service';
 import { LegacyController } from './legacy.controller';
 import { LegacyService } from './legacy.service';
+import { BusinessesController } from './businesses.controller';
+import { BusinessesService } from './businesses.service';
+import { ProfilesController } from './profiles.controller';
+import { ProfilesService } from './profiles.service';
 
 /**
  * Read-only admin-views module.
@@ -49,7 +53,19 @@ import { LegacyService } from './legacy.service';
       ProfilePhoneAssignment,
     ]),
   ],
-  controllers: [PlatformsController, InventoryController, LegacyController],
-  providers: [PlatformsService, InventoryService, LegacyService],
+  controllers: [
+    PlatformsController,
+    InventoryController,
+    LegacyController,
+    BusinessesController,
+    ProfilesController,
+  ],
+  providers: [
+    PlatformsService,
+    InventoryService,
+    LegacyService,
+    BusinessesService,
+    ProfilesService,
+  ],
 })
 export class AdminViewsModule {}

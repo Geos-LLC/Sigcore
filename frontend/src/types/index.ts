@@ -392,6 +392,108 @@ export interface LegacySmsRow {
   createdAt: string;
 }
 
+// ==================== Businesses + Profiles (PR5) ====================
+// Mirror of backend/src/modules/admin-views/dto/admin-views.types.ts.
+
+export interface BusinessSummary {
+  id: string;
+  displayName: string;
+  slug: string;
+  status: string;
+  externalBusinessId: string | null;
+  defaultProfileId: string | null;
+  workspaceId: string;
+  tenantId: string;
+  tenantName: string | null;
+  platformId: string;
+  profileCount: number;
+  phoneCount: number;
+  sources: string[];
+  hasSharedPhone: boolean;
+  createdAt: string;
+}
+
+export interface BusinessPhoneRow {
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  a2pStatus: string | null;
+  assignedProfileIds: string[];
+  isShared: boolean;
+}
+
+export interface BusinessDetail extends BusinessSummary {
+  profiles: ProfileSummary[];
+  phones: BusinessPhoneRow[];
+}
+
+export interface ProfileSummary {
+  id: string;
+  displayName: string;
+  slug: string;
+  source: string;
+  status: string;
+  isDefault: boolean;
+  externalProfileId: string | null;
+  communicationBusinessId: string;
+  businessName: string | null;
+  tenantId: string;
+  tenantName: string | null;
+  workspaceId: string;
+  platformId: string;
+  phoneCount: number;
+  hasSharedPhone: boolean;
+  createdAt: string;
+}
+
+export interface ProfilePhoneAssignmentRow {
+  id: string;
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  role: string;
+  isDefault: boolean;
+  priority: number;
+  active: boolean;
+  isShared: boolean;
+  sharedWith: Array<{ profileId: string; profileName: string }>;
+}
+
+export interface ProfileRecentMessageRow {
+  id: string;
+  conversationId: string;
+  direction: string;
+  fromNumber: string;
+  toNumber: string;
+  body: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface ProfileDetail extends ProfileSummary {
+  assignments: ProfilePhoneAssignmentRow[];
+  recentMessages: ProfileRecentMessageRow[];
+}
+
+export interface BusinessFilters {
+  platformId?: string;
+  source?: string;
+  hasPhones?: boolean;
+  hasSharedPhone?: boolean;
+  hasExternalId?: boolean;
+}
+
+export interface ProfileFilters {
+  platformId?: string;
+  source?: string;
+  businessId?: string;
+  tenantId?: string;
+  hasPhones?: boolean;
+  hasSharedPhone?: boolean;
+  hasExternalId?: boolean;
+  isDefault?: boolean;
+}
+
 // ==================== Common ====================
 
 export interface ApiResponse<T> {

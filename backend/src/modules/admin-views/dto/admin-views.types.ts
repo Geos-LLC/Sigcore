@@ -180,3 +180,96 @@ export interface LegacySmsRow {
   providerSid: string | null;
   createdAt: string;
 }
+
+// ==================== Businesses (PR5) ====================
+
+export interface BusinessSummary {
+  id: string;
+  displayName: string;
+  slug: string;
+  status: string;
+  externalBusinessId: string | null;
+  defaultProfileId: string | null;
+  workspaceId: string;
+  tenantId: string;
+  tenantName: string | null;
+  /** Inferred platform via the existing platform-attribution helper. */
+  platformId: string;
+  profileCount: number;
+  phoneCount: number;
+  /** Distinct sources across this business's profiles. */
+  sources: string[];
+  /** True if any profile under this business shares one of its phones with another profile. */
+  hasSharedPhone: boolean;
+  createdAt: string;
+}
+
+export interface BusinessDetail extends BusinessSummary {
+  profiles: ProfileSummary[];
+  phones: BusinessPhoneRow[];
+}
+
+export interface BusinessPhoneRow {
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  a2pStatus: string | null;
+  /** Profiles under this business that have an active assignment to this phone. */
+  assignedProfileIds: string[];
+  /** True if any other profile (under this business or elsewhere) also has this phone. */
+  isShared: boolean;
+}
+
+// ==================== Profiles (PR5) ====================
+
+export interface ProfileSummary {
+  id: string;
+  displayName: string;
+  slug: string;
+  source: string;
+  status: string;
+  isDefault: boolean;
+  externalProfileId: string | null;
+  communicationBusinessId: string;
+  businessName: string | null;
+  tenantId: string;
+  tenantName: string | null;
+  workspaceId: string;
+  platformId: string;
+  phoneCount: number;
+  /** True if any of this profile's phones are also assigned to another profile. */
+  hasSharedPhone: boolean;
+  createdAt: string;
+}
+
+export interface ProfilePhoneAssignmentRow {
+  id: string;
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  role: string;
+  isDefault: boolean;
+  priority: number;
+  active: boolean;
+  /** True if this same phone is assigned to ≥1 other profile (M:N share). */
+  isShared: boolean;
+  /** Other profiles that share this phone, when isShared = true. */
+  sharedWith: Array<{ profileId: string; profileName: string }>;
+}
+
+export interface ProfileDetail extends ProfileSummary {
+  assignments: ProfilePhoneAssignmentRow[];
+  /** Recent inbound/outbound messages for the profile (capped). */
+  recentMessages: ProfileRecentMessageRow[];
+}
+
+export interface ProfileRecentMessageRow {
+  id: string;
+  conversationId: string;
+  direction: 'in' | 'out' | string;
+  fromNumber: string;
+  toNumber: string;
+  body: string;
+  status: string;
+  createdAt: string;
+}

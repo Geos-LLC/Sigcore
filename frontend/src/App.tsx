@@ -21,6 +21,10 @@ import AdminPlatformDetailPage from './pages/admin/AdminPlatformDetailPage';
 import AdminPhoneNumbersInventoryPage from './pages/admin/AdminPhoneNumbersInventoryPage';
 import AdminLegacyPage from './pages/admin/AdminLegacyPage';
 import AdminWorkspacesPage from './pages/admin/AdminWorkspacesPage';
+import AdminBusinessesPage from './pages/admin/AdminBusinessesPage';
+import AdminBusinessDetailPage from './pages/admin/AdminBusinessDetailPage';
+import AdminProfilesPage from './pages/admin/AdminProfilesPage';
+import AdminProfileDetailPage from './pages/admin/AdminProfileDetailPage';
 
 // Portal
 import TenantPortalLoginPage from './pages/portal/TenantPortalLoginPage';
@@ -59,6 +63,10 @@ export default function App() {
         <Route path="platforms" element={<AdminPlatformsPage />} />
         <Route path="platforms/:id" element={<AdminPlatformDetailPage />} />
         <Route path="workspaces" element={<AdminWorkspacesPage />} />
+        <Route path="businesses" element={<AdminBusinessesPage />} />
+        <Route path="businesses/:id" element={<AdminBusinessDetailPage />} />
+        <Route path="profiles" element={<AdminProfilesPage />} />
+        <Route path="profiles/:id" element={<AdminProfileDetailPage />} />
         <Route path="phone-numbers" element={<AdminPhoneNumbersInventoryPage />} />
         <Route path="legacy" element={<AdminLegacyPage />} />
         {/* Raw flat tenants table — kept available for debugging only. */}

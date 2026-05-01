@@ -14,9 +14,10 @@ import {
   PhoneIncoming,
   RefreshCw,
   Layers,
-  UserCircle,
   Phone,
   Archive,
+  Building2,
+  MapPin,
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useAdminAuthStore } from '../../store/adminAuthStore';
@@ -26,6 +27,8 @@ import { useAdminAuthStore } from '../../store/adminAuthStore';
 const STARTS_WITH_PATHS = new Set<string>([
   '/admin/platforms',
   '/admin/workspaces',
+  '/admin/businesses',
+  '/admin/profiles',
   '/admin/phone-numbers',
   '/admin/legacy',
 ]);
@@ -99,7 +102,14 @@ export default function AdminLayout() {
                   <Users className="h-4 w-4" />
                   Workspaces
                 </Link>
-                <DisabledNavItem icon={<UserCircle className="h-4 w-4" />} label="Profiles" />
+                <Link to="/admin/businesses" className={navLinkClass('/admin/businesses')}>
+                  <Building2 className="h-4 w-4" />
+                  Businesses
+                </Link>
+                <Link to="/admin/profiles" className={navLinkClass('/admin/profiles')}>
+                  <MapPin className="h-4 w-4" />
+                  Profiles
+                </Link>
                 <Link to="/admin/phone-numbers" className={navLinkClass('/admin/phone-numbers')}>
                   <Phone className="h-4 w-4" />
                   Phone Numbers
@@ -196,15 +206,3 @@ function NavGroup({ label, children }: { label?: string; children: ReactNode }) 
   );
 }
 
-function DisabledNavItem({ icon, label }: { icon: ReactNode; label: string }) {
-  return (
-    <div
-      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-gray-400 cursor-not-allowed select-none"
-      title="Coming soon"
-    >
-      {icon}
-      <span>{label}</span>
-      <span className="ml-auto text-[10px] uppercase tracking-wider text-gray-300">soon</span>
-    </div>
-  );
-}
