@@ -158,19 +158,42 @@ export class BackfillBusinessesProfilesAssignments1764000100000
     }
 
     // ---------- 3. profile_phone_assignments — one per tenant_phone_numbers row ----------
-    // Idempotent INSERT via unique (profile_id, tenant_phone_number_id) index.
-    // Use SELECT ... INSERT pattern so we don't need ON CONFLICT here.
+    //
+    // A tenant can own multiple phones, but the partial-unique index
+    // IDX_ppa_default_per_profile requires that ONLY ONE assignment per
+    // profile carries is_default=TRUE while active. So we rank phones per
+    // profile by (created_at ASC, id ASC) and mark only the first as
+    // default; siblings get is_default=FALSE and rely on priority.
+    //
+    // Idempotent: NOT EXISTS guard against the unique
+    // (profile_id, tenant_phone_number_id) index.
     await queryRunner.query(`
+      WITH ranked AS (
+        SELECT
+          p.id   AS profile_id,
+          tpn.id AS phone_id,
+          ROW_NUMBER() OVER (
+            PARTITION BY p.id
+            ORDER BY tpn.created_at ASC, tpn.id ASC
+          ) AS rn
+        FROM tenant_phone_numbers tpn
+        JOIN communication_profiles p
+          ON p.tenant_id = tpn.tenant_id AND p.is_default = TRUE
+      )
       INSERT INTO profile_phone_assignments
         (profile_id, tenant_phone_number_id, role, is_default, priority, active)
       SELECT
-        p.id, tpn.id, 'primary', TRUE, 100, TRUE
-      FROM tenant_phone_numbers tpn
-      JOIN communication_profiles p
-        ON p.tenant_id = tpn.tenant_id AND p.is_default = TRUE
+        r.profile_id,
+        r.phone_id,
+        'primary',
+        (r.rn = 1),                  -- only the first per profile is the default
+        100,
+        TRUE
+      FROM ranked r
       WHERE NOT EXISTS (
         SELECT 1 FROM profile_phone_assignments ppa
-        WHERE ppa.profile_id = p.id AND ppa.tenant_phone_number_id = tpn.id
+        WHERE ppa.profile_id = r.profile_id
+          AND ppa.tenant_phone_number_id = r.phone_id
       )
     `);
 
