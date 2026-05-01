@@ -286,6 +286,11 @@ export interface ProfileRow {
   hasLegacy: boolean;
   hasCurrent: boolean;
   attributionReasons: string[];
+  // Real-profile-backed fields (optional — null on legacy derived rows).
+  communicationProfileId?: string | null;
+  source?: string | null;
+  externalProfileId?: string | null;
+  slug?: string | null;
 }
 
 export type WorkspaceGroupSource =
@@ -306,6 +311,11 @@ export interface WorkspaceGroup {
   totalTenantCount: number;
   totalPhoneNumbersCount: number;
   attributionReasons: string[];
+  // Real-business-backed fields (optional — null on legacy derived groups).
+  communicationBusinessId?: string | null;
+  externalBusinessId?: string | null;
+  tenantId?: string | null;
+  tenantName?: string | null;
 }
 
 export interface PlatformDetail extends PlatformSummary {

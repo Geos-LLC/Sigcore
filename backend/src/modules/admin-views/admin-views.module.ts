@@ -11,6 +11,9 @@ import { CommunicationConversation } from '../../database/entities/communication
 import { CommunicationMessage } from '../../database/entities/communication-message.entity';
 import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
 import { Business } from '../../database/entities/business.entity';
+import { CommunicationBusiness } from '../../database/entities/communication-business.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
 import { PlatformsController } from './platforms.controller';
 import { PlatformsService } from './platforms.service';
 import { InventoryController } from './inventory.controller';
@@ -41,6 +44,9 @@ import { LegacyService } from './legacy.service';
       CommunicationMessage,
       ProductWorkspace,
       Business,
+      CommunicationBusiness,
+      CommunicationProfile,
+      ProfilePhoneAssignment,
     ]),
   ],
   controllers: [PlatformsController, InventoryController, LegacyController],

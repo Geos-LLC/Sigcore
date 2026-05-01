@@ -67,8 +67,10 @@ export interface PlatformWebhookRow {
 }
 
 /**
- * Profile under a customer workspace. Multiple tenants with the same
- * (case-insensitive) profile name collapse into one row with duplicateCount > 1.
+ * Profile under a customer workspace. With real profiles (PR2+) each row
+ * corresponds to a real `communication_profiles` record. With the legacy
+ * derived path (fallback only) multiple tenants with the same profile name
+ * collapse into one row with `duplicateCount > 1`.
  */
 export interface ProfileRow {
   name: string;
@@ -78,6 +80,11 @@ export interface ProfileRow {
   hasLegacy: boolean;
   hasCurrent: boolean;
   attributionReasons: string[];
+  // Real-profile-backed fields (null on legacy derived rows).
+  communicationProfileId?: string | null;
+  source?: string | null;
+  externalProfileId?: string | null;
+  slug?: string | null;
 }
 
 /** Source rule that produced this workspace group. */
@@ -87,8 +94,9 @@ export type WorkspaceGroupSource =
   | 'standalone';
 
 /**
- * Customer workspace inferred from tenant signals (business_identity_id
- * → name prefix → standalone fallback). UI-only, derived layer — no schema.
+ * Customer workspace. With real profiles (PR2+), each WorkspaceGroup is one
+ * `communication_businesses` row. With the legacy derived path (fallback)
+ * tenants are grouped by business_identity_id / name prefix / standalone.
  */
 export interface WorkspaceGroup {
   name: string;
@@ -99,6 +107,11 @@ export interface WorkspaceGroup {
   totalTenantCount: number;
   totalPhoneNumbersCount: number;
   attributionReasons: string[];
+  // Real-business-backed fields (null on legacy derived groups).
+  communicationBusinessId?: string | null;
+  externalBusinessId?: string | null;
+  tenantId?: string | null;
+  tenantName?: string | null;
 }
 
 export interface PlatformDetail extends PlatformSummary {

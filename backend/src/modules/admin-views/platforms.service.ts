@@ -10,6 +10,9 @@ import { CommunicationMessage } from '../../database/entities/communication-mess
 import { ProductWorkspace } from '../../database/entities/product-workspace.entity';
 import { Business } from '../../database/entities/business.entity';
 import { PhoneNumberAssignment } from '../../database/entities/phone-number-assignment.entity';
+import { CommunicationBusiness } from '../../database/entities/communication-business.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
 import {
   attributePlatforms,
   tenantsByPlatform,
@@ -32,6 +35,7 @@ import {
   PlatformApiKeyRow,
   PlatformWebhookRow,
   WorkspaceGroup,
+  ProfileRow,
 } from './dto/admin-views.types';
 
 const ALL_PLATFORM_IDS: PlatformId[] = [
@@ -70,6 +74,12 @@ export class PlatformsService {
     private readonly businessRepo: Repository<Business>,
     @InjectRepository(PhoneNumberAssignment)
     private readonly pnaRepo: Repository<PhoneNumberAssignment>,
+    @InjectRepository(CommunicationBusiness)
+    private readonly commBizRepo: Repository<CommunicationBusiness>,
+    @InjectRepository(CommunicationProfile)
+    private readonly commProfileRepo: Repository<CommunicationProfile>,
+    @InjectRepository(ProfilePhoneAssignment)
+    private readonly ppaRepo: Repository<ProfilePhoneAssignment>,
   ) {}
 
   /**
@@ -203,8 +213,16 @@ export class PlatformsService {
   }
 
   /**
-   * Group the platform's tenants into customer workspaces and dedup'd profiles.
-   * Pure derivation on top of already-loaded data plus a businesses lookup.
+   * Build the platform's customer-workspace tree.
+   *
+   * PR2 — primary path: real `communication_businesses` + `communication_profiles`
+   *   + `profile_phone_assignments`. Each business produces one WorkspaceGroup;
+   *   each profile is sourced from its real DB row with stable IDs and
+   *   `source` populated from `communication_profiles.source`.
+   *
+   * Fallback path: name-prefix derivation via `groupWorkspaces`. Only fires
+   *   for tenants with no real `communication_businesses` row — shouldn't
+   *   happen post-PR1 backfill, but kept for safety.
    */
   private async buildWorkspaceGroups(input: {
     tenantIds: string[];
@@ -214,57 +232,184 @@ export class PlatformsService {
     legacyAssignments: PhoneNumberAssignment[];
   }): Promise<WorkspaceGroup[]> {
     const { tenantIds, tenantById, attribution, phones, legacyAssignments } = input;
+    if (tenantIds.length === 0) return [];
 
-    // Distinct business_identity_ids referenced by these tenants.
-    const businessIds = Array.from(
-      new Set(
-        tenantIds
-          .map((tid) => tenantById.get(tid)?.businessIdentityId)
-          .filter((bid): bid is string => Boolean(bid)),
-      ),
-    );
-    const businesses =
-      businessIds.length > 0
-        ? await this.businessRepo.find({ where: { id: In(businessIds) } })
+    // ---------- Real path: load communication_businesses + profiles + assignments ----------
+    const commBusinesses = await this.commBizRepo.find({
+      where: { tenantId: In(tenantIds) },
+    });
+    const commBusinessIds = commBusinesses.map((b) => b.id);
+
+    const commProfiles =
+      commBusinessIds.length > 0
+        ? await this.commProfileRepo.find({
+            where: { communicationBusinessId: In(commBusinessIds) },
+          })
         : [];
-    const businessesById = new Map<string, GroupingBusiness>(
-      businesses.map((b) => [b.id, { id: b.id, name: b.name }]),
-    );
+    const commProfileIds = commProfiles.map((p) => p.id);
 
-    // Per-tenant phone counts (current).
-    const phoneCountByTenant = new Map<string, number>();
-    for (const p of phones) {
-      phoneCountByTenant.set(
-        p.tenantId,
-        (phoneCountByTenant.get(p.tenantId) ?? 0) + 1,
-      );
+    // Phone count per profile via the M:N junction (active rows only).
+    const ppaRows: Array<{ profile_id: string; phone_number: string }> =
+      commProfileIds.length > 0
+        ? await this.ppaRepo
+            .createQueryBuilder('ppa')
+            .innerJoin(
+              TenantPhoneNumber,
+              'tpn',
+              'tpn.id = ppa.tenant_phone_number_id',
+            )
+            .where('ppa.profile_id IN (:...ids)', { ids: commProfileIds })
+            .andWhere('ppa.active = TRUE')
+            .select([
+              'ppa.profile_id AS profile_id',
+              'tpn.phone_number AS phone_number',
+            ])
+            .getRawMany()
+        : [];
+
+    const profilesByBusinessId = new Map<string, CommunicationProfile[]>();
+    for (const p of commProfiles) {
+      const arr = profilesByBusinessId.get(p.communicationBusinessId) ?? [];
+      arr.push(p);
+      profilesByBusinessId.set(p.communicationBusinessId, arr);
     }
 
-    // Per-tenant legacy presence (any phone_number_assignments row whose
-    // business_id == this tenant_id).
+    const phonesByProfileId = new Map<string, string[]>();
+    for (const r of ppaRows) {
+      const arr = phonesByProfileId.get(r.profile_id) ?? [];
+      arr.push(r.phone_number);
+      phonesByProfileId.set(r.profile_id, arr);
+    }
+
+    // Per-tenant legacy presence (phone_number_assignments where business_id = tenant.id).
     const legacyByTenant = new Set<string>();
     for (const a of legacyAssignments) {
       if (a.businessId) legacyByTenant.add(a.businessId);
     }
 
-    const groupingTenants: GroupingTenant[] = tenantIds
-      .map((tid) => tenantById.get(tid))
-      .filter((t): t is Tenant => Boolean(t))
-      .map((t) => {
-        const phoneNumbersCount = phoneCountByTenant.get(t.id) ?? 0;
-        return {
-          id: t.id,
-          name: t.name,
-          businessIdentityId: t.businessIdentityId ?? null,
-          attributionReason:
-            attribution.reasonByTenantId.get(t.id) ?? 'unclassified',
-          phoneNumbersCount,
-          hasLegacy: legacyByTenant.has(t.id),
-          hasCurrent: phoneNumbersCount > 0,
-        };
+    const realGroups: WorkspaceGroup[] = [];
+    const tenantsWithRealBiz = new Set<string>();
+
+    for (const biz of commBusinesses) {
+      tenantsWithRealBiz.add(biz.tenantId);
+      const tenant = tenantById.get(biz.tenantId);
+      const tenantHasLegacy = legacyByTenant.has(biz.tenantId);
+
+      const profileRows: ProfileRow[] = (profilesByBusinessId.get(biz.id) ?? []).map(
+        (p) => {
+          const phones = phonesByProfileId.get(p.id) ?? [];
+          return {
+            name: p.displayName,
+            duplicateCount: 1,
+            tenantIds: [biz.tenantId],
+            phoneNumbersCount: phones.length,
+            hasCurrent: phones.length > 0,
+            hasLegacy: tenantHasLegacy,
+            attributionReasons: [String(p.source)],
+            communicationProfileId: p.id,
+            source: String(p.source),
+            externalProfileId: p.externalProfileId ?? null,
+            slug: p.slug,
+          };
+        },
+      );
+
+      // Sort profiles: default first, then alphabetical.
+      profileRows.sort((a, b) => {
+        const aDefault = (profilesByBusinessId.get(biz.id) ?? []).find(
+          (p) => p.id === a.communicationProfileId,
+        )?.isDefault
+          ? 0
+          : 1;
+        const bDefault = (profilesByBusinessId.get(biz.id) ?? []).find(
+          (p) => p.id === b.communicationProfileId,
+        )?.isDefault
+          ? 0
+          : 1;
+        if (aDefault !== bDefault) return aDefault - bDefault;
+        return a.name.localeCompare(b.name);
       });
 
-    return groupWorkspaces(groupingTenants, businessesById).groups;
+      const totalPhones = profileRows.reduce(
+        (acc, p) => acc + p.phoneNumbersCount,
+        0,
+      );
+      const attributionReasons = uniqueStable(
+        profileRows.flatMap((p) => p.attributionReasons),
+      );
+
+      realGroups.push({
+        name: biz.displayName,
+        source: 'business_identity',
+        businessIdentityId: tenant?.businessIdentityId ?? null,
+        profiles: profileRows,
+        profileCount: profileRows.length,
+        totalTenantCount: 1,
+        totalPhoneNumbersCount: totalPhones,
+        attributionReasons,
+        communicationBusinessId: biz.id,
+        externalBusinessId: biz.externalBusinessId ?? null,
+        tenantId: biz.tenantId,
+        tenantName: tenant?.name ?? null,
+      });
+    }
+
+    // ---------- Fallback path: tenants with no real business → derivation ----------
+    const orphanTenantIds = tenantIds.filter((tid) => !tenantsWithRealBiz.has(tid));
+    if (orphanTenantIds.length > 0) {
+      this.logger.warn(
+        `[admin-views] ${orphanTenantIds.length} tenants without communication_businesses — using legacy derivation fallback`,
+      );
+
+      const phoneCountByTenant = new Map<string, number>();
+      for (const p of phones) {
+        if (orphanTenantIds.includes(p.tenantId)) {
+          phoneCountByTenant.set(
+            p.tenantId,
+            (phoneCountByTenant.get(p.tenantId) ?? 0) + 1,
+          );
+        }
+      }
+
+      const groupingTenants: GroupingTenant[] = orphanTenantIds
+        .map((tid) => tenantById.get(tid))
+        .filter((t): t is Tenant => Boolean(t))
+        .map((t) => {
+          const c = phoneCountByTenant.get(t.id) ?? 0;
+          return {
+            id: t.id,
+            name: t.name,
+            businessIdentityId: t.businessIdentityId ?? null,
+            attributionReason:
+              attribution.reasonByTenantId.get(t.id) ?? 'unclassified',
+            phoneNumbersCount: c,
+            hasLegacy: legacyByTenant.has(t.id),
+            hasCurrent: c > 0,
+          };
+        });
+
+      // businesses lookup for the OLD identity registry — only used by
+      // legacy derivation. Different table from communication_businesses.
+      const orphanBusinessIds = Array.from(
+        new Set(
+          orphanTenantIds
+            .map((tid) => tenantById.get(tid)?.businessIdentityId)
+            .filter((bid): bid is string => Boolean(bid)),
+        ),
+      );
+      const oldBusinesses =
+        orphanBusinessIds.length > 0
+          ? await this.businessRepo.find({ where: { id: In(orphanBusinessIds) } })
+          : [];
+      const businessesById = new Map<string, GroupingBusiness>(
+        oldBusinesses.map((b) => [b.id, { id: b.id, name: b.name }]),
+      );
+
+      const fallbackGroups = groupWorkspaces(groupingTenants, businessesById).groups;
+      realGroups.push(...fallbackGroups);
+    }
+
+    return realGroups;
   }
 
   /**
@@ -403,6 +548,18 @@ export class PlatformsService {
       return null;
     }
   }
+}
+
+function uniqueStable<T>(arr: T[]): T[] {
+  const seen = new Set<T>();
+  const out: T[] = [];
+  for (const x of arr) {
+    if (!seen.has(x)) {
+      seen.add(x);
+      out.push(x);
+    }
+  }
+  return out;
 }
 
 // re-export for callers
