@@ -102,6 +102,22 @@ export class ApiKeysService {
     });
   }
 
+  /**
+   * Look up the canonical active tenant API key (PR10 idempotent provisioning).
+   * Returns null when no active tenant key exists. Caller decides whether to
+   * mint a new one (forceNewKey path) or hand back a summary.
+   */
+  async getActiveTenantApiKey(
+    workspaceId: string,
+    tenantId: string,
+  ): Promise<ApiKey | null> {
+    const candidates = await this.apiKeyRepository.find({
+      where: { workspaceId, tenantId, scope: 'tenant', active: true },
+      order: { createdAt: 'DESC' },
+    });
+    return candidates.length > 0 ? candidates[0] : null;
+  }
+
   async deleteTenantApiKey(
     workspaceId: string,
     tenantId: string,

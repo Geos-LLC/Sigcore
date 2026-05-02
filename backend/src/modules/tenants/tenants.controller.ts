@@ -61,7 +61,15 @@ export class TenantsController {
 
   /**
    * Provision a tenant + tenant API key in one call (idempotent by externalTenantId).
-   * Called by LeadBridge using the workspace key to set up per-account isolation.
+   *
+   * PR10: hardened idempotency. Repeated calls with the same externalTenantId
+   * return the same tenant id. Anchor names/external_ids (LeadBridge,
+   * HireFunnel, ServiceFlow, Callio) are rejected — they're platform handles,
+   * not customer tenants. Inactive tenants are not reused unless the caller
+   * passes `allowInactive: true`. API keys: by default, mint a new key on
+   * every provision (back-compat with existing LB callers). Pass
+   * `reuseActiveKey: true` to receive an existing-key summary instead.
+   *
    * POST /api/tenants/provision
    */
   @Post('provision')
@@ -69,27 +77,74 @@ export class TenantsController {
   async provisionTenant(
     @WorkspaceId() workspaceId: string,
     @Request() req: any,
-    @Body() dto: { externalTenantId: string; displayName?: string },
+    @Body()
+    dto: {
+      externalTenantId: string;
+      displayName?: string;
+      allowInactive?: boolean;
+      /** When true, skip minting a new key if an active key already exists. */
+      reuseActiveKey?: boolean;
+    },
   ) {
     if (req.apiKeyScope === 'tenant') {
       throw new ForbiddenException('Tenant keys cannot provision tenants');
     }
-    let tenant = await this.tenantsService.getTenantByExternalId(workspaceId, dto.externalTenantId);
-    let isNew = false;
-    if (!tenant) {
-      tenant = await this.tenantsService.createTenant(workspaceId, {
-        externalId: dto.externalTenantId,
-        name: dto.displayName || dto.externalTenantId,
+
+    const helpers = await import('./idempotent-provisioning.helpers');
+    const { tenant, reused } =
+      await this.tenantsService.findOrCreateTenantByExternalId(workspaceId, {
+        externalTenantId: dto.externalTenantId,
+        displayName: dto.displayName,
+        allowInactive: dto.allowInactive,
       });
-      isNew = true;
+
+    // API key handling — see locked decisions in idempotent-provisioning.helpers.ts.
+    let issuedKey: string | undefined;
+    let apiKeySummary: import('./idempotent-provisioning.helpers').ApiKeySummary | undefined;
+    let apiKeyReused = false;
+
+    if (dto.reuseActiveKey) {
+      const active = await this.apiKeysService.getActiveTenantApiKey(workspaceId, tenant.id);
+      if (active) {
+        apiKeySummary = helpers.summarizeApiKey({
+          id: active.id,
+          name: active.name,
+          key: active.key,
+          active: active.active,
+          createdAt: active.createdAt,
+          lastUsedAt: active.lastUsedAt ?? null,
+        });
+        apiKeyReused = true;
+      } else {
+        const result = await this.apiKeysService.createTenantApiKey(
+          workspaceId,
+          tenant.id,
+          'LeadBridge Key',
+        );
+        issuedKey = result.key;
+      }
+    } else {
+      // Back-compat default: always mint a fresh key. Existing callers (LB)
+      // depend on `apiKey` being present in the response.
+      const result = await this.apiKeysService.createTenantApiKey(
+        workspaceId,
+        tenant.id,
+        'LeadBridge Key',
+      );
+      issuedKey = result.key;
     }
-    const result = await this.apiKeysService.createTenantApiKey(workspaceId, tenant.id, 'LeadBridge Key');
+
     return {
       data: {
+        // Back-compat fields (unchanged shape) ----------------------------
         tenantId: tenant.id,
         externalTenantId: tenant.externalId,
-        apiKey: result.key,
-        isNew,
+        apiKey: issuedKey,
+        // `isNew` is the legacy name for "tenant was created on this call".
+        isNew: !reused,
+        // PR10 fields -----------------------------------------------------
+        reused: { tenant: reused, apiKey: apiKeyReused },
+        apiKeySummary,
       },
     };
   }

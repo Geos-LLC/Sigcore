@@ -124,6 +124,90 @@ export class TenantsService {
   }
 
   /**
+   * Idempotent tenant lookup-or-create (PR10).
+   *
+   * Honors the provisioning rules:
+   *   - never reuse an anchor tenant as a customer tenant
+   *   - never reuse an inactive tenant unless `allowInactive=true`
+   *   - same externalTenantId → same tenant id (race-safe via the
+   *     (workspace_id, external_id) unique index)
+   *
+   * The pure helpers in idempotent-provisioning.helpers.ts handle the
+   * decision logic; this method handles the I/O.
+   *
+   * Returns the resolved tenant + a `reused` flag so the caller can decide
+   * whether to wire up a fresh API key (forceNewKey path) or hand back a
+   * summary of the existing one.
+   */
+  async findOrCreateTenantByExternalId(
+    workspaceId: string,
+    rawInput: import('./idempotent-provisioning.helpers').ProvisionInput,
+  ): Promise<{ tenant: Tenant; reused: boolean }> {
+    const helpers = await import('./idempotent-provisioning.helpers');
+    const validated = helpers.validateProvisionInput(rawInput);
+    if (!validated.ok) {
+      if (validated.error === 'anchor_input_rejected') {
+        throw new BadRequestException(validated.detail);
+      }
+      throw new BadRequestException(validated.detail);
+    }
+    const v = validated.value;
+
+    const candidates = await this.tenantRepo.find({
+      where: { workspaceId, externalId: v.externalTenantId },
+    });
+
+    const decision = helpers.selectExistingTenant(
+      candidates.map((c) => ({ id: c.id, status: String(c.status), name: c.name })),
+      { allowInactive: v.allowInactive },
+    );
+
+    if (decision.decision === 'reject') {
+      throw new ConflictException(decision.reason);
+    }
+
+    if (decision.decision === 'reuse' && decision.tenantId) {
+      const reused = candidates.find((c) => c.id === decision.tenantId);
+      if (reused) {
+        // Refresh fields the caller may have updated (display name) without
+        // touching auth-sensitive fields like webhook_secret. Skip when
+        // unchanged to avoid pointless writes.
+        if (v.displayName && reused.name !== v.displayName) {
+          reused.name = v.displayName;
+          await this.tenantRepo.save(reused);
+        }
+        this.logger.log(
+          `Reusing existing tenant ${reused.id} for externalId=${v.externalTenantId}`,
+        );
+        return { tenant: reused, reused: true };
+      }
+    }
+
+    // create_new path. Race-safe: if a concurrent caller wins the unique
+    // index, catch and re-lookup.
+    try {
+      const created = await this.createTenant(workspaceId, {
+        externalId: v.externalTenantId,
+        name: v.displayName,
+      });
+      return { tenant: created, reused: false };
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        const winner = await this.tenantRepo.findOne({
+          where: { workspaceId, externalId: v.externalTenantId },
+        });
+        if (winner) {
+          this.logger.log(
+            `Race detected on externalId=${v.externalTenantId}; reusing winner ${winner.id}`,
+          );
+          return { tenant: winner, reused: true };
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Register a tenant in the business identity model.
    * Creates a business + product_workspace + links phone numbers as assets.
    */

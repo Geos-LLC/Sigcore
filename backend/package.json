@@ -20,7 +20,8 @@
     "lb:materialize:dry-run": "npx ts-node -r tsconfig-paths/register src/scripts/lb-materialize-profiles.ts",
     "lb:materialize": "npx ts-node -r tsconfig-paths/register src/scripts/lb-materialize-profiles.ts",
     "lb:backfill-conversations:dry-run": "npx ts-node -r tsconfig-paths/register src/scripts/lb-backfill-conversation-profiles.ts",
-    "lb:backfill-conversations": "npx ts-node -r tsconfig-paths/register src/scripts/lb-backfill-conversation-profiles.ts"
+    "lb:backfill-conversations": "npx ts-node -r tsconfig-paths/register src/scripts/lb-backfill-conversation-profiles.ts",
+    "audit:duplicates": "npx ts-node -r tsconfig-paths/register src/scripts/audit-duplicates.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
