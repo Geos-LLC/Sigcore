@@ -1,15 +1,31 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { PhoneNumberAssignment } from '../../database/entities/phone-number-assignment.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
+import { CommunicationBusiness } from '../../database/entities/communication-business.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
 import {
   InventoryRow,
   InventoryCurrentBlock,
   InventoryLegacyBlock,
+  InventoryAssignmentChainEntry,
   PhoneModelBadge,
 } from './dto/admin-views.types';
+import {
+  attributePlatforms,
+  AttributionTenant,
+} from './platform-attribution';
+import {
+  AggregationBusiness,
+  AggregationPhoneCounts,
+  AggregationProfileCounts,
+  AggregationTenant,
+  aggregateWorkspaces,
+  workspaceKeyForBusiness,
+} from './workspace-aggregation';
 
 const HARD_LIMIT = 500;
 const DEFAULT_LIMIT = 200;
@@ -34,6 +50,12 @@ export class InventoryService {
     private readonly pnaRepo: Repository<PhoneNumberAssignment>,
     @InjectRepository(Tenant)
     private readonly tenantRepo: Repository<Tenant>,
+    @InjectRepository(CommunicationBusiness)
+    private readonly bizRepo: Repository<CommunicationBusiness>,
+    @InjectRepository(CommunicationProfile)
+    private readonly profileRepo: Repository<CommunicationProfile>,
+    @InjectRepository(ProfilePhoneAssignment)
+    private readonly ppaRepo: Repository<ProfilePhoneAssignment>,
   ) {}
 
   /**
@@ -91,6 +113,15 @@ export class InventoryService {
       byNumber.set(n, slot);
     }
 
+    // Resolve assignment chain (Platform → Workspace → Business → Profile)
+    // for the CURRENT phones. We do this once for the whole result set rather
+    // than per-row so the joins stay efficient.
+    const chainByNumber = await this.buildChainsByNumber(
+      workspaceId,
+      currents,
+      tenants,
+    );
+
     const rows: InventoryRow[] = [];
     for (const [number, { current, legacy }] of byNumber.entries()) {
       const model = this.computeModel(current, legacy);
@@ -129,6 +160,7 @@ export class InventoryService {
         model,
         current: currentBlock,
         legacy: legacyBlock,
+        chain: chainByNumber.get(number) ?? [],
       });
     }
 
@@ -182,5 +214,137 @@ export class InventoryService {
     if (businessId === workspaceId) return 'workspace';
     if (tenantIdSet.has(businessId)) return 'tenant';
     return 'unknown';
+  }
+
+  /**
+   * For each tenant_phone_numbers row, resolve the chain
+   * Platform → Workspace → Business → Profile via active
+   * profile_phone_assignments. A phone can resolve to multiple chains when
+   * shared across profiles (M:N), so we return an array per number.
+   */
+  private async buildChainsByNumber(
+    workspaceId: string,
+    tpns: TenantPhoneNumber[],
+    tenants: Array<{ id: string; name: string }>,
+  ): Promise<Map<string, InventoryAssignmentChainEntry[]>> {
+    const out = new Map<string, InventoryAssignmentChainEntry[]>();
+    if (tpns.length === 0) return out;
+
+    const tpnIds = tpns.map((t) => t.id);
+    const tpnIdToNumber = new Map(tpns.map((t) => [t.id, t.phoneNumber]));
+
+    const ppaRows = await this.ppaRepo
+      .createQueryBuilder('ppa')
+      .innerJoin(CommunicationProfile, 'p', 'p.id = ppa.profile_id')
+      .where('ppa.tenant_phone_number_id IN (:...ids)', { ids: tpnIds })
+      .andWhere('ppa.active = TRUE')
+      .select([
+        'ppa.tenant_phone_number_id AS tpn_id',
+        'ppa.profile_id            AS profile_id',
+        'ppa.is_default            AS is_default',
+        'ppa.role                  AS role',
+        'p.communication_business_id AS business_id',
+        'p.tenant_id               AS tenant_id',
+        'p.display_name            AS profile_display',
+        'p.source                  AS profile_source',
+      ])
+      .getRawMany<{
+        tpn_id: string;
+        profile_id: string;
+        is_default: boolean;
+        role: string;
+        business_id: string;
+        tenant_id: string;
+        profile_display: string;
+        profile_source: string;
+      }>();
+
+    if (ppaRows.length === 0) return out;
+
+    const businessIds = Array.from(new Set(ppaRows.map((r) => r.business_id)));
+    const businesses = await this.bizRepo.find({
+      where: { id: In(businessIds) },
+    });
+    const bizById = new Map(businesses.map((b) => [b.id, b]));
+
+    // Build workspace lookup so each chain entry shows the right "workspace"
+    // display name (lb-customer or solo-tenant).
+    const attribution = attributePlatforms(
+      tenants.map<AttributionTenant>((t) => ({ id: t.id, name: t.name })),
+    );
+    const aggTenants: AggregationTenant[] = tenants.map((t) => ({
+      id: t.id,
+      name: t.name ?? null,
+      workspaceId,
+      platformId: attribution.byTenantId.get(t.id) ?? 'unclassified',
+    }));
+    const aggBusinesses: AggregationBusiness[] = businesses.map((b) => ({
+      id: b.id,
+      tenantId: b.tenantId,
+      workspaceId: b.workspaceId,
+      displayName: b.displayName,
+      metadata: (b.metadata as Record<string, unknown> | null) ?? null,
+    }));
+    const emptyProfileCounts: AggregationProfileCounts = {
+      byProfileId: new Map(),
+      realProfilesPerBusiness: new Map(),
+      allProfilesPerBusiness: new Map(),
+    };
+    const emptyPhoneCounts: AggregationPhoneCounts = {
+      phonesPerBusiness: new Map(),
+    };
+    const workspaces = aggregateWorkspaces(
+      aggTenants,
+      aggBusinesses,
+      emptyProfileCounts,
+      emptyPhoneCounts,
+    );
+    const workspaceByKey = new Map(workspaces.map((w) => [w.key, w]));
+
+    for (const r of ppaRows) {
+      const number = tpnIdToNumber.get(r.tpn_id);
+      if (!number) continue;
+      const business = bizById.get(r.business_id);
+      const tenantPlatform =
+        attribution.byTenantId.get(r.tenant_id) ?? 'unclassified';
+      const wkey = business
+        ? workspaceKeyForBusiness({
+            tenantId: business.tenantId,
+            metadata: business.metadata,
+          })
+        : `tenant-${r.tenant_id}`;
+      const wks = workspaceByKey.get(wkey);
+      const entry: InventoryAssignmentChainEntry = {
+        platformId: tenantPlatform,
+        workspaceKey: wkey,
+        workspaceDisplayName:
+          wks?.displayName ??
+          tenants.find((t) => t.id === r.tenant_id)?.name ??
+          `Workspace ${wkey.slice(0, 16)}`,
+        businessId: business?.id ?? null,
+        businessDisplayName: business?.displayName ?? null,
+        profileId: r.profile_id,
+        profileDisplayName: r.profile_display,
+        profileSource: r.profile_source,
+        isDefault: r.is_default,
+        role: r.role,
+      };
+      const arr = out.get(number) ?? [];
+      arr.push(entry);
+      out.set(number, arr);
+    }
+
+    // Stable order: default first, then by role, then by businessDisplayName.
+    for (const arr of out.values()) {
+      arr.sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+        const r = (a.role ?? '').localeCompare(b.role ?? '');
+        if (r !== 0) return r;
+        return (a.businessDisplayName ?? '').localeCompare(
+          b.businessDisplayName ?? '',
+        );
+      });
+    }
+    return out;
   }
 }

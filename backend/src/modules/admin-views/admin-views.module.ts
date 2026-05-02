@@ -24,6 +24,8 @@ import { BusinessesController } from './businesses.controller';
 import { BusinessesService } from './businesses.service';
 import { ProfilesController } from './profiles.controller';
 import { ProfilesService } from './profiles.service';
+import { WorkspacesController } from './workspaces.controller';
+import { WorkspacesService } from './workspaces.service';
 
 /**
  * Read-only admin-views module.
@@ -59,6 +61,7 @@ import { ProfilesService } from './profiles.service';
     LegacyController,
     BusinessesController,
     ProfilesController,
+    WorkspacesController,
   ],
   providers: [
     PlatformsService,
@@ -66,6 +69,7 @@ import { ProfilesService } from './profiles.service';
     LegacyService,
     BusinessesService,
     ProfilesService,
+    WorkspacesService,
   ],
 })
 export class AdminViewsModule {}

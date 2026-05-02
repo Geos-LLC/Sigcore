@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -21,6 +21,18 @@ export default function AdminBusinessDetailPage() {
   const [detail, setDetail] = useState<BusinessDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // After LB profile materialization, demoted "Default" profiles linger for
+  // back-compat. Hide them by default; operators can flip the toggle.
+  const [showKeptDefaults, setShowKeptDefaults] = useState(false);
+
+  const visibleProfiles = useMemo(() => {
+    if (!detail) return [];
+    if (showKeptDefaults) return detail.profiles;
+    return detail.profiles.filter(
+      (p) => !(p.slug === 'default' && !p.isDefault),
+    );
+  }, [detail, showKeptDefaults]);
+  const hiddenCount = (detail?.profiles.length ?? 0) - visibleProfiles.length;
 
   const load = async () => {
     setLoading(true);
@@ -94,11 +106,23 @@ export default function AdminBusinessDetailPage() {
             <MapPin className="h-4 w-4 text-gray-400" />
             Profiles
             <span className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full tabular-nums">
-              {detail?.profiles.length ?? 0}
+              {visibleProfiles.length}
+              {hiddenCount > 0 ? ` of ${detail?.profiles.length ?? 0}` : ''}
             </span>
           </div>
+          {hiddenCount > 0 && (
+            <button
+              onClick={() => setShowKeptDefaults((v) => !v)}
+              className="text-xs text-gray-500 hover:text-gray-800"
+              title="Demoted Default profiles kept for backward compatibility"
+            >
+              {showKeptDefaults
+                ? 'Hide kept defaults'
+                : `Show kept defaults (${hiddenCount})`}
+            </button>
+          )}
         </div>
-        {detail && detail.profiles.length > 0 ? (
+        {detail && visibleProfiles.length > 0 ? (
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
@@ -111,7 +135,7 @@ export default function AdminBusinessDetailPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {detail.profiles.map((p) => (
+              {visibleProfiles.map((p) => (
                 <tr key={p.id} className="hover:bg-gray-50">
                   <td className="px-4 py-2">
                     <Link
@@ -132,6 +156,13 @@ export default function AdminBusinessDetailPage() {
                       <span className="inline-flex items-center gap-0.5 text-green-700 text-xs">
                         <CheckCircle2 className="h-3 w-3" />
                         default
+                      </span>
+                    ) : p.slug === 'default' ? (
+                      <span
+                        className="inline-flex items-center text-[10px] text-gray-400 italic"
+                        title="Kept for backward compatibility after LB profile materialization"
+                      >
+                        kept
                       </span>
                     ) : (
                       <span className="text-xs text-gray-400">—</span>

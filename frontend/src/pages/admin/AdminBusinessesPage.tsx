@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Building2,
   Phone,
@@ -46,6 +46,9 @@ export default function AdminBusinessesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const workspaceKey = searchParams.get('workspaceKey') ?? '';
+
   const [platform, setPlatform] = useState<'' | PlatformId>('');
   const [source, setSource] = useState('');
   const [hasPhones, setHasPhones] = useState(false);
@@ -63,6 +66,7 @@ export default function AdminBusinessesPage() {
         hasPhones: hasPhones || undefined,
         hasSharedPhone: hasShared || undefined,
         hasExternalId: hasExternal || undefined,
+        workspaceKey: workspaceKey || undefined,
       });
       setRows(data);
     } catch (err: any) {
@@ -75,7 +79,18 @@ export default function AdminBusinessesPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, source, hasPhones, hasShared, hasExternal]);
+  }, [platform, source, hasPhones, hasShared, hasExternal, workspaceKey]);
+
+  const clearWorkspaceFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('workspaceKey');
+    setSearchParams(next);
+  };
+  const workspaceLabel = useMemo(() => {
+    if (!workspaceKey) return null;
+    const first = rows.find((r) => r.workspaceKey === workspaceKey);
+    return first?.workspaceDisplayName ?? workspaceKey;
+  }, [rows, workspaceKey]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -96,8 +111,26 @@ export default function AdminBusinessesPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Businesses</h1>
           <p className="text-sm text-gray-500">
-            Communication businesses (locations / identities). Read-only.
+            Customer business / location rows. Drill down to a single business for its profiles &amp; phones.
           </p>
+          {workspaceKey && (
+            <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-200 text-xs">
+              <span className="text-gray-500">Workspace:</span>
+              <Link
+                to="/admin/workspaces"
+                className="font-semibold hover:underline"
+              >
+                {workspaceLabel ?? workspaceKey}
+              </Link>
+              <button
+                onClick={clearWorkspaceFilter}
+                className="text-primary-700 hover:text-primary-900"
+                title="Clear workspace filter"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
         </div>
         <button
           onClick={load}
@@ -183,8 +216,8 @@ export default function AdminBusinessesPage() {
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="text-left px-4 py-3">Business</th>
-                <th className="text-left px-4 py-3">Tenant</th>
+                <th className="text-left px-4 py-3">Business / Location</th>
+                <th className="text-left px-4 py-3">Workspace</th>
                 <th className="text-left px-4 py-3">Platform</th>
                 <th className="text-left px-4 py-3">Sources</th>
                 <th className="text-left px-4 py-3">Profiles</th>
@@ -224,7 +257,12 @@ export default function AdminBusinessesPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <div className="text-gray-700">{b.tenantName || '—'}</div>
+                      <Link
+                        to={`/admin/businesses?workspaceKey=${encodeURIComponent(b.workspaceKey)}`}
+                        className="text-gray-700 hover:text-primary-700"
+                      >
+                        {b.workspaceDisplayName}
+                      </Link>
                       <div className="mt-0.5">
                         <IdChip label="tenant" value={b.tenantId} />
                       </div>

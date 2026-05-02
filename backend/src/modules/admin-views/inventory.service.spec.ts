@@ -12,7 +12,16 @@ function makeQueryBuilder(rows: any[]) {
   const qb: any = {
     where: jest.fn(() => qb),
     orWhere: jest.fn(() => qb),
+    andWhere: jest.fn(() => qb),
+    innerJoin: jest.fn(() => qb),
+    leftJoin: jest.fn(() => qb),
+    select: jest.fn(() => qb),
+    addSelect: jest.fn(() => qb),
+    orderBy: jest.fn(() => qb),
+    addOrderBy: jest.fn(() => qb),
+    limit: jest.fn(() => qb),
     getMany: jest.fn(async () => rows),
+    getRawMany: jest.fn(async () => rows),
   };
   return qb;
 }
@@ -26,13 +35,30 @@ describe('InventoryService.listPhoneNumbers', () => {
     const tpnRepo = buildMockRepo();
     const pnaRepo = buildMockRepo();
     const tenantRepo = buildMockRepo();
+    // PR8 — InventoryService now also resolves the assignment chain. The
+    // chain helper queries businesses + profiles + ppa, so we provide stub
+    // repos that return empty arrays / no-op query builders. Existing tests
+    // don't rely on chain output; the new chain unit tests live elsewhere.
+    const bizRepo = buildMockRepo();
+    const profileRepo = buildMockRepo();
+    const ppaRepo = buildMockRepo();
+    bizRepo.find.mockResolvedValue([]);
+    profileRepo.find.mockResolvedValue([]);
+    ppaRepo.createQueryBuilder.mockReturnValue(makeQueryBuilder([]));
 
     tpnRepo.find.mockResolvedValue(currents);
     pnaRepo.createQueryBuilder.mockReturnValue(makeQueryBuilder(legacies));
     tenantRepo.find.mockResolvedValue(tenants);
 
-    const service = new InventoryService(tpnRepo as any, pnaRepo as any, tenantRepo as any);
-    return { service, tpnRepo, pnaRepo, tenantRepo };
+    const service = new InventoryService(
+      tpnRepo as any,
+      pnaRepo as any,
+      tenantRepo as any,
+      bizRepo as any,
+      profileRepo as any,
+      ppaRepo as any,
+    );
+    return { service, tpnRepo, pnaRepo, tenantRepo, bizRepo, profileRepo, ppaRepo };
   }
 
   it('returns empty list when nothing exists', async () => {
@@ -320,7 +346,20 @@ describe('InventoryService.listDuplications', () => {
       ]),
     );
     tenantRepo.find.mockResolvedValue([{ id: T_LAVANDA, name: 'Lavanda Cleaning' }]);
-    const service = new InventoryService(tpnRepo as any, pnaRepo as any, tenantRepo as any);
+    const bizRepo = buildMockRepo();
+    const profileRepo = buildMockRepo();
+    const ppaRepo = buildMockRepo();
+    bizRepo.find.mockResolvedValue([]);
+    profileRepo.find.mockResolvedValue([]);
+    ppaRepo.createQueryBuilder.mockReturnValue(makeQueryBuilder([]));
+    const service = new InventoryService(
+      tpnRepo as any,
+      pnaRepo as any,
+      tenantRepo as any,
+      bizRepo as any,
+      profileRepo as any,
+      ppaRepo as any,
+    );
 
     const dups = await service.listDuplications(WS);
     expect(dups).toHaveLength(1);

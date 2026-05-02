@@ -1,101 +1,74 @@
+/**
+ * Admin Workspaces page (PR8 redesign).
+ *
+ * Hierarchy: Platform → **Workspace (customer/account)** → Business → Profile → Phone
+ *
+ * One row per *customer*. LeadBridge tenants collapse on
+ * `metadata.lb_user_id` (PR6) so "Spotless Homes Tampa", "...Jacksonville",
+ * etc. all show under a single "Spotless Homes" row. Non-LB tenants get
+ * one row per tenant. Drill-down lands on the Businesses page filtered to
+ * that workspace.
+ */
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Building2,
-  MapPin,
-  Phone,
-  Layers,
   RefreshCw,
   AlertCircle,
-  ChevronDown,
-  ChevronUp,
-  Search,
-  HelpCircle,
-  Archive,
-  CheckCircle2,
   Filter,
+  Search,
   X,
-  Users,
+  ChevronRight,
+  Phone,
+  MapPin,
+  EyeOff,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type {
-  PlatformDetail,
-  PlatformId,
-  PlatformSummary,
-  ProfileRow,
-  WorkspaceGroup,
-} from '../../types';
+import type { WorkspaceSummary, PlatformId } from '../../types';
 
-interface PlatformBucket {
-  id: PlatformId;
-  name: string;
-  summary: PlatformSummary;
-  groups: WorkspaceGroup[];
-}
-
-const PLATFORM_ORDER: PlatformId[] = [
-  'leadbridge',
-  'hirefunnel',
-  'serviceflow',
-  'callio',
-  'unclassified',
+const PLATFORM_OPTIONS: Array<{ value: '' | PlatformId; label: string }> = [
+  { value: '', label: 'All' },
+  { value: 'leadbridge', label: 'LeadBridge' },
+  { value: 'hirefunnel', label: 'HireFunnel' },
+  { value: 'serviceflow', label: 'ServiceFlow' },
+  { value: 'callio', label: 'Callio' },
+  { value: 'unclassified', label: 'Unclassified' },
 ];
 
-/**
- * Workspaces named "Account <hex-uuid…>" are LeadBridge SavedAccount stubs —
- * each maps 1:1 to a customer account in LB and almost always has a single
- * profile with the same name. Hidden by default to keep the tree readable;
- * "Show raw accounts" toggle reveals them.
- */
-const RAW_ACCOUNT_PATTERN = /^Account [0-9a-f-]{8,}/i;
-function isRawAccountWorkspace(g: WorkspaceGroup): boolean {
-  return RAW_ACCOUNT_PATTERN.test(g.name);
-}
+const PLATFORM_LABELS: Record<string, string> = {
+  leadbridge: 'LeadBridge',
+  hirefunnel: 'HireFunnel',
+  serviceflow: 'ServiceFlow',
+  callio: 'Callio',
+  unclassified: 'Unclassified',
+};
 
-function normalizeName(s: string): string {
-  return (s || '').trim().toLowerCase();
-}
-
-/** Single-profile workspace whose only profile shares the workspace's name. */
-function isSingleDefaultProfile(g: WorkspaceGroup): boolean {
-  return (
-    g.profileCount === 1 &&
-    !!g.profiles[0] &&
-    normalizeName(g.profiles[0].name) === normalizeName(g.name)
-  );
-}
+const PLATFORM_COLORS: Record<string, string> = {
+  leadbridge: 'bg-orange-50 text-orange-700 border-orange-200',
+  hirefunnel: 'bg-purple-50 text-purple-700 border-purple-200',
+  serviceflow: 'bg-cyan-50 text-cyan-700 border-cyan-200',
+  callio: 'bg-pink-50 text-pink-700 border-pink-200',
+  unclassified: 'bg-gray-100 text-gray-500 border-gray-200',
+};
 
 export default function AdminWorkspacesPage() {
-  const [buckets, setBuckets] = useState<PlatformBucket[]>([]);
+  const [rows, setRows] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // filters
-  const [platformFilter, setPlatformFilter] = useState<PlatformId | ''>('');
-  const [hasPhones, setHasPhones] = useState(false);
-  const [hasDuplicates, setHasDuplicates] = useState(false);
-  const [unclassifiedOnly, setUnclassifiedOnly] = useState(false);
-  const [showRawAccounts, setShowRawAccounts] = useState(false);
+  const [platform, setPlatform] = useState<'' | PlatformId>('');
+  const [hideUnnamed, setHideUnnamed] = useState(true);
   const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const summaries = await adminApi.getPlatforms();
-      const ordered = [...summaries].sort(
-        (a, b) => PLATFORM_ORDER.indexOf(a.id) - PLATFORM_ORDER.indexOf(b.id),
-      );
-      const details = await Promise.all(
-        ordered.map((s) => adminApi.getPlatform(s.id)),
-      );
-      const bucketsOut: PlatformBucket[] = ordered.map((s, i) => ({
-        id: s.id,
-        name: s.name,
-        summary: s,
-        groups: (details[i] as PlatformDetail).workspaceGroups ?? [],
-      }));
-      setBuckets(bucketsOut);
+      const data = await adminApi.getWorkspaces({
+        platformId: platform || undefined,
+        hideUnnamedTenants: hideUnnamed || undefined,
+      });
+      setRows(data);
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Failed to load workspaces');
     } finally {
@@ -105,52 +78,20 @@ export default function AdminWorkspacesPage() {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform, hideUnnamed]);
 
-  // Apply filters & search.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return buckets
-      .filter((b) => !platformFilter || b.id === platformFilter)
-      .filter((b) => !unclassifiedOnly || b.id === 'unclassified')
-      .map((b) => ({
-        ...b,
-        groups: b.groups
-          .filter((g) => showRawAccounts || !isRawAccountWorkspace(g))
-          .filter((g) => !hasPhones || g.totalPhoneNumbersCount > 0)
-          .filter(
-            (g) => !hasDuplicates || g.profiles.some((p) => p.duplicateCount > 1),
-          )
-          .filter((g) => {
-            if (!q) return true;
-            if (g.name.toLowerCase().includes(q)) return true;
-            if ((g.businessIdentityId || '').toLowerCase().includes(q)) return true;
-            for (const p of g.profiles) {
-              if (p.name.toLowerCase().includes(q)) return true;
-              if (p.tenantIds.some((tid) => tid.toLowerCase().includes(q))) return true;
-            }
-            return false;
-          }),
-      }))
-      .filter((b) => b.groups.length > 0 || (q.length === 0 && !hasPhones && !hasDuplicates));
-  }, [buckets, platformFilter, hasPhones, hasDuplicates, unclassifiedOnly, showRawAccounts, search]);
-
-  // Count raw accounts present in the source data so the footer can hint
-  // at how many are hidden when the toggle is off.
-  const rawAccountCount = useMemo(
-    () =>
-      buckets.reduce(
-        (acc, b) => acc + b.groups.filter(isRawAccountWorkspace).length,
-        0,
-      ),
-    [buckets],
-  );
-
-  const totalGroups = filtered.reduce((acc, b) => acc + b.groups.length, 0);
-  const totalProfiles = filtered.reduce(
-    (acc, b) => acc + b.groups.reduce((g, w) => g + w.profileCount, 0),
-    0,
-  );
+    if (!q) return rows;
+    return rows.filter((r) => {
+      if (r.displayName.toLowerCase().includes(q)) return true;
+      if (r.key.toLowerCase().includes(q)) return true;
+      if ((r.lbUserId ?? '').toLowerCase().includes(q)) return true;
+      if (r.tenantIds.some((id) => id.toLowerCase().includes(q))) return true;
+      return false;
+    });
+  }, [rows, search]);
 
   return (
     <div className="space-y-6">
@@ -158,11 +99,7 @@ export default function AdminWorkspacesPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Workspaces</h1>
           <p className="text-sm text-gray-500">
-            Customer workspaces grouped from raw tenants. Read-only.
-            {' '}
-            <Link to="/admin/legacy/tenants" className="text-gray-400 hover:underline">
-              View raw tenants
-            </Link>
+            One row per customer / account. Multi-location LeadBridge customers collapse onto a single row.
           </p>
         </div>
         <button
@@ -193,402 +130,141 @@ export default function AdminWorkspacesPage() {
             <span className="font-medium">Platform</span>
             <select
               className="input"
-              value={platformFilter}
-              onChange={(e) => setPlatformFilter(e.target.value as PlatformId | '')}
+              value={platform}
+              onChange={(e) => setPlatform((e.target.value || '') as PlatformId | '')}
             >
-              <option value="">All</option>
-              {buckets.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
+              {PLATFORM_OPTIONS.map((p) => (
+                <option key={p.value || 'all'} value={p.value}>{p.label}</option>
               ))}
             </select>
           </label>
-
-          <ToggleChip
-            label="Has phone numbers"
-            on={hasPhones}
-            onClick={() => setHasPhones((v) => !v)}
-            icon={<Phone className="h-3 w-3" />}
-          />
-          <ToggleChip
-            label="Has duplicates"
-            on={hasDuplicates}
-            onClick={() => setHasDuplicates((v) => !v)}
-            icon={<Archive className="h-3 w-3" />}
-          />
-          <ToggleChip
-            label="Unclassified only"
-            on={unclassifiedOnly}
-            onClick={() => setUnclassifiedOnly((v) => !v)}
-            icon={<HelpCircle className="h-3 w-3" />}
-          />
-          <ToggleChip
-            label="Show raw accounts"
-            on={showRawAccounts}
-            onClick={() => setShowRawAccounts((v) => !v)}
-            icon={<Building2 className="h-3 w-3" />}
-          />
-
+          <button
+            onClick={() => setHideUnnamed((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              hideUnnamed
+                ? 'bg-primary-50 text-primary-700 border-primary-200'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+            }`}
+            title='Hide tenants whose name still looks like the auto-generated "Account &lt;uuid&gt;" stub'
+          >
+            <EyeOff className="h-3 w-3" />
+            Hide unnamed tenants
+          </button>
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
             <input
               type="text"
               className="input"
-              placeholder="Search workspace, profile, tenant id…"
+              placeholder="Search workspace, lb user id, tenant id…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{ minWidth: 280 }}
             />
             {search && (
-              <button
-                onClick={() => setSearch('')}
-                className="text-gray-400 hover:text-gray-700"
-                title="Clear"
-              >
+              <button onClick={() => setSearch('')} className="text-gray-400 hover:text-gray-700">
                 <X className="h-4 w-4" />
               </button>
             )}
           </div>
         </div>
         <div className="text-xs text-gray-400">
-          Showing <span className="tabular-nums">{totalGroups}</span> workspace
-          {totalGroups === 1 ? '' : 's'} ·{' '}
-          <span className="tabular-nums">{totalProfiles}</span> profile
-          {totalProfiles === 1 ? '' : 's'} across {filtered.length} platform
-          {filtered.length === 1 ? '' : 's'}.
-          {!showRawAccounts && rawAccountCount > 0 && (
-            <>
-              {' '}
-              <span className="text-gray-500">
-                {rawAccountCount} raw Account workspaces hidden — toggle{' '}
-                <button
-                  className="underline hover:text-gray-700"
-                  onClick={() => setShowRawAccounts(true)}
-                >
-                  Show raw accounts
-                </button>
-                .
-              </span>
-            </>
-          )}
+          Showing <span className="tabular-nums">{filtered.length}</span> of{' '}
+          <span className="tabular-nums">{rows.length}</span> workspaces.
         </div>
       </div>
 
-      {/* Tree by platform */}
-      {loading && buckets.length === 0 ? (
-        <div className="card p-8 text-center text-gray-400">Loading…</div>
-      ) : filtered.length === 0 ? (
-        <div className="card p-8 text-center text-gray-500">
-          No workspaces match the current filters.
-        </div>
-      ) : (
-        filtered.map((bucket) => (
-          <PlatformBucketBlock key={bucket.id} bucket={bucket} />
-        ))
-      )}
-    </div>
-  );
-}
-
-function ToggleChip({
-  label,
-  on,
-  onClick,
-  icon,
-}: {
-  label: string;
-  on: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-        on
-          ? 'bg-primary-50 text-primary-700 border-primary-200'
-          : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
-      }`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function PlatformBucketBlock({ bucket }: { bucket: PlatformBucket }) {
-  const [open, setOpen] = useState(true);
-  const isUnclassified = bucket.id === 'unclassified';
-
-  return (
-    <div className="card">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50"
-      >
-        <div className="flex items-center gap-2">
-          {isUnclassified ? (
-            <HelpCircle className="h-4 w-4 text-amber-500" />
-          ) : (
-            <Layers className="h-4 w-4 text-primary-500" />
-          )}
-          <span className="font-semibold text-gray-900">{bucket.name}</span>
-          <PlatformBadge id={bucket.id} />
-          <span className="text-xs text-gray-500 ml-2">
-            <span className="tabular-nums">{bucket.groups.length}</span> workspace
-            {bucket.groups.length === 1 ? '' : 's'}
-            {' · '}
-            <span className="tabular-nums">{bucket.summary.phoneNumberCount}</span> phone
-            {bucket.summary.phoneNumberCount === 1 ? '' : 's'}
-          </span>
-        </div>
-        {open ? (
-          <ChevronUp className="h-4 w-4 text-gray-400" />
-        ) : (
-          <ChevronDown className="h-4 w-4 text-gray-400" />
-        )}
-      </button>
-
-      {open && (
-        <div className="border-t border-gray-200 divide-y divide-gray-100">
-          {bucket.groups.length === 0 ? (
-            <div className="px-4 py-4 text-sm text-gray-400">
-              No workspaces in this platform.
-            </div>
-          ) : (
-            bucket.groups.map((g, i) => (
-              <WorkspaceRow key={`${g.source}-${g.businessIdentityId ?? g.name}-${i}`} group={g} />
-            ))
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function WorkspaceRow({ group }: { group: WorkspaceGroup }) {
-  const isDefault = isSingleDefaultProfile(group);
-  // When the workspace collapses to one same-named profile we hide the
-  // child row entirely — but we still need to surface profile-level signals
-  // (legacy / current presence, duplicate count) that would otherwise be
-  // lost. Aggregate them onto the workspace header.
-  const onlyProfile = isDefault ? group.profiles[0] : null;
-  const aggHasLegacy = group.profiles.some((p) => p.hasLegacy);
-  const aggHasCurrent = group.profiles.some((p) => p.hasCurrent);
-
-  const [open, setOpen] = useState(!isDefault);
-
-  const sourceCls =
-    group.source === 'business_identity'
-      ? 'bg-blue-50 text-blue-700 border-blue-200'
-      : group.source === 'name_prefix'
-      ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
-      : 'bg-gray-100 text-gray-600 border-gray-200';
-  const sourceLabel =
-    group.source === 'business_identity'
-      ? 'business identity'
-      : group.source === 'name_prefix'
-      ? 'name prefix'
-      : 'standalone';
-
-  // Single-default profile that is also backed by a real profile row gets a
-  // direct link to its detail page from the workspace header.
-  const collapsedProfileLink =
-    isDefault && onlyProfile?.communicationProfileId
-      ? `/admin/profiles/${onlyProfile.communicationProfileId}`
-      : null;
-
-  return (
-    <div className="px-4 py-3">
-      <button
-        onClick={isDefault ? undefined : () => setOpen((o) => !o)}
-        className={`w-full flex items-center gap-3 -mx-2 px-2 py-1 rounded text-left ${
-          isDefault ? 'cursor-default' : 'hover:bg-gray-50'
-        }`}
-      >
-        <Users className="h-4 w-4 text-gray-400 flex-shrink-0" />
-        <span className="font-medium text-gray-900 truncate">{group.name}</span>
-        <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono border ${sourceCls}`}>
-          {sourceLabel}
-        </span>
-
-        {/* Business link — Track 1 has 1 business per workspace. */}
-        {group.communicationBusinessId && (
-          <Link
-            to={`/admin/businesses/${group.communicationBusinessId}`}
-            onClick={(e) => e.stopPropagation()}
-            className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 font-mono"
-            title="View business detail"
-          >
-            <Building2 className="h-3 w-3" />
-            business
-          </Link>
-        )}
-
-        {isDefault && (
-          collapsedProfileLink ? (
-            <Link
-              to={collapsedProfileLink}
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
-              title={
-                onlyProfile
-                  ? `Profile id: ${onlyProfile.communicationProfileId}`
-                  : 'Default profile'
-              }
-            >
-              <MapPin className="h-3 w-3" />
-              1 default profile
-              {onlyProfile && onlyProfile.duplicateCount > 1 && (
-                <> · ×{onlyProfile.duplicateCount} dup</>
+      {/* Table */}
+      <div className="card">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+              <tr>
+                <th className="text-left px-4 py-3">Workspace</th>
+                <th className="text-left px-4 py-3">Platform</th>
+                <th className="text-left px-4 py-3">Businesses</th>
+                <th className="text-left px-4 py-3">Profiles</th>
+                <th className="text-left px-4 py-3">Phones</th>
+                <th className="text-left px-4 py-3">Tenants</th>
+                <th className="text-right px-4 py-3 w-10"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {loading && filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-gray-400">Loading…</td>
+                </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">No workspaces match the current filters.</td>
+                </tr>
+              ) : (
+                filtered.map((w) => (
+                  <tr key={w.key} className="hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <Link
+                        to={`/admin/businesses?workspaceKey=${encodeURIComponent(w.key)}`}
+                        className="font-medium text-gray-900 hover:text-primary-700 flex items-center gap-1.5"
+                      >
+                        <Building2 className="h-4 w-4 text-gray-400" />
+                        {w.displayName}
+                      </Link>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-gray-400">
+                        <span className="font-mono">{w.key}</span>
+                        {w.kind === 'lb_customer' && w.lbUserId && (
+                          <span className="text-[10px] uppercase tracking-wider text-gray-500">
+                            lb user
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold tracking-wide ${
+                          PLATFORM_COLORS[w.platformId] ?? PLATFORM_COLORS.unclassified
+                        }`}
+                      >
+                        {PLATFORM_LABELS[w.platformId] ?? w.platformId}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Link
+                        to={`/admin/businesses?workspaceKey=${encodeURIComponent(w.key)}`}
+                        className="inline-flex items-center gap-1 tabular-nums text-gray-700 hover:text-primary-700"
+                      >
+                        <Building2 className="h-3 w-3 text-gray-400" />
+                        {w.businessCount}
+                      </Link>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex items-center gap-1 tabular-nums text-gray-700">
+                        <MapPin className="h-3 w-3 text-gray-400" />
+                        {w.profileCount}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex items-center gap-1 tabular-nums text-gray-700">
+                        <Phone className="h-3 w-3 text-gray-400" />
+                        {w.phoneCount}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 tabular-nums text-gray-500">
+                      {w.tenantIds.length}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <Link
+                        to={`/admin/businesses?workspaceKey=${encodeURIComponent(w.key)}`}
+                        className="inline-flex items-center text-primary-600 hover:text-primary-800"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </Link>
+                    </td>
+                  </tr>
+                ))
               )}
-            </Link>
-          ) : (
-            <span
-              className="px-2 py-0.5 text-[10px] rounded-full bg-gray-100 text-gray-500 border border-gray-200"
-              title={
-                onlyProfile
-                  ? `tenant id: ${onlyProfile.tenantIds.join(', ')}`
-                  : 'Single profile, same name as workspace'
-              }
-            >
-              1 default profile
-              {onlyProfile && onlyProfile.duplicateCount > 1 && (
-                <> · ×{onlyProfile.duplicateCount} dup</>
-              )}
-            </span>
-          )
-        )}
-
-        <span className="text-xs text-gray-500 ml-auto flex-shrink-0 flex items-center gap-2">
-          {!isDefault && (
-            <>
-              <span className="tabular-nums">{group.profileCount}</span> profile
-              {group.profileCount === 1 ? '' : 's'}
-              {group.totalTenantCount !== group.profileCount && (
-                <>
-                  {' '}
-                  <span className="text-amber-600">· {group.totalTenantCount} tenants</span>
-                </>
-              )}
-            </>
-          )}
-          {group.totalPhoneNumbersCount > 0 && (
-            <span className="inline-flex items-center gap-0.5 text-green-700">
-              <Phone className="h-3 w-3" />
-              <span className="tabular-nums">{group.totalPhoneNumbersCount}</span>
-            </span>
-          )}
-          {/* Aggregate phone/legacy markers when collapsed-by-default row hides them. */}
-          {isDefault && aggHasCurrent && group.totalPhoneNumbersCount === 0 && (
-            <span
-              className="inline-flex items-center gap-0.5 text-green-700"
-              title="Has rows in tenant_phone_numbers"
-            >
-              <CheckCircle2 className="h-3 w-3" />
-            </span>
-          )}
-          {aggHasLegacy && (
-            <span
-              className="inline-flex items-center gap-0.5 text-amber-700"
-              title="Has rows in phone_number_assignments (legacy)"
-            >
-              <Archive className="h-3 w-3" />
-              legacy
-            </span>
-          )}
-        </span>
-
-        {!isDefault &&
-          (open ? (
-            <ChevronUp className="h-4 w-4 text-gray-400 flex-shrink-0" />
-          ) : (
-            <ChevronDown className="h-4 w-4 text-gray-400 flex-shrink-0" />
-          ))}
-      </button>
-
-      {!isDefault && open && (
-        <div className="mt-2 ml-7 space-y-1.5">
-          {group.profiles.map((p, i) => (
-            <ProfileItem key={`${p.name}-${i}`} profile={p} />
-          ))}
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
     </div>
-  );
-}
-
-function ProfileItem({ profile }: { profile: ProfileRow }) {
-  const isDup = profile.duplicateCount > 1;
-  const profileLink = profile.communicationProfileId
-    ? `/admin/profiles/${profile.communicationProfileId}`
-    : null;
-
-  const inner = (
-    <>
-      <MapPin className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
-      <span className={profileLink ? 'text-gray-900 hover:text-primary-700' : 'text-gray-900'}>
-        {profile.name}
-      </span>
-
-      {isDup && (
-        <span
-          className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-100 text-amber-700 border border-amber-200"
-          title={`${profile.duplicateCount} tenant rows collapsed: ${profile.tenantIds.join(', ')}`}
-        >
-          ×{profile.duplicateCount} duplicates
-        </span>
-      )}
-
-      <span className="ml-auto flex items-center gap-2 text-xs">
-        {profile.hasCurrent && (
-          <span
-            className="inline-flex items-center gap-0.5 text-green-700"
-            title="Has rows in tenant_phone_numbers"
-          >
-            <CheckCircle2 className="h-3 w-3" />
-            <span className="tabular-nums">{profile.phoneNumbersCount}</span>
-          </span>
-        )}
-        {profile.hasLegacy && (
-          <span
-            className="inline-flex items-center gap-0.5 text-amber-700"
-            title="Has rows in phone_number_assignments (legacy)"
-          >
-            <Archive className="h-3 w-3" />
-            legacy
-          </span>
-        )}
-      </span>
-    </>
-  );
-
-  if (profileLink) {
-    return (
-      <Link
-        to={profileLink}
-        className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50"
-      >
-        {inner}
-      </Link>
-    );
-  }
-  return (
-    <div className="flex items-center gap-3 text-sm py-1.5 px-2 rounded hover:bg-gray-50">
-      {inner}
-    </div>
-  );
-}
-
-function PlatformBadge({ id }: { id: PlatformId }) {
-  const cls =
-    id === 'unclassified'
-      ? 'bg-amber-50 text-amber-700 border-amber-200'
-      : 'bg-primary-50 text-primary-700 border-primary-200';
-  return (
-    <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono border ${cls}`}>
-      {id}
-    </span>
   );
 }

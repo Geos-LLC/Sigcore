@@ -348,6 +348,19 @@ export interface InventoryLegacyBlock {
   active: boolean;
 }
 
+export interface InventoryAssignmentChainEntry {
+  platformId: string;
+  workspaceKey: string;
+  workspaceDisplayName: string;
+  businessId: string | null;
+  businessDisplayName: string | null;
+  profileId: string | null;
+  profileDisplayName: string | null;
+  profileSource: string | null;
+  isDefault: boolean;
+  role: string | null;
+}
+
 export interface InventoryRow {
   number: string;
   provider: string | null;
@@ -355,6 +368,8 @@ export interface InventoryRow {
   model: PhoneModelBadge;
   current: InventoryCurrentBlock | null;
   legacy: InventoryLegacyBlock | null;
+  /** Platform → Workspace → Business → Profile chains (PR8). */
+  chain: InventoryAssignmentChainEntry[];
 }
 
 export interface InventoryFilters {
@@ -395,6 +410,27 @@ export interface LegacySmsRow {
 // ==================== Businesses + Profiles (PR5) ====================
 // Mirror of backend/src/modules/admin-views/dto/admin-views.types.ts.
 
+export type WorkspaceKind = 'lb_customer' | 'tenant';
+
+/** PR8 — one row per customer in the admin Workspaces page. */
+export interface WorkspaceSummary {
+  key: string;
+  kind: WorkspaceKind;
+  displayName: string;
+  platformId: string;
+  lbUserId: string | null;
+  tenantIds: string[];
+  primaryTenantId: string;
+  businessCount: number;
+  profileCount: number;
+  phoneCount: number;
+}
+
+export interface WorkspaceFilters {
+  platformId?: string;
+  hideUnnamedTenants?: boolean;
+}
+
 export interface BusinessSummary {
   id: string;
   displayName: string;
@@ -411,6 +447,11 @@ export interface BusinessSummary {
   sources: string[];
   hasSharedPhone: boolean;
   createdAt: string;
+  /** PR8 — parent customer workspace identity. */
+  workspaceKey: string;
+  lbUserId: string | null;
+  workspaceDisplayName: string;
+  locationDisplay: string | null;
 }
 
 export interface BusinessPhoneRow {
@@ -481,6 +522,8 @@ export interface BusinessFilters {
   hasPhones?: boolean;
   hasSharedPhone?: boolean;
   hasExternalId?: boolean;
+  /** PR8 — narrow to one customer workspace ('lb-user-<id>' or 'tenant-<id>'). */
+  workspaceKey?: string;
 }
 
 export interface ProfileFilters {

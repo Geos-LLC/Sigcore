@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Phone,
   RefreshCw,
   AlertCircle,
   AlertTriangle,
   X,
+  ChevronRight,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type { InventoryRow, PhoneModelBadge } from '../../types';
+import type {
+  InventoryRow,
+  InventoryAssignmentChainEntry,
+  PhoneModelBadge,
+} from '../../types';
+import { SourceBadge } from '../../components/admin/SourceBadge';
 
 const MODEL_OPTIONS: Array<{ id: '' | PhoneModelBadge; label: string }> = [
   { id: '', label: 'All models' },
@@ -159,22 +166,21 @@ export default function AdminPhoneNumbersInventoryPage() {
               <tr>
                 <th className="text-left px-4 py-3">Number</th>
                 <th className="text-left px-4 py-3">Model</th>
+                <th className="text-left px-4 py-3">Assigned to</th>
                 <th className="text-left px-4 py-3">Provider</th>
                 <th className="text-left px-4 py-3">A2P</th>
-                <th className="text-left px-4 py-3">Tenant</th>
-                <th className="text-left px-4 py-3">Legacy business_id</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {loading && rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                  <td colSpan={5} className="px-4 py-8 text-center text-gray-400">
                     Loading…
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-gray-500">
+                  <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
                     No phone numbers match the current filters.
                   </td>
                 </tr>
@@ -185,24 +191,15 @@ export default function AdminPhoneNumbersInventoryPage() {
                     className="cursor-pointer hover:bg-gray-50"
                     onClick={() => setSelected(r)}
                   >
-                    <td className="px-4 py-3 font-mono">{r.number}</td>
-                    <td className="px-4 py-3">
+                    <td className="px-4 py-3 font-mono align-top">{r.number}</td>
+                    <td className="px-4 py-3 align-top">
                       <ModelBadge value={r.model} />
                     </td>
-                    <td className="px-4 py-3 text-gray-700">{r.provider ?? '—'}</td>
-                    <td className="px-4 py-3 text-gray-500">{r.a2pStatus ?? '—'}</td>
-                    <td className="px-4 py-3 text-gray-700">
-                      {r.current?.tenantName ?? (r.current?.tenantId ? r.current.tenantId : '—')}
+                    <td className="px-4 py-3 align-top">
+                      <ChainCell chain={r.chain} fallbackTenantName={r.current?.tenantName ?? null} />
                     </td>
-                    <td className="px-4 py-3 text-gray-500">
-                      {r.legacy ? (
-                        <span className="font-mono text-xs">
-                          {r.legacy.businessIdResolution}
-                        </span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
+                    <td className="px-4 py-3 text-gray-700 align-top">{r.provider ?? '—'}</td>
+                    <td className="px-4 py-3 text-gray-500 align-top">{r.a2pStatus ?? '—'}</td>
                   </tr>
                 ))
               )}
@@ -212,6 +209,83 @@ export default function AdminPhoneNumbersInventoryPage() {
       </div>
 
       {selected && <DetailDrawer row={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+/**
+ * Renders the assignment chain Platform → Workspace → Business → Profile (PR8).
+ * One block per chain entry; multiple entries when the phone is shared.
+ */
+function ChainCell({
+  chain,
+  fallbackTenantName,
+}: {
+  chain: InventoryAssignmentChainEntry[];
+  fallbackTenantName: string | null;
+}) {
+  if (chain.length === 0) {
+    return (
+      <span className="text-xs text-gray-400 italic">
+        {fallbackTenantName
+          ? `No active profile (legacy: ${fallbackTenantName})`
+          : 'Unassigned'}
+      </span>
+    );
+  }
+  return (
+    <div className="space-y-1.5">
+      {chain.map((c, idx) => (
+        <ChainRow key={`${c.profileId ?? 'na'}-${idx}`} entry={c} />
+      ))}
+    </div>
+  );
+}
+
+function ChainRow({ entry }: { entry: InventoryAssignmentChainEntry }) {
+  return (
+    <div className="flex items-center gap-1.5 text-xs leading-tight whitespace-nowrap">
+      <span className="text-gray-400 uppercase tracking-wider">{entry.platformId}</span>
+      <ChevronRight className="h-3 w-3 text-gray-300" />
+      <Link
+        to={`/admin/businesses?workspaceKey=${encodeURIComponent(entry.workspaceKey)}`}
+        className="text-gray-700 hover:text-primary-700"
+      >
+        {entry.workspaceDisplayName}
+      </Link>
+      {entry.businessId && (
+        <>
+          <ChevronRight className="h-3 w-3 text-gray-300" />
+          <Link
+            to={`/admin/businesses/${entry.businessId}`}
+            className="text-gray-700 hover:text-primary-700"
+          >
+            {entry.businessDisplayName ?? entry.businessId.slice(0, 8)}
+          </Link>
+        </>
+      )}
+      {entry.profileId && (
+        <>
+          <ChevronRight className="h-3 w-3 text-gray-300" />
+          <Link
+            to={`/admin/profiles/${entry.profileId}`}
+            className="font-medium text-gray-900 hover:text-primary-700"
+          >
+            {entry.profileDisplayName ?? entry.profileId.slice(0, 8)}
+          </Link>
+          {entry.profileSource && (
+            <SourceBadge source={entry.profileSource} size="sm" />
+          )}
+          {entry.isDefault && (
+            <span
+              className="ml-1 inline-block px-1.5 py-0.5 rounded-full text-[9px] uppercase tracking-wider bg-green-50 text-green-700 border border-green-200"
+              title="Default phone for this profile"
+            >
+              default
+            </span>
+          )}
+        </>
+      )}
     </div>
   );
 }

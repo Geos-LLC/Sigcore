@@ -17,6 +17,7 @@ export class BusinessesController {
     @Query('hasPhones') hasPhones?: string,
     @Query('hasSharedPhone') hasSharedPhone?: string,
     @Query('hasExternalId') hasExternalId?: string,
+    @Query('workspaceKey') workspaceKey?: string,
   ): Promise<{ data: BusinessSummary[] }> {
     const data = await this.businessesService.list(workspaceId, {
       platformId,
@@ -24,6 +25,7 @@ export class BusinessesController {
       hasPhones: hasPhones === 'true' || hasPhones === '1',
       hasSharedPhone: hasSharedPhone === 'true' || hasSharedPhone === '1',
       hasExternalId: hasExternalId === 'true' || hasExternalId === '1',
+      workspaceKey,
     });
     return { data };
   }

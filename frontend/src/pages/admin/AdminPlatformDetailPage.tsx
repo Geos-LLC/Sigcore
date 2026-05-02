@@ -357,7 +357,7 @@ function WorkspaceGroupRow({ group }: { group: WorkspaceGroup }) {
 
   const sourceLabel =
     group.source === 'business_identity'
-      ? 'business identity'
+      ? 'workspace'
       : group.source === 'name_prefix'
       ? 'name prefix'
       : 'standalone';

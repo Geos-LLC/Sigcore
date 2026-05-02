@@ -52,6 +52,10 @@ export default function AdminProfilesPage() {
   const [hasShared, setHasShared] = useState(false);
   const [hasExternal, setHasExternal] = useState(false);
   const [defaultsOnly, setDefaultsOnly] = useState(false);
+  // After LB profile materialization, the synthetic 'default' profile is kept
+  // around (is_default=FALSE) for back-compat. Hide it by default — operators
+  // can toggle to inspect.
+  const [showKeptDefaults, setShowKeptDefaults] = useState(false);
   const [search, setSearch] = useState('');
 
   const load = async () => {
@@ -81,8 +85,10 @@ export default function AdminProfilesPage() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return rows;
     return rows.filter((r) => {
+      // Client-side: hide demoted "Default" profiles unless operator opts in.
+      if (!showKeptDefaults && r.slug === 'default' && !r.isDefault) return false;
+      if (!q) return true;
       if (r.displayName.toLowerCase().includes(q)) return true;
       if (r.id.toLowerCase().includes(q)) return true;
       if ((r.businessName || '').toLowerCase().includes(q)) return true;
@@ -91,7 +97,7 @@ export default function AdminProfilesPage() {
       if ((r.externalProfileId || '').toLowerCase().includes(q)) return true;
       return false;
     });
-  }, [rows, search]);
+  }, [rows, search, showKeptDefaults]);
 
   return (
     <div className="space-y-6">
@@ -154,6 +160,12 @@ export default function AdminProfilesPage() {
           <ToggleChip label="Has shared phone" on={hasShared} onClick={() => setHasShared((v) => !v)} icon={<Share2 className="h-3 w-3" />} />
           <ToggleChip label="Has external id" on={hasExternal} onClick={() => setHasExternal((v) => !v)} icon={<MapPin className="h-3 w-3" />} />
           <ToggleChip label="Default only" on={defaultsOnly} onClick={() => setDefaultsOnly((v) => !v)} icon={<CheckCircle2 className="h-3 w-3" />} />
+          <ToggleChip
+            label="Show kept defaults"
+            on={showKeptDefaults}
+            onClick={() => setShowKeptDefaults((v) => !v)}
+            icon={<CheckCircle2 className="h-3 w-3" />}
+          />
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
             <input
@@ -239,6 +251,13 @@ export default function AdminProfilesPage() {
                         <span className="inline-flex items-center gap-0.5 text-green-700 text-xs">
                           <CheckCircle2 className="h-3 w-3" />
                           default
+                        </span>
+                      ) : p.slug === 'default' ? (
+                        <span
+                          className="inline-flex items-center text-[10px] text-gray-400 italic"
+                          title="Kept for backward compatibility after LB profile materialization"
+                        >
+                          kept
                         </span>
                       ) : (
                         <span className="text-xs text-gray-400">—</span>

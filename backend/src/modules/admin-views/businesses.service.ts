@@ -16,6 +16,14 @@ import {
   BusinessPhoneRow,
   ProfileSummary,
 } from './dto/admin-views.types';
+import {
+  AggregationBusiness,
+  AggregationPhoneCounts,
+  AggregationProfileCounts,
+  AggregationTenant,
+  aggregateWorkspaces,
+  workspaceKeyForBusiness,
+} from './workspace-aggregation';
 
 export interface BusinessFilters {
   platformId?: string;
@@ -23,6 +31,8 @@ export interface BusinessFilters {
   hasPhones?: boolean;
   hasSharedPhone?: boolean;
   hasExternalId?: boolean;
+  /** PR8 — narrow to one customer workspace (lb-user-<id> or tenant-<id>). */
+  workspaceKey?: string;
 }
 
 @Injectable()
@@ -145,6 +155,47 @@ export class BusinessesService {
       tenants.map<AttributionTenant>((t) => ({ id: t.id, name: t.name })),
     );
 
+    // Build a workspace lookup so each business can carry its parent workspace
+    // identity (PR8). Reuses the same aggregator the Workspaces page uses.
+    const aggTenants: AggregationTenant[] = tenants.map((t) => ({
+      id: t.id,
+      name: t.name ?? null,
+      workspaceId,
+      platformId: attribution.byTenantId.get(t.id) ?? 'unclassified',
+    }));
+    const aggBusinesses: AggregationBusiness[] = businesses.map((b) => ({
+      id: b.id,
+      tenantId: b.tenantId,
+      workspaceId: b.workspaceId,
+      displayName: b.displayName,
+      metadata: (b.metadata as Record<string, unknown> | null) ?? null,
+    }));
+    const profileAgg: AggregationProfileCounts = {
+      byProfileId: new Map(),
+      realProfilesPerBusiness: new Map(),
+      allProfilesPerBusiness: new Map(),
+    };
+    for (const p of profiles) {
+      profileAgg.allProfilesPerBusiness.set(
+        p.communicationBusinessId,
+        (profileAgg.allProfilesPerBusiness.get(p.communicationBusinessId) ?? 0) + 1,
+      );
+      if (p.slug !== 'default') {
+        profileAgg.realProfilesPerBusiness.set(
+          p.communicationBusinessId,
+          (profileAgg.realProfilesPerBusiness.get(p.communicationBusinessId) ?? 0) + 1,
+        );
+      }
+    }
+    const phoneAgg: AggregationPhoneCounts = { phonesPerBusiness: phonesByBiz };
+    const workspaceSummaries = aggregateWorkspaces(
+      aggTenants,
+      aggBusinesses,
+      profileAgg,
+      phoneAgg,
+    );
+    const workspaceByKey = new Map(workspaceSummaries.map((w) => [w.key, w]));
+
     return businesses.map((b) => {
       const tenant = tenantById.get(b.tenantId);
       const bizProfiles = profilesByBiz.get(b.id) ?? [];
@@ -154,6 +205,21 @@ export class BusinessesService {
       const hasSharedPhone = Array.from(phoneSet).some(
         (n) => (phoneToProfileCount.get(n) ?? 0) > 1,
       );
+      const workspaceKey = workspaceKeyForBusiness({
+        tenantId: b.tenantId,
+        metadata: b.metadata,
+      });
+      const workspace = workspaceByKey.get(workspaceKey);
+      const meta = (b.metadata as Record<string, unknown> | null) ?? {};
+      const lbUserId =
+        typeof meta.lb_user_id === 'string' && meta.lb_user_id.trim()
+          ? (meta.lb_user_id as string).trim()
+          : null;
+      const locationDisplay =
+        typeof meta.location_display === 'string' && meta.location_display.trim()
+          ? (meta.location_display as string).trim()
+          : null;
+
       return {
         id: b.id,
         displayName: b.displayName,
@@ -170,6 +236,11 @@ export class BusinessesService {
         sources,
         hasSharedPhone,
         createdAt: b.createdAt instanceof Date ? b.createdAt.toISOString() : String(b.createdAt),
+        workspaceKey,
+        lbUserId,
+        workspaceDisplayName:
+          workspace?.displayName ?? tenant?.name ?? `Workspace ${workspaceKey.slice(0, 16)}`,
+        locationDisplay,
       };
     });
   }
@@ -181,6 +252,7 @@ export class BusinessesService {
       if (f.hasPhones && r.phoneCount === 0) return false;
       if (f.hasSharedPhone && !r.hasSharedPhone) return false;
       if (f.hasExternalId && !r.externalBusinessId) return false;
+      if (f.workspaceKey && r.workspaceKey !== f.workspaceKey) return false;
       return true;
     });
   }

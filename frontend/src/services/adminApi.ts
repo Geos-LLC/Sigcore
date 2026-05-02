@@ -25,6 +25,8 @@ import type {
   ProfileSummary,
   ProfileDetail,
   ProfileFilters,
+  WorkspaceSummary,
+  WorkspaceFilters,
 } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -413,6 +415,17 @@ class AdminApiService {
 
   // ==================== Businesses + Profiles (PR5) ====================
 
+  async getWorkspaces(filters?: WorkspaceFilters): Promise<WorkspaceSummary[]> {
+    const params = new URLSearchParams();
+    if (filters?.platformId) params.append('platformId', filters.platformId);
+    if (filters?.hideUnnamedTenants) params.append('hideUnnamedTenants', 'true');
+    const qs = params.toString();
+    const response = await this.client.get<ApiResponse<WorkspaceSummary[]>>(
+      `/admin/workspaces${qs ? `?${qs}` : ''}`,
+    );
+    return response.data.data;
+  }
+
   async getBusinesses(filters?: BusinessFilters): Promise<BusinessSummary[]> {
     const params = new URLSearchParams();
     if (filters?.platformId) params.append('platformId', filters.platformId);
@@ -420,6 +433,7 @@ class AdminApiService {
     if (filters?.hasPhones) params.append('hasPhones', 'true');
     if (filters?.hasSharedPhone) params.append('hasSharedPhone', 'true');
     if (filters?.hasExternalId) params.append('hasExternalId', 'true');
+    if (filters?.workspaceKey) params.append('workspaceKey', filters.workspaceKey);
     const qs = params.toString();
     const response = await this.client.get<ApiResponse<BusinessSummary[]>>(
       `/admin/businesses${qs ? `?${qs}` : ''}`,

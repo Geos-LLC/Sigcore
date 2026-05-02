@@ -145,6 +145,26 @@ export interface InventoryLegacyBlock {
   active: boolean;
 }
 
+/**
+ * The full assignment chain for a phone number (PR8): Platform → Workspace
+ * → Business → Profile. All fields are nullable so legacy/orphan rows still
+ * render. When `chain.length > 1` the phone is shared across profiles.
+ */
+export interface InventoryAssignmentChainEntry {
+  platformId: string;
+  workspaceKey: string;
+  workspaceDisplayName: string;
+  businessId: string | null;
+  businessDisplayName: string | null;
+  profileId: string | null;
+  profileDisplayName: string | null;
+  profileSource: string | null;
+  /** profile_phone_assignments.is_default for this entry. */
+  isDefault: boolean;
+  /** profile_phone_assignments.role (primary | fallback | …). */
+  role: string | null;
+}
+
 export interface InventoryRow {
   number: string;
   provider: string | null;
@@ -152,6 +172,11 @@ export interface InventoryRow {
   model: PhoneModelBadge;
   current: InventoryCurrentBlock | null;
   legacy: InventoryLegacyBlock | null;
+  /**
+   * Resolved chain(s) Platform → Workspace → Business → Profile (PR8).
+   * Empty array when the phone has no active profile assignment.
+   */
+  chain: InventoryAssignmentChainEntry[];
 }
 
 export interface LegacyAssignmentGroup {
@@ -181,6 +206,36 @@ export interface LegacySmsRow {
   createdAt: string;
 }
 
+// ==================== Workspaces (PR8 — customer/account view) ====================
+
+export type WorkspaceKind = 'lb_customer' | 'tenant';
+
+/**
+ * One row per *customer* in the admin Workspaces page (PR8).
+ *
+ * For LeadBridge tenants we group on `communication_businesses.metadata.lb_user_id`
+ * (populated by PR6) so all of "Spotless Homes Tampa" / "Jacksonville" / etc.
+ * collapse into a single "Spotless Homes" customer row. Non-LB tenants get
+ * one row per tenant.
+ */
+export interface WorkspaceSummary {
+  /** Stable synthetic key — `lb-user-<id>` or `tenant-<id>`. Used in URLs / filters. */
+  key: string;
+  kind: WorkspaceKind;
+  displayName: string;
+  platformId: string;
+  /** LB user id when kind === 'lb_customer'; null otherwise. */
+  lbUserId: string | null;
+  /** All Sigcore tenant ids that belong to this customer. */
+  tenantIds: string[];
+  /** Stable representative tenant id for cross-page drill-down. */
+  primaryTenantId: string;
+  businessCount: number;
+  /** Real (non-default) profiles. Default/kept profiles are excluded. */
+  profileCount: number;
+  phoneCount: number;
+}
+
 // ==================== Businesses (PR5) ====================
 
 export interface BusinessSummary {
@@ -202,6 +257,17 @@ export interface BusinessSummary {
   /** True if any profile under this business shares one of its phones with another profile. */
   hasSharedPhone: boolean;
   createdAt: string;
+  /**
+   * Customer workspace this business belongs to (PR8). Always populated.
+   * Format mirrors WorkspaceSummary.key: `lb-user-<id>` or `tenant-<id>`.
+   */
+  workspaceKey: string;
+  /** LB user id when sourced from PR6 metadata; null otherwise. */
+  lbUserId: string | null;
+  /** Display label for the parent workspace, useful for cross-page links. */
+  workspaceDisplayName: string;
+  /** Curated location label from PR6 metadata (or null when fallback was used). */
+  locationDisplay: string | null;
 }
 
 export interface BusinessDetail extends BusinessSummary {
