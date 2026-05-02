@@ -44,18 +44,26 @@ import {
   AuditProfileRow,
   AuditTenantRow,
   DuplicateRecord,
+  TenantSignatureInputs,
   businessLocationSignature,
   groupBusinessesForDuplicates,
   groupProfilesForDuplicates,
-  groupTenantsForDuplicates,
+  groupTenantsBySignature,
   isPlatformAnchor,
   isZombieTenant,
+  pickBestLocationFromBusinesses,
+  pickBestSourceFromProfiles,
   recommendTenantAction,
   selectCanonicalBusiness,
   selectCanonicalProfile,
   selectCanonicalTenant,
   tenantSignature,
 } from './audit-duplicates.helpers';
+// Reuse the existing platform attribution helper to derive platformId.
+import {
+  attributePlatforms,
+  AttributionTenant,
+} from '../modules/admin-views/platform-attribution';
 
 loadDotEnv();
 
@@ -110,6 +118,8 @@ async function loadAuditData(
   profiles: AuditProfileRow[];
   lbUserIdByTenantId: Map<string, string>;
   workspaceKeyByBusinessId: Map<string, string>;
+  signatureByTenantId: Map<string, string>;
+  signatureInputsByTenantId: Map<string, TenantSignatureInputs>;
 }> {
   // ---- tenants + per-tenant counts in one bundle ----
   const tenantRows: Array<{
@@ -283,12 +293,49 @@ async function loadAuditData(
     }
   }
 
+  // ---- PR9.1: per-tenant signature (platform + customer + location + source) ----
+  const businessesByTenantId = new Map<string, AuditBusinessRow[]>();
+  for (const b of businesses) {
+    const arr = businessesByTenantId.get(b.tenantId) ?? [];
+    arr.push(b);
+    businessesByTenantId.set(b.tenantId, arr);
+  }
+  const profilesByTenantId = new Map<string, AuditProfileRow[]>();
+  for (const p of profiles) {
+    const arr = profilesByTenantId.get(p.tenantId) ?? [];
+    arr.push(p);
+    profilesByTenantId.set(p.tenantId, arr);
+  }
+  const attribution = attributePlatforms(
+    tenants.map<AttributionTenant>((t) => ({ id: t.id, name: t.name ?? '' })),
+  );
+  const signatureByTenantId = new Map<string, string>();
+  const signatureInputsByTenantId = new Map<string, TenantSignatureInputs>();
+  for (const t of tenants) {
+    const tBiz = businessesByTenantId.get(t.id) ?? [];
+    const tProf = profilesByTenantId.get(t.id) ?? [];
+    const loc = pickBestLocationFromBusinesses(tBiz);
+    const src = pickBestSourceFromProfiles(tProf);
+    const inputs: TenantSignatureInputs = {
+      platformId: attribution.byTenantId.get(t.id) ?? 'unclassified',
+      lbUserId: lbUserIdByTenantId.get(t.id) ?? null,
+      curatedLocation: loc.curated,
+      fallbackLocationName: loc.fallback,
+      bestRealSource: src.real,
+      defaultSource: src.defaulted,
+    };
+    signatureInputsByTenantId.set(t.id, inputs);
+    signatureByTenantId.set(t.id, tenantSignature(t, inputs));
+  }
+
   return {
     tenants,
     businesses,
     profiles,
     lbUserIdByTenantId,
     workspaceKeyByBusinessId,
+    signatureByTenantId,
+    signatureInputsByTenantId,
   };
 }
 
@@ -343,17 +390,21 @@ interface AuditReport {
 function buildTenantGroups(
   tenants: AuditTenantRow[],
   lbUserIdByTenantId: Map<string, string>,
+  signatureByTenantId: Map<string, string>,
+  signatureInputsByTenantId: Map<string, TenantSignatureInputs>,
   includeSingletons: boolean,
 ): ReportTenantGroup[] {
-  const groups = groupTenantsForDuplicates(tenants, lbUserIdByTenantId);
+  const groups = groupTenantsBySignature(tenants, signatureByTenantId);
   const out: ReportTenantGroup[] = [];
   for (const [signature, rows] of groups) {
     if (!includeSingletons && rows.length < 2) continue;
     const canonicalId = selectCanonicalTenant(rows);
     const canonical = canonicalId ? rows.find((r) => r.id === canonicalId) ?? null : null;
+    const groupSize = rows.length;
     const records = rows
       .map((row) => {
-        const rec = recommendTenantAction(row, canonical);
+        const rec = recommendTenantAction(row, canonical, groupSize);
+        const inputs = signatureInputsByTenantId.get(row.id);
         const out: DuplicateRecord & { row: AuditTenantRow } = {
           recordType: 'tenant',
           recordId: row.id,
@@ -376,7 +427,18 @@ function buildTenantGroups(
             apiKeys: row.apiKeyCount,
             webhookSubscriptions: row.webhookSubscriptionCount,
             endpointRoutes: row.endpointRouteCount,
-            tenantSignature: tenantSignature(row, lbUserIdByTenantId),
+            tenantSignature: signature,
+            // PR9.1 — surface the dimensions that produced the signature so
+            // operators can verify why two records did/didn't cluster.
+            signaturePlatform: inputs?.platformId ?? null,
+            signatureCustomer: inputs?.lbUserId
+              ? `lb-user:${inputs.lbUserId}`
+              : `ext:${row.externalId ?? row.id}`,
+            signatureLocation:
+              inputs?.curatedLocation ??
+              (inputs?.fallbackLocationName ?? null),
+            signatureSource:
+              inputs?.bestRealSource ?? inputs?.defaultSource ?? null,
           },
           row,
         };
@@ -578,6 +640,8 @@ async function main(): Promise<void> {
     const tenantGroups = buildTenantGroups(
       data.tenants,
       data.lbUserIdByTenantId,
+      data.signatureByTenantId,
+      data.signatureInputsByTenantId,
       args.includeSingletons,
     );
     const businessGroups = buildBusinessGroups(

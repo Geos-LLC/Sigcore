@@ -169,22 +169,23 @@ export function isZombieTenant(t: AuditTenantRow): boolean {
 
 /**
  * Apply the canonical selection rules to a group of tenants and return the
- * canonical id, or null if the whole group is zombies/anchors with no
- * acceptable canonical.
+ * canonical id, or null if the group contains no SavedAccount-backed
+ * candidate (PR9.1 — locked rule: zombie-only groups must surface as
+ * manual_review, never auto-merge into another zombie).
  *
- * Rules in priority order:
- *   1. Has SavedAccount backing (real LB tenant)        — strongest signal
- *   2. Active phone assignments (still routing traffic)
- *   3. Most recent conversation activity
- *   4. Non-zombie (negative weight if zombie)
- *   5. Non-anchor (negative weight if anchor)
- *
- * Ties broken by tenant.id ascending (deterministic).
+ * Strict rules:
+ *   - candidate must have hasSavedAccount=true (real LB tenant)
+ *   - never an anchor (defensive — should have been filtered upstream)
+ *   - among real candidates: highest score wins (active phones, recent
+ *     traffic, wired up)
+ *   - ties broken by tenant.id ascending (deterministic)
  */
 export function selectCanonicalTenant(
   candidates: AuditTenantRow[],
 ): string | null {
-  const realCandidates = candidates.filter((t) => !isPlatformAnchor(t));
+  const realCandidates = candidates.filter(
+    (t) => !isPlatformAnchor(t) && t.hasSavedAccount,
+  );
   if (realCandidates.length === 0) return null;
 
   const scored = realCandidates.map((t) => ({
@@ -195,10 +196,7 @@ export function selectCanonicalTenant(
     if (a.score !== b.score) return b.score - a.score;
     return a.t.id.localeCompare(b.t.id);
   });
-  const top = scored[0];
-  // If the top candidate has score 0 (no positive signal), the whole group
-  // is effectively dead — skip canonical assignment.
-  return top.score > 0 ? top.t.id : null;
+  return scored[0].t.id;
 }
 
 function scoreTenantForCanonical(t: AuditTenantRow): number {
@@ -224,20 +222,24 @@ function scoreTenantForCanonical(t: AuditTenantRow): number {
 }
 
 /**
- * Recommend the action for one non-canonical record. Pure decision tree:
- *   - Anchor tenant                                  → flag_anchor_tenant
- *   - Zombie + no traffic + no phones                → deactivate_zombie (safe)
- *   - Zombie WITH traffic OR phones                  → manual_review (NOT safe)
- *   - Real backing but not canonical (true duplicate)→ soft_disable_duplicate
- *   - Otherwise (unexpected)                         → manual_review
+ * Recommend the action for one record. PR9.1 rule changes:
+ *   - Anchor tenant                            → flag_anchor_tenant
+ *   - Multi-record group with NO canonical     → manual_review (locked rule:
+ *                                                zombie-only groups must
+ *                                                NEVER auto-pick a zombie
+ *                                                as canonical)
+ *   - Singleton clean zombie (no group sibling)→ deactivate_zombie (safe)
+ *   - Singleton zombie with live wiring        → manual_review
+ *   - Real backing, not canonical              → soft_disable_duplicate
  *
- * The caller decides whether canonical exists; if no canonical, every record
- * in the group gets its own recommendation (typically deactivate_zombie or
- * flag_anchor_tenant).
+ * `groupSize` lets the caller signal whether the tenant sits in a multi-
+ * record group (where canonical=null means manual_review) or alone (where
+ * a clean zombie is still safe to deactivate independently).
  */
 export function recommendTenantAction(
   t: AuditTenantRow,
   canonical: AuditTenantRow | null,
+  groupSize = 1,
 ): { action: RecommendedAction; safeToDelete: boolean; reason: string } {
   if (isPlatformAnchor(t)) {
     return {
@@ -262,6 +264,17 @@ export function recommendTenantAction(
     t.apiKeyCount > 0 ||
     t.endpointRouteCount > 0 ||
     t.webhookSubscriptionCount > 0;
+
+  // No canonical AND multi-record group: rule #4 — never auto-merge zombies
+  // into another zombie. Surface the whole group for manual review.
+  if (!canonical && groupSize > 1) {
+    return {
+      action: 'manual_review',
+      safeToDelete: false,
+      reason:
+        'multi-record group with no SavedAccount-backed canonical; manual mapping required',
+    };
+  }
 
   if (zombie && !hasTraffic && !hasPhones && !hasOtherWiring) {
     return {
@@ -302,24 +315,86 @@ export function recommendTenantAction(
 // ---------------------------------------------------------------------------
 
 /**
- * Group tenants for duplicate detection. The signature is one of:
- *   - 'lb-user:<lb_user_id>'    when the tenant has at least one business
- *     with metadata.lb_user_id set (PR6 marker).
- *   - 'name:<normalized-name>'  when the tenant has no lb_user_id but a real
- *     non-stub name. Catches zombie clones of real tenants (e.g. multiple
- *     "Spotless Homes Tampa" tenants where only one has SavedAccount backing).
- *   - 'anchor:<platform>'       for bootstrap anchor tenants.
- *   - 'orphan:<tenant_id>'      for tenants with no signal — singleton groups.
+ * PR9.1 strict signature: tenants are duplicates iff they collide on
+ *
+ *   platform + customer + location + source
+ *
+ * - platform     attribution result ('leadbridge', 'hirefunnel', …)
+ * - customer     lb_user_id when set (PR6 metadata), otherwise tenant.external_id
+ *                (zombies have unique external_ids → they don't cluster with
+ *                each other under the customer dimension)
+ * - location     metadata.location (curated/suffix-strip from PR6) when set,
+ *                otherwise normalizeName(business.display_name)
+ * - source       most authoritative profile source under the tenant —
+ *                a real materialized source ('thumbtack' / 'yelp') is
+ *                preferred over the kept Default profile's 'leadbridge'
+ *
+ * Effect on real prod data:
+ *   - Spotless Homes Tampa TT  ≠  Spotless Homes Jacksonville TT (different location)
+ *   - Spotless Homes Tampa TT  ≠  Spotless Homes Tampa Yelp     (different source)
+ *   - Lavanda TT              ≠  Lavanda Yelp                   (different source)
+ *   - Each zombie is alone (its own tenant.external_id as customer key)
+ *     → singleton groups → no spurious zombie-zombie auto-merge
+ *
+ * Anchors get their own degenerate signature so they can never collide with
+ * a customer tenant.
+ */
+export interface TenantSignatureInputs {
+  /** Platform attribution result, e.g. 'leadbridge'. */
+  platformId: string;
+  /** lb_user_id when known. */
+  lbUserId: string | null;
+  /** From metadata.location when present, else null. */
+  curatedLocation: string | null;
+  /** Highest-quality businesses display_name available for fallback. */
+  fallbackLocationName: string | null;
+  /** Best non-default profile source under this tenant; null when only Default exists. */
+  bestRealSource: string | null;
+  /** Default profile source — used when bestRealSource is null. */
+  defaultSource: string | null;
+}
+
+const ANCHOR_SIGNATURE_PREFIX = 'anchor:';
+
+export function tenantSignature(
+  t: AuditTenantRow,
+  inputs: TenantSignatureInputs,
+): string {
+  if (isPlatformAnchor(t)) {
+    return `${ANCHOR_SIGNATURE_PREFIX}${normalizeName(t.name) || t.externalId || t.id}`;
+  }
+  const platformKey = inputs.platformId || 'unclassified';
+  const customerKey = inputs.lbUserId
+    ? `lb-user:${inputs.lbUserId}`
+    : `ext:${t.externalId ?? t.id}`;
+  const locationKey = inputs.curatedLocation
+    ? `loc:${inputs.curatedLocation}`
+    : inputs.fallbackLocationName
+      ? `name:${normalizeName(inputs.fallbackLocationName)}`
+      : 'noloc';
+  const sourceKey = inputs.bestRealSource
+    ? `src:${inputs.bestRealSource}`
+    : inputs.defaultSource
+      ? `src:${inputs.defaultSource}`
+      : 'src:unknown';
+  return `${platformKey}|${customerKey}|${locationKey}|${sourceKey}`;
+}
+
+/**
+ * Group tenants for duplicate detection using the strict 4-dimension
+ * signature. Caller computes per-tenant signatures (the script does this
+ * by joining tenants → businesses → profiles).
  *
  * Returns groups with size >= 1; the caller filters to size > 1 if desired.
  */
-export function groupTenantsForDuplicates(
+export function groupTenantsBySignature(
   tenants: AuditTenantRow[],
-  lbUserIdByTenantId: Map<string, string>,
+  signatureByTenantId: Map<string, string>,
 ): Map<string, AuditTenantRow[]> {
   const groups = new Map<string, AuditTenantRow[]>();
   for (const t of tenants) {
-    const sig = tenantSignature(t, lbUserIdByTenantId);
+    const sig = signatureByTenantId.get(t.id);
+    if (!sig) continue;
     const arr = groups.get(sig) ?? [];
     arr.push(t);
     groups.set(sig, arr);
@@ -327,21 +402,56 @@ export function groupTenantsForDuplicates(
   return groups;
 }
 
-export function tenantSignature(
-  t: AuditTenantRow,
-  lbUserIdByTenantId: Map<string, string>,
-): string {
-  if (isPlatformAnchor(t)) {
-    return `anchor:${normalizeName(t.name) || t.externalId || t.id}`;
+/**
+ * Pick the best location key for a tenant by walking its businesses:
+ *   - prefer any business whose metadata.location is set (PR6 curated)
+ *   - otherwise fall back to the first non-empty businesses display_name
+ */
+export function pickBestLocationFromBusinesses(
+  businesses: AuditBusinessRow[],
+): { curated: string | null; fallback: string | null } {
+  let curated: string | null = null;
+  let fallback: string | null = null;
+  for (const b of businesses) {
+    const loc = (b.metadata?.location as string | undefined)?.trim();
+    if (loc && !curated) curated = loc.toLowerCase();
+    if (!fallback && b.displayName) fallback = b.displayName.trim() || null;
   }
-  const lbUserId = lbUserIdByTenantId.get(t.id);
-  if (lbUserId) return `lb-user:${lbUserId}`;
-  // No lb_user_id (zombie or non-LB). Group by name when name is a real
-  // brand; otherwise treat as singleton.
-  if (t.name && !isAccountStubName(t.name)) {
-    return `name:${normalizeName(t.name)}`;
-  }
-  return `orphan:${t.id}`;
+  return { curated, fallback };
+}
+
+/**
+ * Pick the best source key for a tenant from its profiles.
+ *   - prefer any profile whose source is NOT the legacy default
+ *     ('leadbridge', 'hirefunnel', 'serviceflow', 'callio', 'internal')
+ *   - among preferred candidates, choose deterministically (alpha)
+ *   - fall back to the default-profile source when no real source exists
+ */
+const LEGACY_DEFAULT_SOURCES = new Set([
+  'leadbridge',
+  'hirefunnel',
+  'serviceflow',
+  'callio',
+  'internal',
+]);
+
+export function pickBestSourceFromProfiles(
+  profiles: AuditProfileRow[],
+): { real: string | null; defaulted: string | null } {
+  const realSources = Array.from(
+    new Set(
+      profiles
+        .filter((p) => p.source && !LEGACY_DEFAULT_SOURCES.has(p.source))
+        .map((p) => p.source),
+    ),
+  ).sort();
+  const defaultSources = Array.from(
+    new Set(profiles.filter((p) => p.isDefault).map((p) => p.source)),
+  ).sort();
+  return {
+    real: realSources.length > 0 ? realSources[0] : null,
+    defaulted: defaultSources.length > 0 ? defaultSources[0] : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
