@@ -64,8 +64,8 @@ export default function AdminPlatformsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Platforms</h1>
           <p className="text-sm text-gray-500">
-            Apps using Sigcore — derived from <code className="font-mono">tenants.name</code>.
-            Read-only.
+            Apps using Sigcore — derived from platform anchors and communication
+            profile sources. Read-only.
           </p>
         </div>
         <button
@@ -113,7 +113,20 @@ export default function AdminPlatformsPage() {
                   </td>
                 </tr>
               ) : (
-                platforms.map((p) => {
+                platforms
+                  .filter((p) => {
+                    // PR14.2 — hide Unclassified row when there are zero
+                    // workspaces in it. (Empty unclassified is noise; keep it
+                    // visible only when something actually lands there.)
+                    if (
+                      p.id === 'unclassified' &&
+                      (p.workspaceCount ?? 0) === 0
+                    ) {
+                      return false;
+                    }
+                    return true;
+                  })
+                  .map((p) => {
                   const isUnclassified = p.id === 'unclassified';
                   const noAnchor = !isUnclassified && !p.anchorTenantId;
                   return (
@@ -180,13 +193,12 @@ export default function AdminPlatformsPage() {
       </div>
 
       <div className="text-xs text-gray-400">
-        Platform attribution is a string match on <code className="font-mono">tenants.name</code>
-        ({' '}
-        <code className="font-mono">LeadBridge</code>,{' '}
+        Platform attribution combines anchor tenants (<code className="font-mono">LeadBridge</code>,{' '}
         <code className="font-mono">HireFunnel</code>,{' '}
         <code className="font-mono">Service Flow</code>,{' '}
-        <code className="font-mono">Callio</code>
-        ). Tenants whose name does not match an anchor are surfaced as{' '}
+        <code className="font-mono">Callio</code>) with communication profile sources
+        (<code className="font-mono">thumbtack</code>, <code className="font-mono">yelp</code>, …).
+        Tenants whose attribution and source signals don't match a known platform are surfaced as{' '}
         <span className="font-medium">Unclassified</span> rather than guessed.
       </div>
     </div>

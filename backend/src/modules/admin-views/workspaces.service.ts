@@ -102,15 +102,32 @@ export class WorkspacesService {
     );
 
     // Tag every summary with its PR14 classification, then filter.
-    const tagged = summaries.map((s) => ({
-      ...s,
-      classification: classifyWorkspace({
+    // PR14.2 — override platformId to 'leadbridge' when this is an LB
+    // customer workspace (kind='lb_customer' or synthetic key starts with
+    // 'lb-user-'). Tenant-level attribution can return 'unclassified' for
+    // LB customers whose tenants were provisioned with bare "Account
+    // <uuid>" names; the workspace identity makes the platform unambiguous.
+    // Classification still uses the *raw* platformId so non-LB platforms
+    // resolve correctly.
+    const tagged = summaries.map((s) => {
+      const classification = classifyWorkspace({
         kind: s.kind,
         platformId: s.platformId,
         displayName: s.displayName,
         tenantExternalId: externalIdByTenantId.get(s.primaryTenantId) ?? null,
-      }),
-    }));
+      });
+      const isLbCustomerWorkspace =
+        s.kind === 'lb_customer' || s.key.startsWith('lb-user-');
+      const displayPlatformId =
+        isLbCustomerWorkspace && s.platformId === 'unclassified'
+          ? 'leadbridge'
+          : s.platformId;
+      return {
+        ...s,
+        platformId: displayPlatformId,
+        classification,
+      };
+    });
 
     const total = tagged.length;
     let hiddenZombies = 0;
