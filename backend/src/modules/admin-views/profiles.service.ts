@@ -22,6 +22,7 @@ import {
 import {
   classifyBusiness,
   classifyProfile,
+  deriveDisplayPlatformId,
   profileIsVisible,
 } from './classification';
 
@@ -149,13 +150,15 @@ export class ProfilesService {
         typeof parentMeta.lb_user_id === 'string'
           ? (parentMeta.lb_user_id as string)
           : null;
-      const platformId =
+      const rawPlatformId =
         attribution.byTenantId.get(p.tenantId) ?? 'unclassified';
       const parentBusinessClassification = classifyBusiness({
         lbUserId: parentLbUserId,
         externalBusinessId: parentBiz?.externalBusinessId ?? null,
-        platformId,
+        platformId: rawPlatformId,
       });
+      // PR14.1 — display LB family sources as Platform: LeadBridge.
+      const platformId = deriveDisplayPlatformId(rawPlatformId, [String(p.source)]);
       return {
         id: p.id,
         displayName: p.displayName,

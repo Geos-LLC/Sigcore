@@ -29,6 +29,7 @@ import {
   businessIsVisible,
   classifyBusiness,
   classifyProfile,
+  deriveDisplayPlatformId,
   profileIsVisible,
 } from './classification';
 
@@ -237,8 +238,11 @@ export class BusinessesService {
           ? (meta.location_display as string).trim()
           : null;
 
-      const platformId =
+      const rawPlatformId =
         attribution.byTenantId.get(b.tenantId) ?? 'unclassified';
+      // PR14.1 — override to 'leadbridge' when a LB-family source is present
+      // on the row, regardless of tenant-level attribution noise.
+      const platformId = deriveDisplayPlatformId(rawPlatformId, sources);
       return {
         id: b.id,
         displayName: b.displayName,
@@ -260,10 +264,12 @@ export class BusinessesService {
         workspaceDisplayName:
           workspace?.displayName ?? tenant?.name ?? `Workspace ${workspaceKey.slice(0, 16)}`,
         locationDisplay,
+        // Classification uses the *raw* platform id so HF/SF/Callio still
+        // resolve correctly. Override only changes the display column.
         classification: classifyBusiness({
           lbUserId,
           externalBusinessId: b.externalBusinessId ?? null,
-          platformId,
+          platformId: rawPlatformId,
         }),
       };
     });
@@ -359,13 +365,16 @@ export class BusinessesService {
       const parentMeta = (parentBiz?.metadata as Record<string, unknown> | null) ?? {};
       const parentLbUserId =
         typeof parentMeta.lb_user_id === 'string' ? (parentMeta.lb_user_id as string) : null;
-      const platformId =
+      const rawPlatformId =
         attribution.byTenantId.get(p.tenantId) ?? 'unclassified';
       const parentBusinessClassification = classifyBusiness({
         lbUserId: parentLbUserId,
         externalBusinessId: parentBiz?.externalBusinessId ?? null,
-        platformId,
+        platformId: rawPlatformId,
       });
+      // PR14.1 — override platformId for LB-family sources (e.g. Thumbtack /
+      // Yelp / leadbridge default) so the column never says "unclassified".
+      const platformId = deriveDisplayPlatformId(rawPlatformId, [String(p.source)]);
       return {
         id: p.id,
         displayName: p.displayName,

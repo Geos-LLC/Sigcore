@@ -1,5 +1,5 @@
 /**
- * Admin UI classification helpers (PR14).
+ * Admin UI classification helpers (PR14, tightened in PR14.1).
  *
  * Single source of truth for "is this a real customer record / a zombie /
  * a platform anchor?" — encoded once, applied across Workspaces, Businesses,
@@ -16,8 +16,11 @@
  *     anchor         — name matches LeadBridge / HireFunnel / ServiceFlow / Callio
  *
  *   business
- *     real           — has metadata.lb_user_id (set by PR6) OR external_business_id
- *     zombie         — neither
+ *     real           — has metadata.lb_user_id (set by PR6)
+ *                      OR platformId is a known non-LB platform
+ *     zombie         — otherwise. external_business_id is NOT a real signal —
+ *                      PR1 backfill set it for every LB-classified tenant
+ *                      including the ones that later turned into zombies.
  *
  *   profile
  *     real_source    — non-default source (thumbtack / yelp / facebook / craigslist / indeed)
@@ -41,6 +44,38 @@ const ANCHOR_NAME_NORMALIZED = new Set([
 ]);
 const ANCHOR_EXTERNAL_PATTERN =
   /^(leadbridge|hirefunnel|serviceflow|callio)[-_]/i;
+
+// ---------------------------------------------------------------------------
+// Display platform override (PR14.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sources that imply LeadBridge platform regardless of tenant-level attribution.
+ * If a business or profile carries any of these sources, the row should
+ * display as Platform = LeadBridge — not 'unclassified'.
+ *
+ * Tenant-level attribution can still be wrong (e.g. tenant.name = "Account
+ * <uuid>" with no webhook URL → unclassified), but if the row's source is
+ * Thumbtack or Yelp the channel reality is unambiguous: it's LeadBridge.
+ */
+const LB_PLATFORM_SOURCES = new Set(['leadbridge', 'thumbtack', 'yelp']);
+
+/**
+ * Decide the display platformId for a single row. Override 'unclassified' to
+ * 'leadbridge' when ANY source on the row is in the LB family. Pass-through
+ * for all other cases (real platform attribution wins).
+ */
+export function deriveDisplayPlatformId(
+  rawPlatformId: string,
+  sources: ReadonlyArray<string | null | undefined>,
+): string {
+  if (rawPlatformId === 'leadbridge') return 'leadbridge';
+  const hasLbFamilySource = sources.some(
+    (s) => typeof s === 'string' && LB_PLATFORM_SOURCES.has(s),
+  );
+  if (hasLbFamilySource) return 'leadbridge';
+  return rawPlatformId;
+}
 
 /** True when the tenant.name or external_id matches a platform anchor. */
 export function isAnchorByNameOrExternalId(input: {
@@ -110,6 +145,12 @@ export type BusinessClassification = 'real' | 'zombie';
 export interface ClassifyBusinessInput {
   /** lb_user_id parsed out of metadata at the service layer. */
   lbUserId: string | null;
+  /**
+   * NOT used as a real signal anymore (PR14.1) — kept on the input shape so
+   * call sites don't have to change. PR1's backfill set this for every
+   * LB-classified tenant, including the ones that later became zombies, so
+   * its presence does not actually indicate liveness.
+   */
   externalBusinessId: string | null;
   /** Inherited platform attribution from the parent tenant. */
   platformId: string;
@@ -119,7 +160,6 @@ export function classifyBusiness(
   input: ClassifyBusinessInput,
 ): BusinessClassification {
   if (input.lbUserId) return 'real';
-  if (input.externalBusinessId) return 'real';
   // Non-LB platform tenants don't get PR6 metadata but their single business
   // row is still real (they're the customer's only business).
   if (

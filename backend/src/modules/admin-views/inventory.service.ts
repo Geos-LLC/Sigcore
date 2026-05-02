@@ -18,6 +18,7 @@ import {
   attributePlatforms,
   AttributionTenant,
 } from './platform-attribution';
+import { deriveDisplayPlatformId } from './classification';
 import {
   AggregationBusiness,
   AggregationPhoneCounts,
@@ -305,8 +306,12 @@ export class InventoryService {
       const number = tpnIdToNumber.get(r.tpn_id);
       if (!number) continue;
       const business = bizById.get(r.business_id);
-      const tenantPlatform =
+      const rawTenantPlatform =
         attribution.byTenantId.get(r.tenant_id) ?? 'unclassified';
+      // PR14.1 — display LB family sources as Platform: LeadBridge in chain rendering.
+      const tenantPlatform = deriveDisplayPlatformId(rawTenantPlatform, [
+        r.profile_source,
+      ]);
       const wkey = business
         ? workspaceKeyForBusiness({
             tenantId: business.tenantId,

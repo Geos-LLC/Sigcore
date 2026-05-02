@@ -3,10 +3,40 @@ import {
   classifyBusiness,
   classifyProfile,
   classifyWorkspace,
+  deriveDisplayPlatformId,
   isAnchorByNameOrExternalId,
   profileIsVisible,
   workspaceIsVisible,
 } from './classification';
+
+describe('deriveDisplayPlatformId', () => {
+  it('overrides unclassified → leadbridge when source is thumbtack', () => {
+    expect(deriveDisplayPlatformId('unclassified', ['thumbtack'])).toBe('leadbridge');
+  });
+  it('overrides unclassified → leadbridge when source is yelp', () => {
+    expect(deriveDisplayPlatformId('unclassified', ['yelp'])).toBe('leadbridge');
+  });
+  it('overrides unclassified → leadbridge when source is leadbridge (legacy default)', () => {
+    expect(deriveDisplayPlatformId('unclassified', ['leadbridge'])).toBe('leadbridge');
+  });
+  it('overrides unclassified → leadbridge for businesses with multiple sources including LB family', () => {
+    expect(deriveDisplayPlatformId('unclassified', ['leadbridge', 'thumbtack'])).toBe(
+      'leadbridge',
+    );
+  });
+  it('passes through real platform attribution unchanged', () => {
+    expect(deriveDisplayPlatformId('hirefunnel', ['internal'])).toBe('hirefunnel');
+    expect(deriveDisplayPlatformId('serviceflow', [])).toBe('serviceflow');
+  });
+  it('does NOT override unclassified for non-LB sources', () => {
+    expect(deriveDisplayPlatformId('unclassified', ['internal'])).toBe('unclassified');
+    expect(deriveDisplayPlatformId('unclassified', ['manual'])).toBe('unclassified');
+    expect(deriveDisplayPlatformId('unclassified', [])).toBe('unclassified');
+  });
+  it('handles null/undefined sources defensively', () => {
+    expect(deriveDisplayPlatformId('unclassified', [null, undefined])).toBe('unclassified');
+  });
+});
 
 describe('isAnchorByNameOrExternalId', () => {
   it('detects anchor names case/whitespace insensitive', () => {
@@ -100,14 +130,14 @@ describe('classifyBusiness', () => {
       }),
     ).toBe('real');
   });
-  it('has external_business_id but no lb_user_id → real', () => {
+  it('PR14.1: has external_business_id but no lb_user_id → ZOMBIE (PR1 backfill set this for every LB tenant including zombies)', () => {
     expect(
       classifyBusiness({
         lbUserId: null,
         externalBusinessId: 'sa-uuid',
         platformId: 'leadbridge',
       }),
-    ).toBe('real');
+    ).toBe('zombie');
   });
   it('non-LB platform tenant business → real (direct customer)', () => {
     expect(
