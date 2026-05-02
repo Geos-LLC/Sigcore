@@ -13,7 +13,7 @@ import {
   Share2,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type { BusinessSummary, PlatformId } from '../../types';
+import type { BusinessSummary, PlatformId, AdminListMeta } from '../../types';
 import { IdChip } from '../../components/admin/IdChip';
 import { SourceBadge } from '../../components/admin/SourceBadge';
 
@@ -54,21 +54,25 @@ export default function AdminBusinessesPage() {
   const [hasPhones, setHasPhones] = useState(false);
   const [hasShared, setHasShared] = useState(false);
   const [hasExternal, setHasExternal] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
+  const [meta, setMeta] = useState<AdminListMeta | null>(null);
   const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await adminApi.getBusinesses({
+      const { data, meta } = await adminApi.getBusinessesWithMeta({
         platformId: platform || undefined,
         source: source || undefined,
         hasPhones: hasPhones || undefined,
         hasSharedPhone: hasShared || undefined,
         hasExternalId: hasExternal || undefined,
         workspaceKey: workspaceKey || undefined,
+        includeZombies: showRaw || undefined,
       });
       setRows(data);
+      setMeta(meta);
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Failed to load businesses');
     } finally {
@@ -79,7 +83,7 @@ export default function AdminBusinessesPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, source, hasPhones, hasShared, hasExternal, workspaceKey]);
+  }, [platform, source, hasPhones, hasShared, hasExternal, workspaceKey, showRaw]);
 
   const clearWorkspaceFilter = () => {
     const next = new URLSearchParams(searchParams);
@@ -187,6 +191,22 @@ export default function AdminBusinessesPage() {
           <ToggleChip label="Has phones" on={hasPhones} onClick={() => setHasPhones((v) => !v)} icon={<Phone className="h-3 w-3" />} />
           <ToggleChip label="Has shared phone" on={hasShared} onClick={() => setHasShared((v) => !v)} icon={<Share2 className="h-3 w-3" />} />
           <ToggleChip label="Has external id" on={hasExternal} onClick={() => setHasExternal((v) => !v)} icon={<Layers className="h-3 w-3" />} />
+          <button
+            onClick={() => setShowRaw((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              showRaw
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+            }`}
+            title="Reveal zombie business rows (no PR6 metadata, no external id, not a known non-LB platform)."
+          >
+            Show raw / zombies
+            {meta && meta.hiddenZombies > 0 && !showRaw && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-4 px-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-mono">
+                {meta.hiddenZombies}
+              </span>
+            )}
+          </button>
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
             <input

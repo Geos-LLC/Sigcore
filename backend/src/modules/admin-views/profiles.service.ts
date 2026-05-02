@@ -13,11 +13,17 @@ import {
   AttributionTenant,
 } from './platform-attribution';
 import {
+  AdminListMeta,
   ProfileSummary,
   ProfileDetail,
   ProfilePhoneAssignmentRow,
   ProfileRecentMessageRow,
 } from './dto/admin-views.types';
+import {
+  classifyBusiness,
+  classifyProfile,
+  profileIsVisible,
+} from './classification';
 
 export interface ProfileFilters {
   platformId?: string;
@@ -28,6 +34,10 @@ export interface ProfileFilters {
   hasSharedPhone?: boolean;
   hasExternalId?: boolean;
   isDefault?: boolean;
+  /** PR14 — when true, include kept/zombie default profiles. Default false. */
+  showRawDefaults?: boolean;
+  /** PR14 — when true, include profiles whose parent business is a zombie. Default false. */
+  includeZombies?: boolean;
 }
 
 const RECENT_MESSAGES_LIMIT = 20;
@@ -51,9 +61,17 @@ export class ProfilesService {
     private readonly messageRepo: Repository<CommunicationMessage>,
   ) {}
 
-  async list(workspaceId: string, filters: ProfileFilters = {}): Promise<ProfileSummary[]> {
+  async list(
+    workspaceId: string,
+    filters: ProfileFilters = {},
+  ): Promise<{ data: ProfileSummary[]; meta: AdminListMeta }> {
     const profiles = await this.profileRepo.find({ where: { workspaceId } });
-    if (profiles.length === 0) return [];
+    if (profiles.length === 0) {
+      return {
+        data: [],
+        meta: { total: 0, visible: 0, hiddenZombies: 0, hiddenAnchors: 0, hiddenRawDefaults: 0 },
+      };
+    }
     const summaries = await this.buildSummaries(workspaceId, profiles);
     return this.applyFilters(summaries, filters);
   }
@@ -125,6 +143,19 @@ export class ProfilesService {
       const hasSharedPhone = phoneList.some(
         (n) => (profilesByPhone.get(n)?.size ?? 0) > 1,
       );
+      const parentBiz = bizById.get(p.communicationBusinessId);
+      const parentMeta = (parentBiz?.metadata as Record<string, unknown> | null) ?? {};
+      const parentLbUserId =
+        typeof parentMeta.lb_user_id === 'string'
+          ? (parentMeta.lb_user_id as string)
+          : null;
+      const platformId =
+        attribution.byTenantId.get(p.tenantId) ?? 'unclassified';
+      const parentBusinessClassification = classifyBusiness({
+        lbUserId: parentLbUserId,
+        externalBusinessId: parentBiz?.externalBusinessId ?? null,
+        platformId,
+      });
       return {
         id: p.id,
         displayName: p.displayName,
@@ -134,20 +165,31 @@ export class ProfilesService {
         isDefault: p.isDefault,
         externalProfileId: p.externalProfileId ?? null,
         communicationBusinessId: p.communicationBusinessId,
-        businessName: bizById.get(p.communicationBusinessId)?.displayName ?? null,
+        businessName: parentBiz?.displayName ?? null,
         tenantId: p.tenantId,
         tenantName: tenantById.get(p.tenantId)?.name ?? null,
         workspaceId: p.workspaceId,
-        platformId: attribution.byTenantId.get(p.tenantId) ?? 'unclassified',
+        platformId,
         phoneCount: phoneList.length,
         hasSharedPhone,
         createdAt: p.createdAt instanceof Date ? p.createdAt.toISOString() : String(p.createdAt),
+        classification: classifyProfile({
+          source: String(p.source),
+          slug: p.slug,
+          isDefault: p.isDefault,
+          parentBusinessClassification,
+        }),
       };
     });
   }
 
-  private applyFilters(rows: ProfileSummary[], f: ProfileFilters): ProfileSummary[] {
-    return rows.filter((r) => {
+  private applyFilters(
+    rows: ProfileSummary[],
+    f: ProfileFilters,
+  ): { data: ProfileSummary[]; meta: AdminListMeta } {
+    let hiddenZombies = 0;
+    let hiddenRawDefaults = 0;
+    const data = rows.filter((r) => {
       if (f.platformId && r.platformId !== f.platformId) return false;
       if (f.source && r.source !== f.source) return false;
       if (f.businessId && r.communicationBusinessId !== f.businessId) return false;
@@ -156,8 +198,27 @@ export class ProfilesService {
       if (f.hasSharedPhone && !r.hasSharedPhone) return false;
       if (f.hasExternalId && !r.externalProfileId) return false;
       if (f.isDefault !== undefined && r.isDefault !== f.isDefault) return false;
+      const ok = profileIsVisible(r.classification, {
+        showRawDefaults: f.showRawDefaults,
+        includeZombies: f.includeZombies,
+      });
+      if (!ok) {
+        if (r.classification === 'zombie_default') hiddenZombies++;
+        else if (r.classification === 'kept_default') hiddenRawDefaults++;
+        return false;
+      }
       return true;
     });
+    return {
+      data,
+      meta: {
+        total: rows.length,
+        visible: data.length,
+        hiddenZombies,
+        hiddenAnchors: 0,
+        hiddenRawDefaults,
+      },
+    };
   }
 
   private async buildAssignmentRows(

@@ -2,7 +2,11 @@ import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
 import { BusinessesService } from './businesses.service';
-import { BusinessSummary, BusinessDetail } from './dto/admin-views.types';
+import {
+  AdminListMeta,
+  BusinessSummary,
+  BusinessDetail,
+} from './dto/admin-views.types';
 
 @Controller('admin/businesses')
 @UseGuards(SigcoreAuthGuard)
@@ -18,16 +22,17 @@ export class BusinessesController {
     @Query('hasSharedPhone') hasSharedPhone?: string,
     @Query('hasExternalId') hasExternalId?: string,
     @Query('workspaceKey') workspaceKey?: string,
-  ): Promise<{ data: BusinessSummary[] }> {
-    const data = await this.businessesService.list(workspaceId, {
+    @Query('includeZombies') includeZombies?: string,
+  ): Promise<{ data: BusinessSummary[]; meta: AdminListMeta }> {
+    return this.businessesService.list(workspaceId, {
       platformId,
       source,
       hasPhones: hasPhones === 'true' || hasPhones === '1',
       hasSharedPhone: hasSharedPhone === 'true' || hasSharedPhone === '1',
       hasExternalId: hasExternalId === 'true' || hasExternalId === '1',
       workspaceKey,
+      includeZombies: includeZombies === 'true' || includeZombies === '1',
     });
-    return { data };
   }
 
   @Get(':id')

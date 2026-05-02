@@ -2,7 +2,11 @@ import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
 import { ProfilesService } from './profiles.service';
-import { ProfileSummary, ProfileDetail } from './dto/admin-views.types';
+import {
+  AdminListMeta,
+  ProfileSummary,
+  ProfileDetail,
+} from './dto/admin-views.types';
 
 @Controller('admin/profiles')
 @UseGuards(SigcoreAuthGuard)
@@ -20,8 +24,10 @@ export class ProfilesController {
     @Query('hasSharedPhone') hasSharedPhone?: string,
     @Query('hasExternalId') hasExternalId?: string,
     @Query('isDefault') isDefault?: string,
-  ): Promise<{ data: ProfileSummary[] }> {
-    const data = await this.profilesService.list(workspaceId, {
+    @Query('showRawDefaults') showRawDefaults?: string,
+    @Query('includeZombies') includeZombies?: string,
+  ): Promise<{ data: ProfileSummary[]; meta: AdminListMeta }> {
+    return this.profilesService.list(workspaceId, {
       platformId,
       source,
       businessId,
@@ -31,8 +37,9 @@ export class ProfilesController {
       hasExternalId: hasExternalId === 'true' || hasExternalId === '1',
       isDefault:
         isDefault === undefined ? undefined : isDefault === 'true' || isDefault === '1',
+      showRawDefaults: showRawDefaults === 'true' || showRawDefaults === '1',
+      includeZombies: includeZombies === 'true' || includeZombies === '1',
     });
-    return { data };
   }
 
   @Get(':id')

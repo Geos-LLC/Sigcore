@@ -11,6 +11,7 @@ import {
   AttributionTenant,
 } from './platform-attribution';
 import {
+  AdminListMeta,
   BusinessSummary,
   BusinessDetail,
   BusinessPhoneRow,
@@ -24,6 +25,12 @@ import {
   aggregateWorkspaces,
   workspaceKeyForBusiness,
 } from './workspace-aggregation';
+import {
+  businessIsVisible,
+  classifyBusiness,
+  classifyProfile,
+  profileIsVisible,
+} from './classification';
 
 export interface BusinessFilters {
   platformId?: string;
@@ -33,6 +40,8 @@ export interface BusinessFilters {
   hasExternalId?: boolean;
   /** PR8 — narrow to one customer workspace (lb-user-<id> or tenant-<id>). */
   workspaceKey?: string;
+  /** PR14 — when true, include zombie businesses. Default false. */
+  includeZombies?: boolean;
 }
 
 @Injectable()
@@ -50,9 +59,17 @@ export class BusinessesService {
     private readonly tenantRepo: Repository<Tenant>,
   ) {}
 
-  async list(workspaceId: string, filters: BusinessFilters = {}): Promise<BusinessSummary[]> {
+  async list(
+    workspaceId: string,
+    filters: BusinessFilters = {},
+  ): Promise<{ data: BusinessSummary[]; meta: AdminListMeta }> {
     const businesses = await this.bizRepo.find({ where: { workspaceId } });
-    if (businesses.length === 0) return [];
+    if (businesses.length === 0) {
+      return {
+        data: [],
+        meta: { total: 0, visible: 0, hiddenZombies: 0, hiddenAnchors: 0 },
+      };
+    }
 
     const summaries = await this.buildSummaries(workspaceId, businesses);
     return this.applyFilters(summaries, filters);
@@ -220,6 +237,8 @@ export class BusinessesService {
           ? (meta.location_display as string).trim()
           : null;
 
+      const platformId =
+        attribution.byTenantId.get(b.tenantId) ?? 'unclassified';
       return {
         id: b.id,
         displayName: b.displayName,
@@ -230,7 +249,7 @@ export class BusinessesService {
         workspaceId: b.workspaceId,
         tenantId: b.tenantId,
         tenantName: tenant?.name ?? null,
-        platformId: attribution.byTenantId.get(b.tenantId) ?? 'unclassified',
+        platformId,
         profileCount: bizProfiles.length,
         phoneCount,
         sources,
@@ -241,20 +260,45 @@ export class BusinessesService {
         workspaceDisplayName:
           workspace?.displayName ?? tenant?.name ?? `Workspace ${workspaceKey.slice(0, 16)}`,
         locationDisplay,
+        classification: classifyBusiness({
+          lbUserId,
+          externalBusinessId: b.externalBusinessId ?? null,
+          platformId,
+        }),
       };
     });
   }
 
-  private applyFilters(rows: BusinessSummary[], f: BusinessFilters): BusinessSummary[] {
-    return rows.filter((r) => {
+  private applyFilters(
+    rows: BusinessSummary[],
+    f: BusinessFilters,
+  ): { data: BusinessSummary[]; meta: AdminListMeta } {
+    let hiddenZombies = 0;
+    const data = rows.filter((r) => {
       if (f.platformId && r.platformId !== f.platformId) return false;
       if (f.source && !r.sources.includes(f.source)) return false;
       if (f.hasPhones && r.phoneCount === 0) return false;
       if (f.hasSharedPhone && !r.hasSharedPhone) return false;
       if (f.hasExternalId && !r.externalBusinessId) return false;
       if (f.workspaceKey && r.workspaceKey !== f.workspaceKey) return false;
+      const ok = businessIsVisible(r.classification, {
+        includeZombies: f.includeZombies,
+      });
+      if (!ok) {
+        if (r.classification === 'zombie') hiddenZombies++;
+        return false;
+      }
       return true;
     });
+    return {
+      data,
+      meta: {
+        total: rows.length,
+        visible: data.length,
+        hiddenZombies,
+        hiddenAnchors: 0,
+      },
+    };
   }
 
   private async buildProfileSummaries(
@@ -311,6 +355,17 @@ export class BusinessesService {
       const hasSharedPhone = phoneList.some(
         (n) => (profilesByPhone.get(n)?.size ?? 0) > 1,
       );
+      const parentBiz = bizById.get(p.communicationBusinessId);
+      const parentMeta = (parentBiz?.metadata as Record<string, unknown> | null) ?? {};
+      const parentLbUserId =
+        typeof parentMeta.lb_user_id === 'string' ? (parentMeta.lb_user_id as string) : null;
+      const platformId =
+        attribution.byTenantId.get(p.tenantId) ?? 'unclassified';
+      const parentBusinessClassification = classifyBusiness({
+        lbUserId: parentLbUserId,
+        externalBusinessId: parentBiz?.externalBusinessId ?? null,
+        platformId,
+      });
       return {
         id: p.id,
         displayName: p.displayName,
@@ -320,14 +375,20 @@ export class BusinessesService {
         isDefault: p.isDefault,
         externalProfileId: p.externalProfileId ?? null,
         communicationBusinessId: p.communicationBusinessId,
-        businessName: bizById.get(p.communicationBusinessId)?.displayName ?? null,
+        businessName: parentBiz?.displayName ?? null,
         tenantId: p.tenantId,
         tenantName: tenantById.get(p.tenantId)?.name ?? null,
         workspaceId: p.workspaceId,
-        platformId: attribution.byTenantId.get(p.tenantId) ?? 'unclassified',
+        platformId,
         phoneCount: phoneList.length,
         hasSharedPhone,
         createdAt: p.createdAt instanceof Date ? p.createdAt.toISOString() : String(p.createdAt),
+        classification: classifyProfile({
+          source: String(p.source),
+          slug: p.slug,
+          isDefault: p.isDefault,
+          parentBusinessClassification,
+        }),
       };
     });
   }

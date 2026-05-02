@@ -27,6 +27,7 @@ import type {
   ProfileFilters,
   WorkspaceSummary,
   WorkspaceFilters,
+  AdminListMeta,
 } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -416,17 +417,34 @@ class AdminApiService {
   // ==================== Businesses + Profiles (PR5) ====================
 
   async getWorkspaces(filters?: WorkspaceFilters): Promise<WorkspaceSummary[]> {
+    return (await this.getWorkspacesWithMeta(filters)).data;
+  }
+
+  /** PR14 — returns the new {data, meta} envelope so callers can render hidden-count badges. */
+  async getWorkspacesWithMeta(
+    filters?: WorkspaceFilters,
+  ): Promise<{ data: WorkspaceSummary[]; meta: AdminListMeta }> {
     const params = new URLSearchParams();
     if (filters?.platformId) params.append('platformId', filters.platformId);
     if (filters?.hideUnnamedTenants) params.append('hideUnnamedTenants', 'true');
+    if (filters?.includeZombies) params.append('includeZombies', 'true');
+    if (filters?.includeAnchors) params.append('includeAnchors', 'true');
     const qs = params.toString();
-    const response = await this.client.get<ApiResponse<WorkspaceSummary[]>>(
-      `/admin/workspaces${qs ? `?${qs}` : ''}`,
-    );
-    return response.data.data;
+    const response = await this.client.get<{
+      data: WorkspaceSummary[];
+      meta: AdminListMeta;
+    }>(`/admin/workspaces${qs ? `?${qs}` : ''}`);
+    return { data: response.data.data, meta: response.data.meta };
   }
 
   async getBusinesses(filters?: BusinessFilters): Promise<BusinessSummary[]> {
+    return (await this.getBusinessesWithMeta(filters)).data;
+  }
+
+  /** PR14 — returns the new {data, meta} envelope. */
+  async getBusinessesWithMeta(
+    filters?: BusinessFilters,
+  ): Promise<{ data: BusinessSummary[]; meta: AdminListMeta }> {
     const params = new URLSearchParams();
     if (filters?.platformId) params.append('platformId', filters.platformId);
     if (filters?.source) params.append('source', filters.source);
@@ -434,11 +452,13 @@ class AdminApiService {
     if (filters?.hasSharedPhone) params.append('hasSharedPhone', 'true');
     if (filters?.hasExternalId) params.append('hasExternalId', 'true');
     if (filters?.workspaceKey) params.append('workspaceKey', filters.workspaceKey);
+    if (filters?.includeZombies) params.append('includeZombies', 'true');
     const qs = params.toString();
-    const response = await this.client.get<ApiResponse<BusinessSummary[]>>(
-      `/admin/businesses${qs ? `?${qs}` : ''}`,
-    );
-    return response.data.data;
+    const response = await this.client.get<{
+      data: BusinessSummary[];
+      meta: AdminListMeta;
+    }>(`/admin/businesses${qs ? `?${qs}` : ''}`);
+    return { data: response.data.data, meta: response.data.meta };
   }
 
   async getBusiness(id: string): Promise<BusinessDetail> {
@@ -449,6 +469,13 @@ class AdminApiService {
   }
 
   async getProfiles(filters?: ProfileFilters): Promise<ProfileSummary[]> {
+    return (await this.getProfilesWithMeta(filters)).data;
+  }
+
+  /** PR14 — returns the new {data, meta} envelope. */
+  async getProfilesWithMeta(
+    filters?: ProfileFilters,
+  ): Promise<{ data: ProfileSummary[]; meta: AdminListMeta }> {
     const params = new URLSearchParams();
     if (filters?.platformId) params.append('platformId', filters.platformId);
     if (filters?.source) params.append('source', filters.source);
@@ -460,11 +487,14 @@ class AdminApiService {
     if (filters?.isDefault !== undefined) {
       params.append('isDefault', String(filters.isDefault));
     }
+    if (filters?.showRawDefaults) params.append('showRawDefaults', 'true');
+    if (filters?.includeZombies) params.append('includeZombies', 'true');
     const qs = params.toString();
-    const response = await this.client.get<ApiResponse<ProfileSummary[]>>(
-      `/admin/profiles${qs ? `?${qs}` : ''}`,
-    );
-    return response.data.data;
+    const response = await this.client.get<{
+      data: ProfileSummary[];
+      meta: AdminListMeta;
+    }>(`/admin/profiles${qs ? `?${qs}` : ''}`);
+    return { data: response.data.data, meta: response.data.meta };
   }
 
   async getProfile(id: string): Promise<ProfileDetail> {

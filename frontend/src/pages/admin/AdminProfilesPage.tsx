@@ -13,7 +13,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type { ProfileSummary, PlatformId } from '../../types';
+import type { ProfileSummary, PlatformId, AdminListMeta } from '../../types';
 import { IdChip } from '../../components/admin/IdChip';
 import { SourceBadge } from '../../components/admin/SourceBadge';
 
@@ -52,25 +52,29 @@ export default function AdminProfilesPage() {
   const [hasShared, setHasShared] = useState(false);
   const [hasExternal, setHasExternal] = useState(false);
   const [defaultsOnly, setDefaultsOnly] = useState(false);
-  // After LB profile materialization, the synthetic 'default' profile is kept
-  // around (is_default=FALSE) for back-compat. Hide it by default — operators
-  // can toggle to inspect.
-  const [showKeptDefaults, setShowKeptDefaults] = useState(false);
+  // PR14 — single toggle for raw default profiles (kept + zombie defaults).
+  // Off by default; backend filter excludes both classifications.
+  const [showRawDefaults, setShowRawDefaults] = useState(false);
+  const [includeZombies, setIncludeZombies] = useState(false);
+  const [meta, setMeta] = useState<AdminListMeta | null>(null);
   const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await adminApi.getProfiles({
+      const { data, meta } = await adminApi.getProfilesWithMeta({
         platformId: platform || undefined,
         source: source || undefined,
         hasPhones: hasPhones || undefined,
         hasSharedPhone: hasShared || undefined,
         hasExternalId: hasExternal || undefined,
         isDefault: defaultsOnly || undefined,
+        showRawDefaults: showRawDefaults || undefined,
+        includeZombies: includeZombies || undefined,
       });
       setRows(data);
+      setMeta(meta);
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Failed to load profiles');
     } finally {
@@ -81,14 +85,23 @@ export default function AdminProfilesPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, source, hasPhones, hasShared, hasExternal, defaultsOnly]);
+  }, [
+    platform,
+    source,
+    hasPhones,
+    hasShared,
+    hasExternal,
+    defaultsOnly,
+    showRawDefaults,
+    includeZombies,
+  ]);
 
   const filtered = useMemo(() => {
+    // PR14: visibility (kept_default / zombie_default) is enforced server-side.
+    // Client-side filter is now just the search box.
     const q = search.trim().toLowerCase();
+    if (!q) return rows;
     return rows.filter((r) => {
-      // Client-side: hide demoted "Default" profiles unless operator opts in.
-      if (!showKeptDefaults && r.slug === 'default' && !r.isDefault) return false;
-      if (!q) return true;
       if (r.displayName.toLowerCase().includes(q)) return true;
       if (r.id.toLowerCase().includes(q)) return true;
       if ((r.businessName || '').toLowerCase().includes(q)) return true;
@@ -97,7 +110,7 @@ export default function AdminProfilesPage() {
       if ((r.externalProfileId || '').toLowerCase().includes(q)) return true;
       return false;
     });
-  }, [rows, search, showKeptDefaults]);
+  }, [rows, search]);
 
   return (
     <div className="space-y-6">
@@ -160,12 +173,39 @@ export default function AdminProfilesPage() {
           <ToggleChip label="Has shared phone" on={hasShared} onClick={() => setHasShared((v) => !v)} icon={<Share2 className="h-3 w-3" />} />
           <ToggleChip label="Has external id" on={hasExternal} onClick={() => setHasExternal((v) => !v)} icon={<MapPin className="h-3 w-3" />} />
           <ToggleChip label="Default only" on={defaultsOnly} onClick={() => setDefaultsOnly((v) => !v)} icon={<CheckCircle2 className="h-3 w-3" />} />
-          <ToggleChip
-            label="Show kept defaults"
-            on={showKeptDefaults}
-            onClick={() => setShowKeptDefaults((v) => !v)}
-            icon={<CheckCircle2 className="h-3 w-3" />}
-          />
+          <button
+            onClick={() => setShowRawDefaults((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              showRawDefaults
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+            }`}
+            title="Reveal kept Default profiles (slug='default', is_default=false). PR6 demoted these for back-compat."
+          >
+            <CheckCircle2 className="h-3 w-3" />
+            Show kept defaults
+            {meta && (meta.hiddenRawDefaults ?? 0) > 0 && !showRawDefaults && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-4 px-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-mono">
+                {meta.hiddenRawDefaults}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setIncludeZombies((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              includeZombies
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+            }`}
+            title="Reveal zombie default profiles whose parent business has no PR6 metadata."
+          >
+            Show zombie profiles
+            {meta && meta.hiddenZombies > 0 && !includeZombies && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-4 px-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-mono">
+                {meta.hiddenZombies}
+              </span>
+            )}
+          </button>
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
             <input

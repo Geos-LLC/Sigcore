@@ -15,12 +15,23 @@ import {
   WorkspaceSummary,
   aggregateWorkspaces,
 } from './workspace-aggregation';
-import { WorkspaceSummary as WorkspaceSummaryDto } from './dto/admin-views.types';
+import {
+  AdminListMeta,
+  WorkspaceSummary as WorkspaceSummaryDto,
+} from './dto/admin-views.types';
+import {
+  classifyWorkspace,
+  workspaceIsVisible,
+} from './classification';
 
 export interface WorkspaceFilters {
   platformId?: string;
   /** Hide tenants whose name still looks like the auto-generated "Account <uuid>" stub. */
   hideUnnamedTenants?: boolean;
+  /** PR14 — when true, include zombie workspaces. Default false. */
+  includeZombies?: boolean;
+  /** PR14 — when true, include platform-anchor tenants. Default false. */
+  includeAnchors?: boolean;
 }
 
 @Injectable()
@@ -40,12 +51,17 @@ export class WorkspacesService {
   async list(
     workspaceId: string,
     filters: WorkspaceFilters = {},
-  ): Promise<WorkspaceSummaryDto[]> {
+  ): Promise<{ data: WorkspaceSummaryDto[]; meta: AdminListMeta }> {
     const tenants = await this.tenantRepo.find({
       where: { workspaceId },
-      select: ['id', 'name', 'workspaceId'],
+      select: ['id', 'name', 'workspaceId', 'externalId'],
     });
-    if (tenants.length === 0) return [];
+    if (tenants.length === 0) {
+      return {
+        data: [],
+        meta: { total: 0, visible: 0, hiddenZombies: 0, hiddenAnchors: 0 },
+      };
+    }
 
     const businesses = await this.bizRepo.find({
       where: { workspaceId },
@@ -80,16 +96,57 @@ export class WorkspacesService {
       phoneCounts,
     );
 
-    return summaries.filter((s) => this.passesFilters(s, filters));
+    // Map ext-id by tenant id for classification (anchor detection by external_id pattern).
+    const externalIdByTenantId = new Map(
+      tenants.map((t) => [t.id, t.externalId ?? null]),
+    );
+
+    // Tag every summary with its PR14 classification, then filter.
+    const tagged = summaries.map((s) => ({
+      ...s,
+      classification: classifyWorkspace({
+        kind: s.kind,
+        platformId: s.platformId,
+        displayName: s.displayName,
+        tenantExternalId: externalIdByTenantId.get(s.primaryTenantId) ?? null,
+      }),
+    }));
+
+    const total = tagged.length;
+    let hiddenZombies = 0;
+    let hiddenAnchors = 0;
+    const visible = tagged.filter((s) => {
+      // Existing legacy "hide unnamed tenants" filter stays as-is.
+      if (
+        filters.hideUnnamedTenants &&
+        /^Account\s+[a-f0-9-]{8,}/i.test(s.displayName)
+      ) {
+        return false;
+      }
+      if (filters.platformId && s.platformId !== filters.platformId) return false;
+      const ok = workspaceIsVisible(s.classification, {
+        includeZombies: filters.includeZombies,
+        includeAnchors: filters.includeAnchors,
+      });
+      if (!ok) {
+        if (s.classification === 'zombie') hiddenZombies++;
+        else if (s.classification === 'anchor') hiddenAnchors++;
+        return false;
+      }
+      return true;
+    });
+
+    return {
+      data: visible,
+      meta: {
+        total,
+        visible: visible.length,
+        hiddenZombies,
+        hiddenAnchors,
+      },
+    };
   }
 
-  private passesFilters(s: WorkspaceSummary, f: WorkspaceFilters): boolean {
-    if (f.platformId && s.platformId !== f.platformId) return false;
-    if (f.hideUnnamedTenants && /^Account\s+[a-f0-9-]{8,}/i.test(s.displayName)) {
-      return false;
-    }
-    return true;
-  }
 
   private async loadProfileCounts(
     businessIds: string[],

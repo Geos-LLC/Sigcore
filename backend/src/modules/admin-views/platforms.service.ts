@@ -499,24 +499,74 @@ export class PlatformsService {
       };
     }
 
-    const [phoneNumberCount, apiKeyCount, webhookSubscriptionCount, lastActivityAt] =
-      await Promise.all([
-        this.phoneRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
-        this.apiKeyRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
-        this.webhookRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
-        this.findLastActivityAt(workspaceId, tenantIds),
-      ]);
+    const [
+      phoneNumberCount,
+      apiKeyCount,
+      webhookSubscriptionCount,
+      lastActivityAt,
+      realCustomerCount,
+    ] = await Promise.all([
+      this.phoneRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
+      this.apiKeyRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
+      this.webhookRepo.count({ where: { workspaceId, tenantId: In(tenantIds) } }),
+      this.findLastActivityAt(workspaceId, tenantIds),
+      this.countRealCustomerWorkspaces(workspaceId, id, tenantIds),
+    ]);
 
     return {
       id,
       name: PLATFORM_DISPLAY_NAMES[id],
       anchorTenantId,
-      workspaceCount: tenantIds.length,
+      // PR14: count real customer workspaces, not raw tenants. Zombies + anchors excluded.
+      workspaceCount: realCustomerCount,
       apiKeyCount,
       phoneNumberCount,
       webhookSubscriptionCount,
       lastActivityAt,
     };
+  }
+
+  /**
+   * Count real customer workspaces for a platform (PR14).
+   *
+   * - LeadBridge   : distinct metadata.lb_user_id values across the platform's tenants
+   *                  (collapses Spotless Homes' 6 tenants → 1 customer; ignores zombies
+   *                  whose tenants have no lb_user_id).
+   * - HF/SF/Callio : count of non-anchor tenants under the platform.
+   * - unclassified : 0 (every tenant in this bucket is a zombie/cruft).
+   */
+  private async countRealCustomerWorkspaces(
+    workspaceId: string,
+    platformId: PlatformId,
+    tenantIds: string[],
+  ): Promise<number> {
+    if (tenantIds.length === 0) return 0;
+    if (platformId === 'unclassified') return 0;
+
+    if (platformId === 'leadbridge') {
+      const rows: Array<{ lb_user_id: string | null }> = await this.phoneRepo.manager.query(
+        `SELECT DISTINCT (metadata->>'lb_user_id') AS lb_user_id
+           FROM communication_businesses
+          WHERE workspace_id = $1
+            AND tenant_id = ANY($2::uuid[])
+            AND metadata ? 'lb_user_id'`,
+        [workspaceId, tenantIds],
+      );
+      return rows.filter((r) => r.lb_user_id && r.lb_user_id.trim()).length;
+    }
+
+    // HF / SF / Callio — direct customer per tenant. Exclude anchors.
+    const tenantRows: Array<{ id: string; name: string | null; external_id: string | null }> =
+      await this.phoneRepo.manager.query(
+        `SELECT id, name, external_id FROM tenants WHERE id = ANY($1::uuid[])`,
+        [tenantIds],
+      );
+    // Reuse anchor detection rules from classification helper
+    const { isAnchorByNameOrExternalId } = await import('./classification');
+    return tenantRows.filter(
+      (t) =>
+        !isAnchorByNameOrExternalId({ name: t.name, externalId: t.external_id }),
+    ).length;
   }
 
   /**

@@ -24,7 +24,11 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
-import type { WorkspaceSummary, PlatformId } from '../../types';
+import type {
+  WorkspaceSummary,
+  PlatformId,
+  AdminListMeta,
+} from '../../types';
 
 const PLATFORM_OPTIONS: Array<{ value: '' | PlatformId; label: string }> = [
   { value: '', label: 'All' },
@@ -53,22 +57,28 @@ const PLATFORM_COLORS: Record<string, string> = {
 
 export default function AdminWorkspacesPage() {
   const [rows, setRows] = useState<WorkspaceSummary[]>([]);
+  const [meta, setMeta] = useState<AdminListMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [platform, setPlatform] = useState<'' | PlatformId>('');
   const [hideUnnamed, setHideUnnamed] = useState(true);
+  // PR14 — show zombies / anchors are off by default; toggling reveals raw rows.
+  const [showRaw, setShowRaw] = useState(false);
   const [search, setSearch] = useState('');
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await adminApi.getWorkspaces({
+      const { data, meta } = await adminApi.getWorkspacesWithMeta({
         platformId: platform || undefined,
         hideUnnamedTenants: hideUnnamed || undefined,
+        includeZombies: showRaw || undefined,
+        includeAnchors: showRaw || undefined,
       });
       setRows(data);
+      setMeta(meta);
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Failed to load workspaces');
     } finally {
@@ -79,7 +89,7 @@ export default function AdminWorkspacesPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, hideUnnamed]);
+  }, [platform, hideUnnamed, showRaw]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -150,6 +160,22 @@ export default function AdminWorkspacesPage() {
             <EyeOff className="h-3 w-3" />
             Hide unnamed tenants
           </button>
+          <button
+            onClick={() => setShowRaw((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              showRaw
+                ? 'bg-amber-50 text-amber-700 border-amber-200'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-gray-300'
+            }`}
+            title="Reveal zombie tenants (no SavedAccount backing) and platform anchors. Hidden by default."
+          >
+            Show raw / zombie records
+            {meta && meta.hiddenZombies + meta.hiddenAnchors > 0 && !showRaw && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.25rem] h-4 px-1 rounded-full bg-amber-100 text-amber-700 text-[10px] font-mono">
+                {meta.hiddenZombies + meta.hiddenAnchors}
+              </span>
+            )}
+          </button>
           <div className="ml-auto flex items-center gap-2 text-sm">
             <Search className="h-4 w-4 text-gray-400" />
             <input
@@ -170,6 +196,21 @@ export default function AdminWorkspacesPage() {
         <div className="text-xs text-gray-400">
           Showing <span className="tabular-nums">{filtered.length}</span> of{' '}
           <span className="tabular-nums">{rows.length}</span> workspaces.
+          {meta && (meta.hiddenZombies > 0 || meta.hiddenAnchors > 0) && (
+            <span className="ml-2">
+              Hidden:
+              {meta.hiddenZombies > 0 && (
+                <span className="ml-1">
+                  zombies <span className="tabular-nums">{meta.hiddenZombies}</span>
+                </span>
+              )}
+              {meta.hiddenAnchors > 0 && (
+                <span className="ml-1">
+                  anchors <span className="tabular-nums">{meta.hiddenAnchors}</span>
+                </span>
+              )}
+            </span>
+          )}
         </div>
       </div>
 

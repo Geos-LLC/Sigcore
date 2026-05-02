@@ -412,6 +412,19 @@ export interface LegacySmsRow {
 
 export type WorkspaceKind = 'lb_customer' | 'tenant';
 
+/** PR14 — admin UI classification mirrored from backend/admin-views/classification.ts. */
+export type WorkspaceClassification = 'real_customer' | 'zombie' | 'anchor';
+export type BusinessClassification = 'real' | 'zombie';
+export type ProfileClassification = 'real_source' | 'kept_default' | 'zombie_default';
+
+export interface AdminListMeta {
+  total: number;
+  visible: number;
+  hiddenZombies: number;
+  hiddenAnchors: number;
+  hiddenRawDefaults?: number;
+}
+
 /** PR8 — one row per customer in the admin Workspaces page. */
 export interface WorkspaceSummary {
   key: string;
@@ -424,11 +437,14 @@ export interface WorkspaceSummary {
   businessCount: number;
   profileCount: number;
   phoneCount: number;
+  classification: WorkspaceClassification;
 }
 
 export interface WorkspaceFilters {
   platformId?: string;
   hideUnnamedTenants?: boolean;
+  includeZombies?: boolean;
+  includeAnchors?: boolean;
 }
 
 export interface BusinessSummary {
@@ -452,6 +468,8 @@ export interface BusinessSummary {
   lbUserId: string | null;
   workspaceDisplayName: string;
   locationDisplay: string | null;
+  /** PR14 — admin UI classification. */
+  classification: BusinessClassification;
 }
 
 export interface BusinessPhoneRow {
@@ -485,6 +503,8 @@ export interface ProfileSummary {
   phoneCount: number;
   hasSharedPhone: boolean;
   createdAt: string;
+  /** PR14 — admin UI classification. */
+  classification: ProfileClassification;
 }
 
 export interface ProfilePhoneAssignmentRow {
@@ -524,6 +544,8 @@ export interface BusinessFilters {
   hasExternalId?: boolean;
   /** PR8 — narrow to one customer workspace ('lb-user-<id>' or 'tenant-<id>'). */
   workspaceKey?: string;
+  /** PR14 — when true, include zombie businesses. */
+  includeZombies?: boolean;
 }
 
 export interface ProfileFilters {
@@ -535,6 +557,10 @@ export interface ProfileFilters {
   hasSharedPhone?: boolean;
   hasExternalId?: boolean;
   isDefault?: boolean;
+  /** PR14 — when true, include kept_default + zombie_default profiles. */
+  showRawDefaults?: boolean;
+  /** PR14 — when true, include profiles whose parent business is a zombie. */
+  includeZombies?: boolean;
 }
 
 // ==================== Common ====================

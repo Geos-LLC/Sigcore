@@ -234,6 +234,21 @@ export interface WorkspaceSummary {
   /** Real (non-default) profiles. Default/kept profiles are excluded. */
   profileCount: number;
   phoneCount: number;
+  /** PR14 — admin UI classification: 'real_customer' | 'zombie' | 'anchor'. */
+  classification: 'real_customer' | 'zombie' | 'anchor';
+}
+
+/** PR14 — meta block returned with admin list responses. */
+export interface AdminListMeta {
+  /** Total records before classification filter. */
+  total: number;
+  /** Records returned in `data` (after filter + search). */
+  visible: number;
+  /** Records hidden by the default classification filter, by reason. */
+  hiddenZombies: number;
+  hiddenAnchors: number;
+  /** Profiles only — kept/zombie default profiles hidden by default. */
+  hiddenRawDefaults?: number;
 }
 
 // ==================== Businesses (PR5) ====================
@@ -268,6 +283,8 @@ export interface BusinessSummary {
   workspaceDisplayName: string;
   /** Curated location label from PR6 metadata (or null when fallback was used). */
   locationDisplay: string | null;
+  /** PR14 — admin UI classification: 'real' | 'zombie'. */
+  classification: 'real' | 'zombie';
 }
 
 export interface BusinessDetail extends BusinessSummary {
@@ -306,6 +323,8 @@ export interface ProfileSummary {
   /** True if any of this profile's phones are also assigned to another profile. */
   hasSharedPhone: boolean;
   createdAt: string;
+  /** PR14 — admin UI classification: 'real_source' | 'kept_default' | 'zombie_default'. */
+  classification: 'real_source' | 'kept_default' | 'zombie_default';
 }
 
 export interface ProfilePhoneAssignmentRow {
