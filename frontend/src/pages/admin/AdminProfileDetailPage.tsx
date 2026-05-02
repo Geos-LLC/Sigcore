@@ -4,10 +4,12 @@ import {
   ArrowLeft,
   MapPin,
   Phone,
+  Plus,
   RefreshCw,
   AlertCircle,
   CheckCircle2,
   Share2,
+  ShoppingCart,
   MessageSquare,
   Building2,
 } from 'lucide-react';
@@ -15,6 +17,8 @@ import { adminApi } from '../../services/adminApi';
 import type { ProfileDetail } from '../../types';
 import { IdChip } from '../../components/admin/IdChip';
 import { SourceBadge } from '../../components/admin/SourceBadge';
+import AssignPhoneNumberModal from '../../components/admin/AssignPhoneNumberModal';
+import ProvisionAndAssignPhoneNumberModal from '../../components/admin/ProvisionAndAssignPhoneNumberModal';
 
 function fmt(iso: string): string {
   return new Date(iso).toLocaleString();
@@ -25,6 +29,8 @@ export default function AdminProfileDetailPage() {
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [provisionOpen, setProvisionOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -123,6 +129,26 @@ export default function AdminProfileDetailPage() {
               {detail?.assignments.length ?? 0}
             </span>
           </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAssignOpen(true)}
+              className="btn btn-secondary flex items-center gap-2"
+              disabled={!detail}
+              title="Link an existing tenant phone number to this profile"
+            >
+              <Plus className="h-4 w-4" />
+              Assign Existing
+            </button>
+            <button
+              onClick={() => setProvisionOpen(true)}
+              className="btn btn-primary flex items-center gap-2"
+              disabled={!detail}
+              title="Buy a new Twilio number and assign it in one step"
+            >
+              <ShoppingCart className="h-4 w-4" />
+              Get &amp; Assign
+            </button>
+          </div>
         </div>
         {detail && detail.assignments.length > 0 ? (
           <table className="w-full text-sm">
@@ -196,8 +222,24 @@ export default function AdminProfileDetailPage() {
             </tbody>
           </table>
         ) : (
-          <div className="px-4 py-6 text-center text-sm text-gray-400">
-            No phone assignments. Outbound from this profile will return PROFILE_NOT_CONFIGURED.
+          <div className="px-4 py-8 text-center">
+            <div className="text-sm text-gray-700 font-medium">No phone numbers yet.</div>
+            {detail?.platformId === 'hirefunnel' && (
+              <div className="text-xs text-gray-500 mt-1">
+                HireFunnel needs one sender number for SMS reminders.
+              </div>
+            )}
+            <div className="text-xs text-gray-400 mt-1">
+              Outbound from this profile will return <span className="font-mono">PROFILE_NOT_CONFIGURED</span>.
+            </div>
+            <button
+              onClick={() => setProvisionOpen(true)}
+              className="btn btn-primary inline-flex items-center gap-2 mt-3"
+              disabled={!detail}
+            >
+              <ShoppingCart className="h-4 w-4" />
+              {detail?.platformId === 'hirefunnel' ? 'Get Number' : 'Get & Assign Phone Number'}
+            </button>
           </div>
         )}
       </div>
@@ -256,6 +298,39 @@ export default function AdminProfileDetailPage() {
           </div>
         )}
       </div>
+
+      {detail && (
+        <>
+          <AssignPhoneNumberModal
+            isOpen={assignOpen}
+            onClose={() => setAssignOpen(false)}
+            onAssigned={() => {
+              setAssignOpen(false);
+              load();
+            }}
+            profileId={detail.id}
+            profileDisplayName={detail.displayName}
+          />
+          <ProvisionAndAssignPhoneNumberModal
+            isOpen={provisionOpen}
+            onClose={() => setProvisionOpen(false)}
+            onSuccess={() => {
+              setProvisionOpen(false);
+              load();
+            }}
+            target={{
+              tenantId: detail.tenantId,
+              profileId: detail.id,
+              profileLabel: detail.displayName,
+            }}
+            intro={
+              detail.platformId === 'hirefunnel'
+                ? 'HireFunnel needs one sender number for SMS reminders.'
+                : undefined
+            }
+          />
+        </>
+      )}
     </div>
   );
 }

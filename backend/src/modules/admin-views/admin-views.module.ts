@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { TenantsModule } from '../tenants/tenants.module';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
 import { ApiKey } from '../../database/entities/api-key.entity';
@@ -26,15 +27,14 @@ import { ProfilesController } from './profiles.controller';
 import { ProfilesService } from './profiles.service';
 import { WorkspacesController } from './workspaces.controller';
 import { WorkspacesService } from './workspaces.service';
+import { PhoneAssignmentsController } from './phone-assignments.controller';
+import { PhoneAssignmentsService } from './phone-assignments.service';
 
 /**
- * Read-only admin-views module.
+ * Admin-views module — read paths plus the PR15 phone-assignment write path
+ * (POST /admin/phone-numbers/assign). All endpoints use SigcoreAuthGuard.
  *
- * Powers the admin redesign first PR — see `ADMIN_REDESIGN.md` and the
- * implementation plan delivered for "Commit 1".
- *
- * All endpoints are GET-only and use the existing `SigcoreAuthGuard`. No
- * new auth, no new write paths, no DB migrations.
+ * See `ADMIN_REDESIGN.md` for the broader plan.
  */
 @Module({
   imports: [
@@ -54,6 +54,9 @@ import { WorkspacesService } from './workspaces.service';
       CommunicationProfile,
       ProfilePhoneAssignment,
     ]),
+    // PR16 — re-uses PhoneNumberProvisioningService for one-shot
+    // provision-and-assign without duplicating Twilio purchase logic.
+    TenantsModule,
   ],
   controllers: [
     PlatformsController,
@@ -62,6 +65,7 @@ import { WorkspacesService } from './workspaces.service';
     BusinessesController,
     ProfilesController,
     WorkspacesController,
+    PhoneAssignmentsController,
   ],
   providers: [
     PlatformsService,
@@ -70,6 +74,7 @@ import { WorkspacesService } from './workspaces.service';
     BusinessesService,
     ProfilesService,
     WorkspacesService,
+    PhoneAssignmentsService,
   ],
 })
 export class AdminViewsModule {}

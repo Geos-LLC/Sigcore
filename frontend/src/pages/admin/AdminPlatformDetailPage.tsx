@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -17,6 +17,7 @@ import {
   MapPin,
   Archive,
   CheckCircle2,
+  ShoppingCart,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type {
@@ -24,6 +25,9 @@ import type {
   ProfileRow,
   WorkspaceGroup,
 } from '../../types';
+import ProvisionAndAssignPhoneNumberModal, {
+  type ProvisionContextChoice,
+} from '../../components/admin/ProvisionAndAssignPhoneNumberModal';
 
 type Section = 'workspaces' | 'phoneNumbers' | 'apiKeys' | 'webhooks';
 
@@ -43,6 +47,36 @@ export default function AdminPlatformDetailPage() {
     apiKeys: false,
     webhooks: false,
   });
+  const [provisionOpen, setProvisionOpen] = useState(false);
+
+  // PR16 — flatten (workspace × real profile) tuples across workspace groups so
+  // the provision modal can target a tenant+profile pair. Profiles without a
+  // backing communication_profile id (legacy derived rows) are skipped because
+  // there is nothing for the backend to assign the phone to.
+  const provisionChoices = useMemo<ProvisionContextChoice[]>(() => {
+    if (!detail) return [];
+    const out: ProvisionContextChoice[] = [];
+    for (const wg of detail.workspaceGroups ?? []) {
+      const wgTenantId = wg.tenantId ?? null;
+      for (const p of wg.profiles) {
+        if (!p.communicationProfileId) continue;
+        const tenantId = wgTenantId ?? p.tenantIds[0];
+        if (!tenantId) continue;
+        out.push({
+          key: `${tenantId}:${p.communicationProfileId}`,
+          label:
+            wg.profileCount > 1 || (detail.workspaceGroups ?? []).length > 1
+              ? `${wg.name} › ${p.name}`
+              : p.name,
+          tenantId,
+          profileId: p.communicationProfileId,
+          workspaceLabel: wg.name,
+          profileLabel: p.name,
+        });
+      }
+    }
+    return out;
+  }, [detail]);
 
   const load = async () => {
     setLoading(true);
@@ -89,14 +123,29 @@ export default function AdminPlatformDetailPage() {
             </p>
           </div>
         </div>
-        <button
-          onClick={load}
-          className="btn-secondary flex items-center gap-2"
-          disabled={loading}
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setProvisionOpen(true)}
+            className="btn btn-primary flex items-center gap-2"
+            disabled={loading || provisionChoices.length === 0}
+            title={
+              provisionChoices.length === 0
+                ? 'No assignable profiles in this platform'
+                : 'Buy a Twilio number and assign it in one step'
+            }
+          >
+            <ShoppingCart className="h-4 w-4" />
+            Add Phone Number
+          </button>
+          <button
+            onClick={load}
+            className="btn-secondary flex items-center gap-2"
+            disabled={loading}
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -183,7 +232,22 @@ export default function AdminPlatformDetailPage() {
             </tbody>
           </table>
         ) : (
-          <Empty message="No phone numbers in tenant_phone_numbers for this platform." />
+          <div className="px-4 py-8 text-center">
+            <div className="text-sm text-gray-700 font-medium">No phone numbers yet.</div>
+            {detail?.id === 'hirefunnel' && (
+              <div className="text-xs text-gray-500 mt-1">
+                HireFunnel needs one sender number for SMS reminders.
+              </div>
+            )}
+            <button
+              onClick={() => setProvisionOpen(true)}
+              className="btn btn-primary inline-flex items-center gap-2 mt-3"
+              disabled={loading || provisionChoices.length === 0}
+            >
+              <ShoppingCart className="h-4 w-4" />
+              {detail?.id === 'hirefunnel' ? 'Get Number' : 'Get & Assign Phone Number'}
+            </button>
+          </div>
         )}
       </Collapsible>
 
@@ -270,6 +334,23 @@ export default function AdminPlatformDetailPage() {
           <Empty message="No webhook subscriptions for this platform." />
         )}
       </Collapsible>
+
+      {detail && provisionChoices.length > 0 && (
+        <ProvisionAndAssignPhoneNumberModal
+          isOpen={provisionOpen}
+          onClose={() => setProvisionOpen(false)}
+          onSuccess={() => {
+            setProvisionOpen(false);
+            load();
+          }}
+          choices={provisionChoices}
+          intro={
+            detail.id === 'hirefunnel'
+              ? 'HireFunnel needs one sender number for SMS reminders.'
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }

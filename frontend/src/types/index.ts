@@ -45,6 +45,69 @@ export interface AvailablePhoneNumber {
   };
 }
 
+// ==================== PR15 — Profile Phone Assignment ====================
+
+/** One row in the "Available numbers" picker on the Assign modal. */
+export interface ProfileAvailablePhoneRow {
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  channel: string;
+  status: string;
+  friendlyName: string | null;
+  a2pStatus: string | null;
+  alreadyAssignedToThisProfile: boolean;
+  sharedWithProfileIds: string[];
+}
+
+export interface ProfileAvailablePhonesResponse {
+  profileId: string;
+  rows: ProfileAvailablePhoneRow[];
+}
+
+export interface AssignPhoneToProfileDto {
+  profileId: string;
+  tenantPhoneNumberId?: string;
+  phoneNumber?: string;
+  role?: 'primary' | 'fallback' | 'inbound_only' | 'outbound_only' | 'reply';
+  isDefault?: boolean;
+  priority?: number;
+}
+
+export interface AssignedProfilePhoneRow {
+  id: string;
+  profileId: string;
+  tenantPhoneNumberId: string;
+  phoneNumber: string;
+  provider: string;
+  role: string;
+  isDefault: boolean;
+  priority: number;
+  active: boolean;
+}
+
+// ==================== PR16 — Provision + Assign ====================
+
+export interface ProvisionAndAssignDto {
+  tenantId: string;
+  profileId: string;
+  provider?: 'twilio';
+  areaCode?: string;
+  locality?: string;
+  region?: string;
+  country?: string;
+  capabilities?: Array<'sms' | 'voice'>;
+  makeDefault?: boolean;
+  orderedBy?: string;
+}
+
+export interface ProvisionAndAssignResult {
+  tenantPhoneNumber: TenantPhoneNumber;
+  profilePhoneAssignment: AssignedProfilePhoneRow;
+  purchased: boolean;
+  assigned: boolean;
+}
+
 export interface CreateTenantDto {
   externalId?: string;
   name: string;

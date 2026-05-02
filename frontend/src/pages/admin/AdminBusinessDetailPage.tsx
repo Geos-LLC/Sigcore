@@ -4,17 +4,25 @@ import {
   ArrowLeft,
   Building2,
   Phone,
+  Plus,
   RefreshCw,
   AlertCircle,
   ChevronRight,
   MapPin,
   Share2,
+  ShoppingCart,
   CheckCircle2,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type { BusinessDetail } from '../../types';
 import { IdChip } from '../../components/admin/IdChip';
 import { SourceBadge } from '../../components/admin/SourceBadge';
+import AssignPhoneNumberModal, {
+  type ProfileChoice,
+} from '../../components/admin/AssignPhoneNumberModal';
+import ProvisionAndAssignPhoneNumberModal, {
+  type ProvisionContextChoice,
+} from '../../components/admin/ProvisionAndAssignPhoneNumberModal';
 
 export default function AdminBusinessDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
@@ -24,6 +32,8 @@ export default function AdminBusinessDetailPage() {
   // After LB profile materialization, demoted "Default" profiles linger for
   // back-compat. Hide them by default; operators can flip the toggle.
   const [showKeptDefaults, setShowKeptDefaults] = useState(false);
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [provisionOpen, setProvisionOpen] = useState(false);
 
   const visibleProfiles = useMemo(() => {
     if (!detail) return [];
@@ -33,6 +43,39 @@ export default function AdminBusinessDetailPage() {
     );
   }, [detail, showKeptDefaults]);
   const hiddenCount = (detail?.profiles.length ?? 0) - visibleProfiles.length;
+
+  // Profiles eligible to receive a phone assignment from this page. We exclude
+  // demoted "kept default" profiles (slug='default' but isDefault=false) since
+  // those are legacy artifacts; the Profile detail page can still target them.
+  const assignableProfiles = useMemo<ProfileChoice[]>(() => {
+    if (!detail) return [];
+    return detail.profiles
+      .filter((p) => !(p.slug === 'default' && !p.isDefault))
+      .map((p) => ({
+        id: p.id,
+        displayName: p.displayName,
+        isDefault: p.isDefault,
+      }));
+  }, [detail]);
+
+  const seedProfileId =
+    assignableProfiles.find((p) => p.isDefault)?.id ?? assignableProfiles[0]?.id ?? '';
+  const seedProfileLabel =
+    assignableProfiles.find((p) => p.id === seedProfileId)?.displayName ?? '';
+
+  // PR16 — context choices for the provision modal. When the business has a
+  // single eligible profile we pass a one-element list so the modal hides its
+  // picker (HireFunnel "skip selection" path).
+  const provisionChoices = useMemo<ProvisionContextChoice[]>(() => {
+    if (!detail) return [];
+    return assignableProfiles.map((p) => ({
+      key: p.id,
+      label: p.displayName + (p.isDefault ? ' · default' : ''),
+      tenantId: detail.tenantId,
+      profileId: p.id,
+      profileLabel: p.displayName,
+    }));
+  }, [detail, assignableProfiles]);
 
   const load = async () => {
     setLoading(true);
@@ -212,6 +255,34 @@ export default function AdminBusinessDetailPage() {
               {detail?.phones.length ?? 0}
             </span>
           </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setAssignOpen(true)}
+              className="btn btn-secondary flex items-center gap-2"
+              disabled={!detail || assignableProfiles.length === 0}
+              title={
+                assignableProfiles.length === 0
+                  ? 'No assignable profiles in this business'
+                  : 'Link an existing tenant phone number to a profile'
+              }
+            >
+              <Plus className="h-4 w-4" />
+              Assign Existing
+            </button>
+            <button
+              onClick={() => setProvisionOpen(true)}
+              className="btn btn-primary flex items-center gap-2"
+              disabled={!detail || assignableProfiles.length === 0}
+              title={
+                assignableProfiles.length === 0
+                  ? 'No assignable profiles in this business'
+                  : 'Buy a new Twilio number and assign it'
+              }
+            >
+              <ShoppingCart className="h-4 w-4" />
+              Get &amp; Assign
+            </button>
+          </div>
         </div>
         {detail && detail.phones.length > 0 ? (
           <table className="w-full text-sm">
@@ -248,11 +319,54 @@ export default function AdminBusinessDetailPage() {
             </tbody>
           </table>
         ) : (
-          <div className="px-4 py-6 text-center text-sm text-gray-400">
-            No phones assigned to any profile under this business.
+          <div className="px-4 py-8 text-center">
+            <div className="text-sm text-gray-700 font-medium">No phone numbers yet.</div>
+            <div className="text-xs text-gray-400 mt-1">
+              Assign an existing tenant number or buy a new one to get this business
+              sending and receiving messages.
+            </div>
+            <button
+              onClick={() => setProvisionOpen(true)}
+              className="btn btn-primary inline-flex items-center gap-2 mt-3"
+              disabled={!detail || assignableProfiles.length === 0}
+            >
+              <ShoppingCart className="h-4 w-4" />
+              Get &amp; Assign Phone Number
+            </button>
           </div>
         )}
       </div>
+
+      {detail && seedProfileId && (
+        <AssignPhoneNumberModal
+          isOpen={assignOpen}
+          onClose={() => setAssignOpen(false)}
+          onAssigned={() => {
+            setAssignOpen(false);
+            load();
+          }}
+          profileId={seedProfileId}
+          profileDisplayName={seedProfileLabel}
+          profileChoices={assignableProfiles}
+        />
+      )}
+
+      {detail && provisionChoices.length > 0 && (
+        <ProvisionAndAssignPhoneNumberModal
+          isOpen={provisionOpen}
+          onClose={() => setProvisionOpen(false)}
+          onSuccess={() => {
+            setProvisionOpen(false);
+            load();
+          }}
+          choices={provisionChoices}
+          intro={
+            detail.platformId === 'hirefunnel'
+              ? 'HireFunnel needs one sender number for SMS reminders.'
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }

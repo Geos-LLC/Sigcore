@@ -28,6 +28,11 @@ import type {
   WorkspaceSummary,
   WorkspaceFilters,
   AdminListMeta,
+  ProfileAvailablePhonesResponse,
+  AssignPhoneToProfileDto,
+  AssignedProfilePhoneRow,
+  ProvisionAndAssignDto,
+  ProvisionAndAssignResult,
 } from '../types';
 
 const API_URL = import.meta.env.VITE_API_URL || '/api';
@@ -500,6 +505,39 @@ class AdminApiService {
   async getProfile(id: string): Promise<ProfileDetail> {
     const response = await this.client.get<ApiResponse<ProfileDetail>>(
       `/admin/profiles/${encodeURIComponent(id)}`,
+    );
+    return response.data.data;
+  }
+
+  // ==================== PR15 — Profile Phone Assignment ====================
+
+  async getAvailablePhonesForProfile(
+    profileId: string,
+  ): Promise<ProfileAvailablePhonesResponse> {
+    const response = await this.client.get<ApiResponse<ProfileAvailablePhonesResponse>>(
+      `/admin/profiles/${encodeURIComponent(profileId)}/available-phone-numbers`,
+    );
+    return response.data.data;
+  }
+
+  async assignPhoneToProfile(
+    dto: AssignPhoneToProfileDto,
+  ): Promise<AssignedProfilePhoneRow> {
+    const response = await this.client.post<ApiResponse<AssignedProfilePhoneRow>>(
+      '/admin/phone-numbers/assign',
+      dto,
+    );
+    return response.data.data;
+  }
+
+  // ==================== PR16 — Provision + Assign ====================
+
+  async provisionAndAssignPhoneNumber(
+    dto: ProvisionAndAssignDto,
+  ): Promise<ProvisionAndAssignResult> {
+    const response = await this.client.post<ApiResponse<ProvisionAndAssignResult>>(
+      '/admin/phone-numbers/provision-and-assign',
+      dto,
     );
     return response.data.data;
   }
