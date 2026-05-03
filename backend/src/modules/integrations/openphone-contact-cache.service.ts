@@ -254,11 +254,15 @@ export class OpenPhoneContactCacheService {
 
   /**
    * Source A — paginate OpenPhone /contacts and write snapshots (cascading to participants).
-   * Safe to run repeatedly; idempotent per §10.
+   * Safe to run repeatedly; idempotent per §10. Also detects contact deletions:
+   * any snapshot whose phoneE164 is no longer in the OP /contacts response gets
+   * its provider fields nulled (cascade to participants), so downstream consumers
+   * (Service Flow, etc.) can detect that the contact disappeared.
    */
   async syncContactsFromOpenPhone(workspaceId: string, tenantId: string): Promise<{
     contactsScanned: number;
     snapshotsWritten: number;
+    snapshotsArchived: number;
     participantsCascaded: number;
     phoneNormalizationFailures: number;
   }> {
@@ -271,6 +275,7 @@ export class OpenPhoneContactCacheService {
 
     let snapshotsWritten = 0;
     let phoneNormalizationFailures = 0;
+    const seenPhones = new Set<string>();
 
     for (const contact of contacts) {
       for (const pn of contact.phoneNumbers || []) {
@@ -281,6 +286,7 @@ export class OpenPhoneContactCacheService {
           this.logger.warn(`openphone cache: unparseable phone ${pn.value} on contact ${contact.id}`);
           continue;
         }
+        seenPhones.add(e164);
         await this.upsertSnapshotAndCascade({
           workspaceId,
           tenantId,
@@ -301,6 +307,36 @@ export class OpenPhoneContactCacheService {
       }
     }
 
+    // Deletion detection — snapshots that previously had a contactId but whose
+    // phoneE164 isn't in seenPhones. Null their provider fields (cascade to
+    // participants) so SF and other consumers detect the disappearance.
+    // Safety: only runs when contacts.length > 0 (avoid mass-clear on a failed
+    // pull) and aborts if >10% of snapshots would be archived.
+    let snapshotsArchived = 0;
+    if (contacts.length > 0 && seenPhones.size > 0) {
+      const allSnapshots = await this.snapshotRepo.find({ where: { workspaceId } });
+      const toArchive = allSnapshots.filter(s =>
+        s.providerContactId && !seenPhones.has(s.phoneE164)
+      );
+      const ratio = allSnapshots.length > 0 ? toArchive.length / allSnapshots.length : 0;
+      if (ratio > 0.1) {
+        this.logger.warn(
+          `syncContactsFromOpenPhone: deletion-detect aborted, would clear ${toArchive.length}/${allSnapshots.length} ` +
+          `(${(ratio * 100).toFixed(1)}%) — sanity threshold exceeded.`,
+        );
+      } else if (toArchive.length > 0) {
+        for (const s of toArchive) {
+          try {
+            await this.deleteSnapshotAndCascade(workspaceId, s.phoneE164);
+            snapshotsArchived++;
+          } catch (e: unknown) {
+            this.logger.warn(`deleteSnapshotAndCascade failed for ${s.phoneE164}: ${(e as Error).message}`);
+          }
+        }
+        this.logger.log(`syncContactsFromOpenPhone: archived ${snapshotsArchived} snapshots no longer in OP`);
+      }
+    }
+
     // Count how many participants were cascaded (rough; join against snapshot)
     const { count } = await this.participantRepo
       .createQueryBuilder('p')
@@ -314,6 +350,7 @@ export class OpenPhoneContactCacheService {
     return {
       contactsScanned: contacts.length,
       snapshotsWritten,
+      snapshotsArchived,
       participantsCascaded: Number(count || 0),
       phoneNormalizationFailures,
     };
@@ -335,7 +372,7 @@ export class OpenPhoneContactCacheService {
 
     // Step 1 — sync all snapshots (cascade to any existing participants)
     const step1 = dryRun
-      ? { contactsScanned: 0, snapshotsWritten: 0, participantsCascaded: 0, phoneNormalizationFailures: 0 }
+      ? { contactsScanned: 0, snapshotsWritten: 0, snapshotsArchived: 0, participantsCascaded: 0, phoneNormalizationFailures: 0 }
       : await this.syncContactsFromOpenPhone(workspaceId, tenantId);
 
     // Provider account id for participant creation
