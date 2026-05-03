@@ -404,6 +404,45 @@ export default function ApiDocsPage() {
       ],
     },
     {
+      category: 'Admin · Phone Assignments',
+      description: 'Admin endpoints that link phone numbers to communication profiles. PR15 assigns an existing tenant_phone_numbers row; PR16 adds one-shot provision-and-assign that buys a Twilio number and links it in a single call. Both are guarded by SigcoreAuthGuard and work on workspace-scoped API keys.',
+      items: [
+        {
+          method: 'GET',
+          path: '/admin/profiles/:id/available-phone-numbers',
+          description: 'List tenant_phone_numbers in the profile\'s workspace with per-row flags for whether the number is already assigned to this profile and which other profiles it is shared with. Powers the picker inside AssignPhoneNumberModal on /admin/profiles/:id.',
+          auth: 'X-API-Key',
+          response: { data: { profileId: 'uuid', rows: [{ tenantPhoneNumberId: 'uuid', phoneNumber: '+15551234567', provider: 'twilio', channel: 'sms', status: 'active', friendlyName: null, a2pStatus: 'ready', alreadyAssignedToThisProfile: false, sharedWithProfileIds: [] }] } },
+        },
+        {
+          method: 'POST',
+          path: '/admin/phone-numbers/assign',
+          description: 'Link an existing tenant phone number to a communication profile (PR15). Idempotent: a soft-deactivated row is reactivated rather than duplicated. Returns 409 if an active assignment already exists. The first phone assigned to a profile becomes its default; explicit makeDefault=true demotes the previous default in the same transaction.',
+          auth: 'X-API-Key',
+          body: { profileId: 'uuid', tenantPhoneNumberId: 'uuid', role: 'primary', isDefault: true, priority: 100 },
+          response: { data: { id: 'uuid', profileId: 'uuid', tenantPhoneNumberId: 'uuid', phoneNumber: '+15551234567', provider: 'twilio', role: 'primary', isDefault: true, priority: 100, active: true } },
+        },
+        {
+          method: 'POST',
+          path: '/admin/phone-numbers/provision-and-assign',
+          description: 'One-shot Twilio purchase + profile assignment (PR16). Searches Twilio with the given criteria, buys the first match, attaches it to the workspace Messaging Service for A2P, writes a tenant_phone_numbers row, and creates the profile_phone_assignment — all in one call. Reuses PhoneNumberProvisioningService so no Twilio purchase code is duplicated. The Twilio purchase is irreversible: if the post-purchase DB write fails, the response is a 500 with the new tenantPhoneNumberId and a hint to retry the link via POST /admin/phone-numbers/assign.',
+          auth: 'X-API-Key',
+          body: { tenantId: 'uuid', profileId: 'uuid', provider: 'twilio', country: 'US', areaCode: '415', locality: 'San Francisco', capabilities: ['sms', 'voice'], makeDefault: true },
+          response: { data: { tenantPhoneNumber: { id: 'uuid', phoneNumber: '+14155551234', providerId: 'PN...', provider: 'twilio', a2pStatus: 'ready', messagingServiceSid: 'MG...' }, profilePhoneAssignment: { id: 'uuid', profileId: 'uuid', tenantPhoneNumberId: 'uuid', isDefault: true, role: 'primary', priority: 100, active: true }, purchased: true, assigned: true } },
+        },
+      ],
+      notes: {
+        title: 'Behavior & invariants (PR15 + PR16)',
+        body: [
+          'Both endpoints write to the same tables (tenant_phone_numbers + profile_phone_assignments) and route the assignment through one shared internal flow, so the partial-unique constraint (one default per profile when active) is enforced uniformly.',
+          'Use POST /admin/phone-numbers/assign when the number already lives in tenant_phone_numbers — legacy allocations, OpenPhone numbers, BYO Twilio.',
+          'Use POST /admin/phone-numbers/provision-and-assign for one-click "buy a new number" UX — the modal on /admin/profiles/:id, /admin/businesses/:id, and /admin/platforms/:id calls this endpoint. HireFunnel auto-skips context selection when its single workspace × single profile is the only target.',
+          'Validation: provision-and-assign rejects with 400 when profile.tenantId !== request.tenantId, with 400 when provider !== "twilio" (other providers TBD), and with 404 when the Twilio search returns zero candidates. Twilio purchase failures surface as 400 with the upstream error message.',
+          'No DB migrations required — both endpoints write only to tables that already existed (tenant_phone_numbers, profile_phone_assignments).',
+        ],
+      },
+    },
+    {
       category: 'Tenants',
       description: 'Manage tenants (customers) and their configurations.',
       items: [
