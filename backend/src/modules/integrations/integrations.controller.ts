@@ -245,11 +245,38 @@ export class IntegrationsController {
     if (!tenantId) {
       throw new NotFoundException('Tenant-scoped key required for contact cache sync');
     }
-    // Fire-and-forget; caller polls backfill endpoint or reads /participants to check progress.
-    this.contactCache.syncContactsFromOpenPhone(workspaceId, tenantId).catch((e) => {
+    // Fire-and-forget — but tracked. Callers should poll
+    // GET /openphone/contacts/sync/status to know when it's done.
+    this.contactCache.runTrackedSync(workspaceId, tenantId).catch((e) => {
       console.error(`[contacts/sync] failed for tenant=${tenantId}:`, e);
     });
-    return { data: { started: true } };
+    return { data: { started: true, started_at: new Date().toISOString() } };
+  }
+
+  /**
+   * GET /integrations/openphone/contacts/sync/status
+   *
+   * Returns the latest manual /contacts/sync job for this tenant. Lets Service
+   * Flow (or any caller) poll completion instead of arbitrary sleeps.
+   * Response shape:
+   *   { state: 'running'|'completed'|'failed'|'idle',
+   *     started_at, finished_at, result, error }
+   */
+  @Get('openphone/contacts/sync/status')
+  async getContactsSyncStatus(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+  ) {
+    if (!tenantId) throw new NotFoundException('Tenant-scoped key required');
+    const status = this.contactCache.getManualSyncStatus(workspaceId, tenantId);
+    if (!status) return { data: { state: 'idle' } };
+    return { data: {
+      state: status.state,
+      started_at: new Date(status.startedAt).toISOString(),
+      finished_at: status.finishedAt ? new Date(status.finishedAt).toISOString() : null,
+      result: status.result ?? null,
+      error: status.error ?? null,
+    } };
   }
 
   /**

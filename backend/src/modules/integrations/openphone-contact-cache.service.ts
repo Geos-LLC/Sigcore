@@ -48,6 +48,20 @@ export function resolveDisplayName(
   return null;
 }
 
+interface SyncJobState {
+  startedAt: number;
+  finishedAt: number | null;
+  state: 'running' | 'completed' | 'failed';
+  result?: {
+    contactsScanned: number;
+    snapshotsWritten: number;
+    snapshotsArchived: number;
+    participantsCascaded: number;
+    phoneNormalizationFailures: number;
+  };
+  error?: string;
+}
+
 @Injectable()
 export class OpenPhoneContactCacheService {
   private readonly logger = new Logger(OpenPhoneContactCacheService.name);
@@ -57,6 +71,11 @@ export class OpenPhoneContactCacheService {
    */
   private readonly lastBackgroundSyncAt = new Map<string, number>();
   private readonly BACKGROUND_SYNC_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+  /**
+   * In-memory tracker for the latest manual /contacts/sync per (workspace, tenant).
+   * Lets external callers (e.g. Service Flow) poll completion instead of guessing.
+   */
+  private readonly lastManualSync = new Map<string, SyncJobState>();
 
   constructor(
     @InjectRepository(OpenPhoneContactSnapshot)
@@ -566,6 +585,42 @@ export class OpenPhoneContactCacheService {
       lastSeenAt: p.lastSeenAt,
     }));
     return { data, count: data.length };
+  }
+
+  /**
+   * Tracker for manual /contacts/sync calls. Returns null if no sync has run
+   * for this (workspace, tenant) since process boot.
+   */
+  getManualSyncStatus(workspaceId: string, tenantId: string): SyncJobState | null {
+    return this.lastManualSync.get(`${workspaceId}:${tenantId}`) ?? null;
+  }
+
+  /**
+   * Wrap syncContactsFromOpenPhone with manual-sync tracking so callers can
+   * poll `/contacts/sync/status`. Public so the controller can mark + invoke
+   * in one call.
+   */
+  async runTrackedSync(workspaceId: string, tenantId: string): Promise<SyncJobState['result']> {
+    const key = `${workspaceId}:${tenantId}`;
+    this.lastManualSync.set(key, { startedAt: Date.now(), finishedAt: null, state: 'running' });
+    try {
+      const result = await this.syncContactsFromOpenPhone(workspaceId, tenantId);
+      this.lastManualSync.set(key, {
+        startedAt: this.lastManualSync.get(key)?.startedAt ?? Date.now(),
+        finishedAt: Date.now(),
+        state: 'completed',
+        result,
+      });
+      return result;
+    } catch (e: unknown) {
+      this.lastManualSync.set(key, {
+        startedAt: this.lastManualSync.get(key)?.startedAt ?? Date.now(),
+        finishedAt: Date.now(),
+        state: 'failed',
+        error: (e as Error).message,
+      });
+      throw e;
+    }
   }
 
   /**
