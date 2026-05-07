@@ -106,7 +106,16 @@ export class TenantWebhooksService {
   }
 
   /**
-   * Send webhook to tenant
+   * Send webhook to tenant.
+   *
+   * Signature contract (aligned with the SF /lead-status verifier shape so
+   * one HMAC implementation covers all SF inbound webhook routes; matches
+   * outbound-webhooks.service.ts):
+   *   X-Callio-Timestamp : epoch seconds, integer-as-string
+   *   X-Callio-Signature : hex(HMAC-SHA256(secret, `${ts}.${rawBody}`))
+   *
+   * `payload.timestamp` (the ISO field on the JSON body) is preserved for
+   * subscriber compatibility — only the header timestamp + HMAC binding changed.
    */
   private async sendTenantWebhook(
     tenant: Tenant,
@@ -115,16 +124,22 @@ export class TenantWebhooksService {
     const payloadString = JSON.stringify(payload);
 
     try {
+      // Epoch seconds for HMAC + replay-window check on the receiver side.
+      const tsEpoch = String(Math.floor(Date.now() / 1000));
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'X-Callio-Event': payload.event,
-        'X-Callio-Timestamp': payload.timestamp,
+        'X-Callio-Timestamp': tsEpoch,
         'X-Callio-Tenant-Id': tenant.id,
       };
 
       // Add signature if secret is configured
       if (tenant.webhookSecret) {
-        const signature = this.signPayload(payloadString, tenant.webhookSecret);
+        const signature = this.signPayload(
+          `${tsEpoch}.${payloadString}`,
+          tenant.webhookSecret,
+        );
         headers['X-Callio-Signature'] = signature;
       }
 
