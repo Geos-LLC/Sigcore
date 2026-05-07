@@ -160,7 +160,16 @@ export class OutboundWebhooksService {
   }
 
   /**
-   * Send webhook to a subscription
+   * Send webhook to a subscription.
+   *
+   * Signature contract (aligned with the SF /lead-status verifier shape so
+   * one HMAC implementation covers all SF inbound webhook routes):
+   *   X-Callio-Timestamp : epoch seconds, integer-as-string
+   *   X-Callio-Signature : hex(HMAC-SHA256(secret, `${ts}.${rawBody}`))
+   *
+   * `payload.timestamp` (the ISO field on the JSON body) is preserved for
+   * subscribers that already parse it — the HEADER format changes only.
+   * The body content is unchanged.
    */
   private async sendWebhook(
     subscription: WebhookSubscription,
@@ -169,15 +178,21 @@ export class OutboundWebhooksService {
     const payloadString = JSON.stringify(payload);
 
     try {
+      // Epoch seconds for HMAC + replay-window check on the receiver side.
+      const tsEpoch = String(Math.floor(Date.now() / 1000));
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'X-Callio-Event': payload.event,
-        'X-Callio-Timestamp': payload.timestamp,
+        'X-Callio-Timestamp': tsEpoch,
       };
 
       // Add signature if secret is configured
       if (subscription.secret) {
-        const signature = this.signPayload(payloadString, subscription.secret);
+        const signature = this.signPayload(
+          `${tsEpoch}.${payloadString}`,
+          subscription.secret,
+        );
         headers['X-Callio-Signature'] = signature;
       }
 
@@ -354,15 +369,24 @@ export class OutboundWebhooksService {
     };
 
     try {
+      // Same HMAC contract as sendWebhook above:
+      //   header ts  = epoch seconds
+      //   signature  = HMAC-SHA256(secret, `${ts}.${rawBody}`)
+      const tsEpoch = String(Math.floor(Date.now() / 1000));
+      const payloadString = JSON.stringify(testPayload);
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'X-Callio-Event': testPayload.event,
-        'X-Callio-Timestamp': testPayload.timestamp,
+        'X-Callio-Timestamp': tsEpoch,
         'X-Callio-Test': 'true',
       };
 
       if (subscription.secret) {
-        const signature = this.signPayload(JSON.stringify(testPayload), subscription.secret);
+        const signature = this.signPayload(
+          `${tsEpoch}.${payloadString}`,
+          subscription.secret,
+        );
         headers['X-Callio-Signature'] = signature;
       }
 
