@@ -18,6 +18,8 @@ import {
   Archive,
   CheckCircle2,
   ShoppingCart,
+  ToggleLeft,
+  ToggleRight,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type {
@@ -48,6 +50,7 @@ export default function AdminPlatformDetailPage() {
     webhooks: false,
   });
   const [provisionOpen, setProvisionOpen] = useState(false);
+  const [webhookTogglingId, setWebhookTogglingId] = useState<string | null>(null);
 
   // PR16 — flatten (workspace × real profile) tuples across workspace groups so
   // the provision modal can target a tenant+profile pair. Profiles without a
@@ -94,6 +97,37 @@ export default function AdminPlatformDetailPage() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const handleToggleWebhook = async (
+    webhookId: string,
+    currentStatus: string,
+  ) => {
+    if (webhookTogglingId) return;
+    const next = currentStatus === 'active' ? 'inactive' : 'active';
+    setWebhookTogglingId(webhookId);
+    setError(null);
+    try {
+      await adminApi.setWebhookSubscriptionStatus(webhookId, next);
+      setDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              webhooks: prev.webhooks.map((w) =>
+                w.id === webhookId ? { ...w, status: next } : w,
+              ),
+            }
+          : prev,
+      );
+    } catch (err: any) {
+      setError(
+        err.response?.data?.message ||
+          err.message ||
+          'Failed to update webhook subscription',
+      );
+    } finally {
+      setWebhookTogglingId(null);
+    }
+  };
 
   const toggle = (s: Section) => setExpanded((e) => ({ ...e, [s]: !e[s] }));
   const isUnclassified = detail?.id === 'unclassified';
@@ -310,24 +344,45 @@ export default function AdminPlatformDetailPage() {
                 <th className="text-left px-4 py-2">Events</th>
                 <th className="text-left px-4 py-2">Tenant</th>
                 <th className="text-left px-4 py-2">Status</th>
+                <th className="text-right px-4 py-2">Enabled</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {detail.webhooks.map((w) => (
-                <tr key={w.id}>
-                  <td className="px-4 py-2 font-medium text-gray-900">{w.name}</td>
-                  <td className="px-4 py-2 font-mono text-xs text-gray-600 break-all">
-                    {w.webhookUrl}
-                  </td>
-                  <td className="px-4 py-2 text-gray-500 text-xs">
-                    {w.events.length} event{w.events.length === 1 ? '' : 's'}
-                  </td>
-                  <td className="px-4 py-2 text-gray-700">{w.tenantName ?? '—'}</td>
-                  <td className="px-4 py-2">
-                    <StatusBadge value={w.status} />
-                  </td>
-                </tr>
-              ))}
+              {detail.webhooks.map((w) => {
+                const isActive = w.status === 'active';
+                const isToggling = webhookTogglingId === w.id;
+                return (
+                  <tr key={w.id}>
+                    <td className="px-4 py-2 font-medium text-gray-900">{w.name}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-gray-600 break-all">
+                      {w.webhookUrl}
+                    </td>
+                    <td className="px-4 py-2 text-gray-500 text-xs">
+                      {w.events.length} event{w.events.length === 1 ? '' : 's'}
+                    </td>
+                    <td className="px-4 py-2 text-gray-700">{w.tenantName ?? '—'}</td>
+                    <td className="px-4 py-2">
+                      <StatusBadge value={w.status} />
+                    </td>
+                    <td className="px-4 py-2 text-right">
+                      <button
+                        onClick={() => handleToggleWebhook(w.id, w.status)}
+                        disabled={isToggling}
+                        title={isActive ? 'Disable webhook' : 'Enable webhook'}
+                        className={`p-1 rounded hover:bg-gray-100 disabled:opacity-50 ${
+                          isActive ? 'text-green-500' : 'text-gray-400'
+                        }`}
+                      >
+                        {isActive ? (
+                          <ToggleRight className="h-5 w-5" />
+                        ) : (
+                          <ToggleLeft className="h-5 w-5" />
+                        )}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         ) : (

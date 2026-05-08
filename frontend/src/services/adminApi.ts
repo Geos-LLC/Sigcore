@@ -541,6 +541,20 @@ class AdminApiService {
     );
     return response.data.data;
   }
+
+  // ==================== Webhook Subscriptions ====================
+
+  /** Toggle a webhook subscription's status. Use 'inactive' to disable, 'active' to re-enable. */
+  async setWebhookSubscriptionStatus(
+    id: string,
+    status: 'active' | 'inactive' | 'paused',
+  ): Promise<{ id: string; status: string }> {
+    const response = await this.client.patch<ApiResponse<{ id: string; status: string }>>(
+      `/webhook-subscriptions/${encodeURIComponent(id)}`,
+      { status },
+    );
+    return response.data.data;
+  }
 }
 
 export const adminApi = new AdminApiService();
