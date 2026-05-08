@@ -555,6 +555,16 @@ class AdminApiService {
     );
     return response.data.data;
   }
+
+  /** Send a test event to the subscription's URL. Backend uses MESSAGE_SENT with the sub's secret. */
+  async testWebhookSubscription(
+    id: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    const response = await this.client.post<ApiResponse<{ success: boolean; error?: string }>>(
+      `/webhook-subscriptions/${encodeURIComponent(id)}/test`,
+    );
+    return response.data.data;
+  }
 }
 
 export const adminApi = new AdminApiService();

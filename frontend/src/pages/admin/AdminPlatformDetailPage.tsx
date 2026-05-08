@@ -20,6 +20,7 @@ import {
   ShoppingCart,
   ToggleLeft,
   ToggleRight,
+  Send,
 } from 'lucide-react';
 import { adminApi } from '../../services/adminApi';
 import type {
@@ -51,6 +52,10 @@ export default function AdminPlatformDetailPage() {
   });
   const [provisionOpen, setProvisionOpen] = useState(false);
   const [webhookTogglingId, setWebhookTogglingId] = useState<string | null>(null);
+  const [webhookTestingId, setWebhookTestingId] = useState<string | null>(null);
+  const [webhookTestResults, setWebhookTestResults] = useState<
+    Record<string, { success: boolean; message: string }>
+  >({});
 
   // PR16 — flatten (workspace × real profile) tuples across workspace groups so
   // the provision modal can target a tenant+profile pair. Profiles without a
@@ -126,6 +131,45 @@ export default function AdminPlatformDetailPage() {
       );
     } finally {
       setWebhookTogglingId(null);
+    }
+  };
+
+  const handleTestWebhook = async (webhookId: string) => {
+    if (webhookTestingId) return;
+    setWebhookTestingId(webhookId);
+    try {
+      const result = await adminApi.testWebhookSubscription(webhookId);
+      setWebhookTestResults((prev) => ({
+        ...prev,
+        [webhookId]: {
+          success: result.success,
+          message: result.success
+            ? 'Test event delivered'
+            : result.error || 'Test delivery failed',
+        },
+      }));
+    } catch (err: any) {
+      setWebhookTestResults((prev) => ({
+        ...prev,
+        [webhookId]: {
+          success: false,
+          message:
+            err.response?.data?.message ||
+            err.message ||
+            'Test delivery failed',
+        },
+      }));
+    } finally {
+      setWebhookTestingId(null);
+      // Auto-clear result after 6s so the row doesn't stay visually noisy
+      setTimeout(() => {
+        setWebhookTestResults((prev) => {
+          if (!prev[webhookId]) return prev;
+          const next = { ...prev };
+          delete next[webhookId];
+          return next;
+        });
+      }, 6000);
     }
   };
 
@@ -344,13 +388,15 @@ export default function AdminPlatformDetailPage() {
                 <th className="text-left px-4 py-2">Events</th>
                 <th className="text-left px-4 py-2">Tenant</th>
                 <th className="text-left px-4 py-2">Status</th>
-                <th className="text-right px-4 py-2">Enabled</th>
+                <th className="text-right px-4 py-2">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
               {detail.webhooks.map((w) => {
                 const isActive = w.status === 'active';
                 const isToggling = webhookTogglingId === w.id;
+                const isTesting = webhookTestingId === w.id;
+                const testResult = webhookTestResults[w.id];
                 return (
                   <tr key={w.id}>
                     <td className="px-4 py-2 font-medium text-gray-900">{w.name}</td>
@@ -364,21 +410,43 @@ export default function AdminPlatformDetailPage() {
                     <td className="px-4 py-2">
                       <StatusBadge value={w.status} />
                     </td>
-                    <td className="px-4 py-2 text-right">
-                      <button
-                        onClick={() => handleToggleWebhook(w.id, w.status)}
-                        disabled={isToggling}
-                        title={isActive ? 'Disable webhook' : 'Enable webhook'}
-                        className={`p-1 rounded hover:bg-gray-100 disabled:opacity-50 ${
-                          isActive ? 'text-green-500' : 'text-gray-400'
-                        }`}
-                      >
-                        {isActive ? (
-                          <ToggleRight className="h-5 w-5" />
-                        ) : (
-                          <ToggleLeft className="h-5 w-5" />
+                    <td className="px-4 py-2">
+                      <div className="flex items-center justify-end gap-2">
+                        {testResult && (
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded ${
+                              testResult.success
+                                ? 'bg-green-50 text-green-700 border border-green-200'
+                                : 'bg-red-50 text-red-700 border border-red-200'
+                            }`}
+                            title={testResult.message}
+                          >
+                            {testResult.success ? '✓ delivered' : `✕ ${testResult.message}`}
+                          </span>
                         )}
-                      </button>
+                        <button
+                          onClick={() => handleTestWebhook(w.id)}
+                          disabled={isTesting}
+                          title="Send test event"
+                          className="p-1 rounded text-blue-500 hover:bg-blue-50 disabled:opacity-50"
+                        >
+                          <Send className={`h-4 w-4 ${isTesting ? 'animate-pulse' : ''}`} />
+                        </button>
+                        <button
+                          onClick={() => handleToggleWebhook(w.id, w.status)}
+                          disabled={isToggling}
+                          title={isActive ? 'Disable webhook' : 'Enable webhook'}
+                          className={`p-1 rounded hover:bg-gray-100 disabled:opacity-50 ${
+                            isActive ? 'text-green-500' : 'text-gray-400'
+                          }`}
+                        >
+                          {isActive ? (
+                            <ToggleRight className="h-5 w-5" />
+                          ) : (
+                            <ToggleLeft className="h-5 w-5" />
+                          )}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
