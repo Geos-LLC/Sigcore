@@ -1322,6 +1322,21 @@ export class IntegrationsService {
 
   /**
    * Disconnect (delete) the OpenPhone integration for a specific tenant.
+   *
+   * Mirrors the cleanup in workspace-scoped `deleteIntegration` (above):
+   * if the integration's metadata holds OpenPhone webhook IDs, attempt to
+   * delete them in OpenPhone before removing the row. Best-effort — a
+   * webhook-delete failure must not block the local row removal, otherwise
+   * a partially-broken OpenPhone-side state would leave the tenant unable
+   * to disconnect at all.
+   *
+   * Today, `connectOpenPhoneForTenant` does not register tenant-scoped
+   * webhooks (the workspace-level webhook URL is reused with tenant routing
+   * resolved server-side from the inbound payload). The current production
+   * state therefore has zero webhook IDs to clean up. This defensive
+   * cleanup is structural symmetry with the workspace path and forward-
+   * compatible with any future flow that does register per-tenant webhooks.
+   * Readiness-report Fix C, 2026-05-08.
    */
   async disconnectOpenPhoneForTenant(
     workspaceId: string,
@@ -1334,6 +1349,28 @@ export class IntegrationsService {
     if (!integration) {
       this.logger.log(`No OpenPhone integration found for tenant ${tenantId} — nothing to delete`);
       return { success: true };
+    }
+
+    if (integration.metadata) {
+      const metadata = integration.metadata as { messageWebhookId?: string; callWebhookId?: string };
+      if (metadata.messageWebhookId || metadata.callWebhookId) {
+        try {
+          const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+          await this.openPhoneProvider.deleteWebhooks(credentials, {
+            messageWebhookId: metadata.messageWebhookId,
+            callWebhookId: metadata.callWebhookId,
+          });
+          this.logger.log(
+            `Deleted OpenPhone webhooks for tenant ${tenantId} in workspace ${workspaceId}`,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Failed to delete OpenPhone webhooks for tenant ${tenantId} in workspace ${workspaceId}; ` +
+              `proceeding with local row removal anyway`,
+            error,
+          );
+        }
+      }
     }
 
     await this.tenantIntegrationRepo.remove(integration);
