@@ -1,7 +1,7 @@
 import { CommunicationService } from './communication.service';
 import { ProviderType, IntegrationStatus } from '../../database/entities/communication-integration.entity';
 import { PhoneNumberProvider } from '../../database/entities/tenant-phone-number.entity';
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 
 // ---------------------------------------------------------------------------
 // Mock builders (same pattern as call-connect.service.spec.ts)
@@ -292,6 +292,115 @@ describe('CommunicationService – Tenant Isolation', () => {
       expect(conversationRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({ tenantId: TENANT_A }),
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fix A — readiness-report 2026-05-08: cross-tenant `fromNumber` guard.
+  //
+  // Before this fix, sendMessageToPhoneNumber's tenant_phone_numbers lookup
+  // was workspace-scoped only — tenant A could specify tenant B's dedicated
+  // number as `fromNumber` and the routing would happily go through B's
+  // provider/credentials. The fix rejects with ForbiddenException when the
+  // resolved TPN's tenant_id does not match the caller's tenant key.
+  // -------------------------------------------------------------------------
+  describe('sendMessageToPhoneNumber – cross-tenant fromNumber guard (Fix A)', () => {
+    it('throws ForbiddenException when the TPN belongs to a different tenant', async () => {
+      const { service, tenantPhoneNumberRepo, integrationRepo, twilioProvider } = buildService();
+
+      // The fromNumber is registered to TENANT_B in tenant_phone_numbers.
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        id: 'tpn-b-1',
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_B,
+      });
+
+      // The caller's API key is scoped to TENANT_A.
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      // The provider must NOT be invoked when the guard rejects.
+      expect(twilioProvider.sendMessage).not.toHaveBeenCalled();
+      // No fallback Twilio integration lookup should occur after the rejection.
+      expect(integrationRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('throws ForbiddenException for OpenPhone-backed TPN owned by another tenant', async () => {
+      const { service, tenantPhoneNumberRepo, openPhoneProvider, tenantIntegrationRepo, integrationRepo } = buildService();
+
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        id: 'tpn-b-2',
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.OPENPHONE,
+        tenantId: TENANT_B,
+      });
+
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(openPhoneProvider.sendMessage).not.toHaveBeenCalled();
+      // Neither integration lookup should happen — guard fires before routing.
+      expect(tenantIntegrationRepo.findOne).not.toHaveBeenCalled();
+      expect(integrationRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('permits send when the TPN belongs to the calling tenant (Twilio)', async () => {
+      const { service, conversationRepo, messageRepo, integrationRepo, tenantPhoneNumberRepo, twilioProvider } = buildService();
+
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        id: 'tpn-a-1',
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_A,
+      });
+      integrationRepo.findOne.mockResolvedValue({
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+        credentialsEncrypted: 'encrypted',
+      });
+      conversationRepo.findOne.mockResolvedValue(null);
+      twilioProvider.sendMessage.mockResolvedValue({ providerMessageId: 'SM-OK', status: 'sent' });
+      messageRepo.create.mockImplementation((data: any) => data);
+      messageRepo.save.mockImplementation(async (m: any) => m);
+
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+        ),
+      ).resolves.toBeDefined();
+      expect(twilioProvider.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT consult tenant_phone_numbers for workspace-scoped callers (guard skipped by design)', async () => {
+      // Workspace operators bypass the per-tenant routing block entirely —
+      // by design. The TPN lookup lives inside `if (tenantId) { ... }`, so a
+      // call with no tenantId never hits the guard. The downstream workspace
+      // path is exercised by separate integration tests; here we only assert
+      // that the guard is not over-applied (would block legitimate workspace
+      // sends if it leaked outside the tenant block).
+      const { service, tenantPhoneNumberRepo, integrationRepo } = buildService();
+
+      // Force the workspace fallback path to throw early so we don't have
+      // to wire up the full Twilio/OpenPhone matcher. The throw is fine —
+      // we only care that the TPN lookup was not invoked.
+      integrationRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', /* tenantId */ undefined,
+        ),
+      ).rejects.toThrow(/No active integration/);
+
+      // The point of this test: the cross-tenant guard never ran because
+      // tenantId was undefined.
+      expect(tenantPhoneNumberRepo.findOne).not.toHaveBeenCalled();
     });
   });
 });

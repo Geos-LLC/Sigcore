@@ -740,10 +740,31 @@ export class CommunicationService {
     // to determine which provider owns the fromNumber. This prevents sending SMS from
     // the wrong provider (e.g. OpenPhone substituting a Twilio number with its own).
     if (tenantId) {
-      // Look up fromNumber in tenant_phone_numbers to determine the correct provider
+      // Look up fromNumber in tenant_phone_numbers to determine the correct provider.
+      // Note: lookup is workspace-scoped because (workspaceId, phoneNumber) is the
+      // unique constraint — a phone number is owned by exactly one tenant within
+      // a workspace. The tenant-ownership check below enforces that fact.
       const tenantPhone = await this.tenantPhoneNumberRepo.findOne({
         where: { workspaceId, phoneNumber: normalizedFrom, status: 'active' as any },
       });
+
+      // Cross-tenant impersonation guard (readiness-report Fix A, 2026-05-08).
+      // Without this, tenant A could specify tenant B's dedicated number as
+      // `fromNumber` and successfully route the send through B's provider/
+      // credentials. TenantPhoneNumber.tenantId is non-nullable (see entity at
+      // tenant-phone-number.entity.ts:37-38), so a strict equality check is
+      // sufficient. Workspace-scoped callers (no tenantId) bypass this entire
+      // block by design — operators can send from any number in their workspace.
+      if (tenantPhone && tenantPhone.tenantId !== tenantId) {
+        this.logger.warn(
+          `[sendMessageToPhoneNumber] cross-tenant fromNumber rejected: ` +
+            `caller=${tenantId} tpn=${tenantPhone.id} tpn.tenantId=${tenantPhone.tenantId} ` +
+            `fromNumber=${normalizedFrom}`,
+        );
+        throw new ForbiddenException(
+          `fromNumber ${normalizedFrom} is not owned by the calling tenant`,
+        );
+      }
 
       const phoneProvider = tenantPhone?.provider;
       this.logger.log(
