@@ -172,9 +172,18 @@ export class PhoneAssignmentsService {
         'Phone number not allocated to this workspace. Add it via Provisioning before assigning.',
       );
     }
-    if (tpn.tenantId !== profile.tenantId) {
+    // Shared-assignment amendment (PR15, 2026-05-11). The original guard
+    // rejected every cross-tenant assignment — that was symmetric with the
+    // strict pre-amendment Fix A in communication.service. Both guards have
+    // been relaxed together: within a single workspace, a TPN owned by
+    // tenant B can legitimately back-stop a profile under tenant A (e.g.
+    // Yelp JAX sending from Thumbtack JAX's dedicated number while Yelp JAX
+    // is in pre-A2P limbo). Cross-workspace assignment is still rejected
+    // — both the lookups above already enforce workspace scope, so this
+    // check is defense-in-depth and documents the invariant.
+    if (tpn.workspaceId !== profile.workspaceId) {
       throw new BadRequestException(
-        'Phone number belongs to a different tenant within this workspace',
+        'Phone number and profile belong to different workspaces',
       );
     }
 

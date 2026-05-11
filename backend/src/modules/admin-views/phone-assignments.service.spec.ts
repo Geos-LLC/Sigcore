@@ -182,12 +182,96 @@ describe('PhoneAssignmentsService.assign', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it('rejects when phone tenantId differs from profile tenantId', async () => {
-    const otherTenantTpn = { ...tpn, tenantId: 'other-tenant' };
-    const { svc } = build({ profile, tpn: otherTenantTpn });
+  it('permits cross-tenant assignment when phone and profile share the workspace', async () => {
+    // PR15 shared-assignment amendment (2026-05-11): TPN owned by tenant B
+    // can be assigned to a profile under tenant A within the same workspace.
+    // The communication-service guard enforces that an active PPA exists
+    // before any outbound send actually fires from that number.
+    const crossTenantTpn = { ...tpn, tenantId: 'other-tenant-same-ws' };
+    const { svc, ppaTxn } = build({ profile, tpn: crossTenantTpn });
+    const out = await svc.assign(WS, {
+      profileId: PROFILE_ID,
+      tenantPhoneNumberId: TPN_ID,
+      isDefault: false,
+    });
+    expect(ppaTxn.save).toHaveBeenCalled();
+    const saved = ppaTxn.save.mock.calls[0][0];
+    expect(saved.profileId).toBe(PROFILE_ID);
+    expect(saved.tenantPhoneNumberId).toBe(TPN_ID);
+    expect(saved.active).toBe(true);
+    expect(saved.isDefault).toBe(false);
+    expect(out.phoneNumber).toBe('+15551234567');
+  });
+
+  it('rejects when phone and profile belong to different workspaces', async () => {
+    // Defense-in-depth: the workspace-scoped findOne lookups already 404
+    // any TPN/profile outside the caller's workspace, so reaching this code
+    // path requires a mock that returns a TPN from a different workspace.
+    // The explicit check documents and enforces the invariant.
+    const crossWsTpn = { ...tpn, workspaceId: 'other-workspace' };
+    const { svc } = build({ profile, tpn: crossWsTpn });
     await expect(
       svc.assign(WS, { profileId: PROFILE_ID, tenantPhoneNumberId: TPN_ID }),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  it('isDefault=false does not disturb the existing default (no demote)', async () => {
+    // Existing default belongs to another PPA on the same profile. Setting
+    // explicit isDefault=false on the new row must NOT call demoteOtherDefaults.
+    const { svc, ppaTxn } = build({
+      profile,
+      tpn,
+      existingDefault: { id: 'old-default' },
+    });
+    const updateChain = makeQueryBuilder([]);
+    ppaTxn.createQueryBuilder = jest.fn((alias?: string) => {
+      // resolveIsDefault path uses ('ppa'); demote path uses no alias on update.
+      if (alias === 'ppa') return makeQueryBuilder([], { id: 'old-default' });
+      return updateChain;
+    });
+
+    const out = await svc.assign(WS, {
+      profileId: PROFILE_ID,
+      tenantPhoneNumberId: TPN_ID,
+      isDefault: false,
+    });
+
+    const saved = ppaTxn.save.mock.calls[0][0];
+    expect(saved.isDefault).toBe(false);
+    expect(out.isDefault).toBe(false);
+    // The demote QB chain (update().set().where()...) must NOT have executed.
+    expect(updateChain.execute).not.toHaveBeenCalled();
+  });
+
+  it('isDefault=true demotes existing defaults and promotes the new row', async () => {
+    // When the caller explicitly requests isDefault=true, the service must
+    // run demoteOtherDefaults inside the same transaction to preserve the
+    // partial-unique "exactly one default per profile when active" index.
+    const updateChain = makeQueryBuilder([]);
+    const ppaQbChain = makeQueryBuilder([], { id: 'old-default' });
+    const { svc, ppaTxn } = build({
+      profile,
+      tpn,
+      existingDefault: { id: 'old-default' },
+    });
+    ppaTxn.createQueryBuilder = jest.fn((alias?: string) => {
+      if (alias === 'ppa') return ppaQbChain;
+      return updateChain;
+    });
+
+    const out = await svc.assign(WS, {
+      profileId: PROFILE_ID,
+      tenantPhoneNumberId: TPN_ID,
+      isDefault: true,
+    });
+
+    const saved = ppaTxn.save.mock.calls[0][0];
+    expect(saved.isDefault).toBe(true);
+    expect(out.isDefault).toBe(true);
+    // demoteOtherDefaults must have invoked update().set().where()...execute()
+    expect(updateChain.update).toHaveBeenCalled();
+    expect(updateChain.set).toHaveBeenCalledWith({ isDefault: false });
+    expect(updateChain.execute).toHaveBeenCalled();
   });
 
   it('creates a new PPA row with isDefault=true when no default exists yet', async () => {
