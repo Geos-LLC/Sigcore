@@ -19,6 +19,22 @@ function buildMockRepo() {
   };
 }
 
+/**
+ * Default PPA query-builder mock that returns null for `getRawOne` — i.e.
+ * "no shared assignment exists." Cross-tenant guard tests rely on this
+ * default to fall through to the 403 path. Tests that need to simulate an
+ * active shared PPA override `createQueryBuilder` on `ppaRepo`.
+ */
+function buildPpaQbDefault(getRawOneResult: unknown = null) {
+  return {
+    innerJoin: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    limit: jest.fn().mockReturnThis(),
+    getRawOne: jest.fn().mockResolvedValue(getRawOneResult),
+  };
+}
+
 function buildService() {
   const integrationRepo = buildMockRepo();
   const tenantIntegrationRepo = buildMockRepo();
@@ -27,6 +43,8 @@ function buildService() {
   const callRepo = buildMockRepo();
   const senderRepo = buildMockRepo();
   const tenantPhoneNumberRepo = buildMockRepo();
+  const ppaRepo = buildMockRepo();
+  ppaRepo.createQueryBuilder.mockReturnValue(buildPpaQbDefault(null));
   const openPhoneProvider = { sendMessage: jest.fn() };
   const twilioProvider = { sendMessage: jest.fn() };
   const whatsappWebProvider = { sendMessage: jest.fn() };
@@ -44,6 +62,7 @@ function buildService() {
     callRepo as any,
     senderRepo as any,
     tenantPhoneNumberRepo as any,
+    ppaRepo as any,
     openPhoneProvider as any,
     twilioProvider as any,
     whatsappWebProvider as any,
@@ -60,6 +79,7 @@ function buildService() {
     callRepo,
     senderRepo,
     tenantPhoneNumberRepo,
+    ppaRepo,
     openPhoneProvider,
     twilioProvider,
     encryptionService,
@@ -378,6 +398,93 @@ describe('CommunicationService – Tenant Isolation', () => {
       expect(twilioProvider.sendMessage).toHaveBeenCalledTimes(1);
     });
 
+    // -----------------------------------------------------------------------
+    // Shared-assignment amendment (2026-05-11). Cross-tenant TPN sends are
+    // permitted when an active profile_phone_assignment links the TPN to an
+    // active profile under the caller's tenant. This unblocks the Yelp JAX
+    // case where +19045778584 is owned by tenant Thumbtack JAX but assigned
+    // to a profile under tenant Yelp JAX via PR15's shared-assignment model.
+    // -----------------------------------------------------------------------
+    it('permits cross-tenant send when an active PPA links the TPN to a profile under the caller tenant', async () => {
+      const {
+        service, conversationRepo, messageRepo, integrationRepo,
+        tenantPhoneNumberRepo, ppaRepo, twilioProvider,
+      } = buildService();
+
+      // TPN is owned by TENANT_B (Thumbtack JAX), but PPA links it to a
+      // profile under TENANT_A (Yelp JAX) — caller is TENANT_A.
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        id: 'tpn-shared',
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_B,
+      });
+      const sharedQb = buildPpaQbDefault({ id: 'ppa-active', profile_id: 'profile-yelp-jax' });
+      ppaRepo.createQueryBuilder.mockReturnValue(sharedQb);
+      integrationRepo.findOne.mockResolvedValue({
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+        credentialsEncrypted: 'encrypted',
+      });
+      conversationRepo.findOne.mockResolvedValue(null);
+      twilioProvider.sendMessage.mockResolvedValue({ providerMessageId: 'SM-SHARED', status: 'sent' });
+      messageRepo.create.mockImplementation((data: any) => data);
+      messageRepo.save.mockImplementation(async (m: any) => m);
+
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+        ),
+      ).resolves.toBeDefined();
+
+      // Provider should fire; the guard let the send through.
+      expect(twilioProvider.sendMessage).toHaveBeenCalledTimes(1);
+      // The PPA lookup must have been issued exactly once.
+      expect(ppaRepo.createQueryBuilder).toHaveBeenCalledWith('ppa');
+
+      // Defense-in-depth: the PPA query must be workspace-scoped and tenant-
+      // scoped against the caller, AND filter only active PPAs + profiles.
+      const andWhereCalls = sharedQb.andWhere.mock.calls.map((c: any[]) => ({ sql: c[0], params: c[1] }));
+      expect(andWhereCalls).toEqual(
+        expect.arrayContaining([
+          { sql: 'ppa.active = TRUE', params: undefined },
+          { sql: 'p.workspace_id = :workspaceId', params: { workspaceId: WS_ID } },
+          { sql: 'p.tenant_id = :callerTenant', params: { callerTenant: TENANT_A } },
+          { sql: "p.status = 'active'", params: undefined },
+        ]),
+      );
+      expect(sharedQb.where).toHaveBeenCalledWith(
+        'ppa.tenant_phone_number_id = :tpnId',
+        { tpnId: 'tpn-shared' },
+      );
+    });
+
+    it('rejects cross-tenant send when the matching PPA is inactive', async () => {
+      const {
+        service, integrationRepo, tenantPhoneNumberRepo, ppaRepo, twilioProvider,
+      } = buildService();
+
+      tenantPhoneNumberRepo.findOne.mockResolvedValue({
+        id: 'tpn-shared-inactive',
+        phoneNumber: '+15551234567',
+        provider: PhoneNumberProvider.TWILIO,
+        tenantId: TENANT_B,
+      });
+      // Service's QB filters `ppa.active = TRUE` AND `p.status = 'active'`, so
+      // an inactive PPA (or an inactive parent profile) yields no row — the
+      // query returns null and the guard rejects with 403.
+      ppaRepo.createQueryBuilder.mockReturnValue(buildPpaQbDefault(null));
+
+      await expect(
+        service.sendMessageToPhoneNumber(
+          WS_ID, '+15551234567', '+15559876543', 'Hello', 'sms', TENANT_A,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+
+      expect(twilioProvider.sendMessage).not.toHaveBeenCalled();
+      expect(integrationRepo.findOne).not.toHaveBeenCalled();
+    });
+
     it('does NOT consult tenant_phone_numbers for workspace-scoped callers (guard skipped by design)', async () => {
       // Workspace operators bypass the per-tenant routing block entirely —
       // by design. The TPN lookup lives inside `if (tenantId) { ... }`, so a
@@ -385,7 +492,7 @@ describe('CommunicationService – Tenant Isolation', () => {
       // path is exercised by separate integration tests; here we only assert
       // that the guard is not over-applied (would block legitimate workspace
       // sends if it leaked outside the tenant block).
-      const { service, tenantPhoneNumberRepo, integrationRepo } = buildService();
+      const { service, tenantPhoneNumberRepo, integrationRepo, ppaRepo } = buildService();
 
       // Force the workspace fallback path to throw early so we don't have
       // to wire up the full Twilio/OpenPhone matcher. The throw is fine —
@@ -399,8 +506,10 @@ describe('CommunicationService – Tenant Isolation', () => {
       ).rejects.toThrow(/No active integration/);
 
       // The point of this test: the cross-tenant guard never ran because
-      // tenantId was undefined.
+      // tenantId was undefined. Neither the TPN ownership check nor the
+      // shared-PPA lookup should fire for workspace-scoped callers.
       expect(tenantPhoneNumberRepo.findOne).not.toHaveBeenCalled();
+      expect(ppaRepo.createQueryBuilder).not.toHaveBeenCalled();
     });
   });
 });

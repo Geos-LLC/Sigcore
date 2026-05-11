@@ -22,6 +22,8 @@ import {
 } from '../../database/entities/communication-call.entity';
 import { Sender, ChannelType } from '../../database/entities/sender.entity';
 import { TenantPhoneNumber, PhoneNumberProvider } from '../../database/entities/tenant-phone-number.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
 import { OpenPhoneProvider } from './providers/openphone.provider';
 import { TwilioProvider } from './providers/twilio.provider';
 import { WhatsAppWebProvider } from './providers/whatsapp-web.provider';
@@ -133,6 +135,8 @@ export class CommunicationService {
     private senderRepo: Repository<Sender>,
     @InjectRepository(TenantPhoneNumber)
     private tenantPhoneNumberRepo: Repository<TenantPhoneNumber>,
+    @InjectRepository(ProfilePhoneAssignment)
+    private ppaRepo: Repository<ProfilePhoneAssignment>,
     private openPhoneProvider: OpenPhoneProvider,
     private twilioProvider: TwilioProvider,
     private whatsappWebProvider: WhatsAppWebProvider,
@@ -748,21 +752,46 @@ export class CommunicationService {
         where: { workspaceId, phoneNumber: normalizedFrom, status: 'active' as any },
       });
 
-      // Cross-tenant impersonation guard (readiness-report Fix A, 2026-05-08).
-      // Without this, tenant A could specify tenant B's dedicated number as
-      // `fromNumber` and successfully route the send through B's provider/
-      // credentials. TenantPhoneNumber.tenantId is non-nullable (see entity at
-      // tenant-phone-number.entity.ts:37-38), so a strict equality check is
-      // sufficient. Workspace-scoped callers (no tenantId) bypass this entire
-      // block by design — operators can send from any number in their workspace.
+      // Cross-tenant impersonation guard (readiness-report Fix A, 2026-05-08;
+      // shared-assignment amendment, 2026-05-11). Original Fix A rejected any
+      // TPN whose `tenantId` differed from the caller's. That blocked the
+      // legitimate shared-phone case where a TPN owned by tenant B is also
+      // assigned (via profile_phone_assignments) to a profile under tenant A
+      // — Yelp JAX sending from the Thumbtack JAX dedicated number. The guard
+      // now permits cross-tenant sends when an active PPA links the TPN to an
+      // active profile under the caller's tenant. Workspace-scoped callers
+      // (no tenantId) bypass this entire block by design.
       if (tenantPhone && tenantPhone.tenantId !== tenantId) {
-        this.logger.warn(
-          `[sendMessageToPhoneNumber] cross-tenant fromNumber rejected: ` +
+        // Workspace scoping (`p.workspace_id = :workspaceId`) is defense-in-
+        // depth: tenant IDs are globally unique already, but this makes the
+        // permission model explicit and prevents accidental cross-workspace
+        // grants if bad/stale rows exist.
+        const sharedAssignment = await this.ppaRepo
+          .createQueryBuilder('ppa')
+          .innerJoin(CommunicationProfile, 'p', 'p.id = ppa.profile_id')
+          .where('ppa.tenant_phone_number_id = :tpnId', { tpnId: tenantPhone.id })
+          .andWhere('ppa.active = TRUE')
+          .andWhere('p.workspace_id = :workspaceId', { workspaceId })
+          .andWhere('p.tenant_id = :callerTenant', { callerTenant: tenantId })
+          .andWhere("p.status = 'active'")
+          .limit(1)
+          .getRawOne();
+
+        if (!sharedAssignment) {
+          this.logger.warn(
+            `[sendMessageToPhoneNumber] cross-tenant fromNumber rejected: ` +
+              `caller=${tenantId} tpn=${tenantPhone.id} tpn.tenantId=${tenantPhone.tenantId} ` +
+              `fromNumber=${normalizedFrom} (no active profile_phone_assignment)`,
+          );
+          throw new ForbiddenException(
+            `fromNumber ${normalizedFrom} is not owned by the calling tenant`,
+          );
+        }
+
+        this.logger.log(
+          `[sendMessageToPhoneNumber] cross-tenant fromNumber allowed via PPA: ` +
             `caller=${tenantId} tpn=${tenantPhone.id} tpn.tenantId=${tenantPhone.tenantId} ` +
             `fromNumber=${normalizedFrom}`,
-        );
-        throw new ForbiddenException(
-          `fromNumber ${normalizedFrom} is not owned by the calling tenant`,
         );
       }
 

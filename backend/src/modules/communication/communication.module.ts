@@ -30,6 +30,8 @@ import {
   ApiKey,
   TenantIntegration,
   TenantPhoneNumber,
+  ProfilePhoneAssignment,
+  CommunicationProfile,
 } from '../../database/entities';
 
 @Module({
@@ -45,6 +47,8 @@ import {
       ApiKey,
       TenantIntegration,
       TenantPhoneNumber,
+      ProfilePhoneAssignment,
+      CommunicationProfile,
     ]),
     forwardRef(() => WebhooksModule),
     forwardRef(() => TenantsModule),

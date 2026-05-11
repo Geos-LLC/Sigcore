@@ -43,6 +43,7 @@ function makeService(opts: {
   const callRepo = buildMockRepo();
   const senderRepo = buildMockRepo();
   const tenantPhoneNumberRepo = buildMockRepo();
+  const ppaRepo = buildMockRepo();
 
   const openPhoneProvider = { sendMessage: jest.fn() };
   const twilioProvider = { sendMessage: jest.fn() };
@@ -64,6 +65,7 @@ function makeService(opts: {
     callRepo,
     senderRepo,
     tenantPhoneNumberRepo,
+    ppaRepo,
     openPhoneProvider as any,
     twilioProvider as any,
     whatsappWebProvider as any,
