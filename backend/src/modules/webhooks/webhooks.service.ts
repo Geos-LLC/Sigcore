@@ -77,6 +77,15 @@ export interface OpenPhoneWebhookPayload {
   };
 }
 
+const TELEGRAM_PROVIDER_EVENT_MAP: Record<string, WebhookEventType> = {
+  'provider.account.connected': WebhookEventType.TELEGRAM_ACCOUNT_CONNECTED,
+  'provider.account.disconnected': WebhookEventType.TELEGRAM_ACCOUNT_DISCONNECTED,
+  'message.received': WebhookEventType.TELEGRAM_MESSAGE_INBOUND,
+  'message.sent': WebhookEventType.TELEGRAM_MESSAGE_SENT,
+  'message.failed': WebhookEventType.TELEGRAM_MESSAGE_FAILED,
+  'conversation.updated': WebhookEventType.TELEGRAM_CONVERSATION_UPDATED,
+};
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
@@ -836,6 +845,80 @@ export class WebhooksService {
       'pending': MessageStatus.PENDING,
     };
     return statusMap[status || ''] || MessageStatus.PENDING;
+  }
+
+  // ==================== TELEGRAM WEBHOOK HANDLER ====================
+
+  /**
+   * Receive a normalized inbound message from the Telegram connector.
+   *
+   * The connector has already:
+   *   - decrypted credentials and validated tenant/account scope,
+   *   - normalized the Telegram update into the canonical inbound shape,
+   *   - deduped at its durable inbound event store.
+   *
+   * For Phase 2 we accept the event, log it, and fan it out on the outbound
+   * webhook bus as `telegram.message.inbound` so subscribing products
+   * (TelePorter, LeadBridge) can consume it today. Persistence into
+   * `communication_conversations` / `communication_messages` against
+   * `ProviderType.TELEGRAM` lands in a focused follow-up that extends the
+   * entity schemas + migrations — keeping this change's footprint to the
+   * connector boundary.
+   */
+  async handleTelegramWebhook(
+    eventType: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const tenantId = String((data as any)?.tenantId ?? '');
+    const accountId = String((data as any)?.accountId ?? '');
+    const externalConversationId = String((data as any)?.externalConversationId ?? '');
+    const externalMessageId = String((data as any)?.externalMessageId ?? '');
+
+    this.logger.log(
+      `[Telegram] ${eventType} tenant=${tenantId} account=${accountId} ` +
+        `conversation=${externalConversationId} message=${externalMessageId}`,
+    );
+
+    try {
+      await this.outboundWebhooksService.emitEvent(
+        tenantId || 'unknown',
+        WebhookEventType.TELEGRAM_MESSAGE_INBOUND,
+        { provider: 'telegram', eventType, ...data },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[Telegram] outbound webhook emit failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+    }
+  }
+
+  /**
+   * Fan a Telegram provider lifecycle event onto the outbound webhook bus so
+   * subscribing products can react without parsing the message firehose.
+   */
+  async handleTelegramProviderEvent(event: {
+    type: string;
+    tenantId: string;
+    accountId?: string;
+    timestamp: string;
+    data: Record<string, unknown>;
+  }): Promise<void> {
+    const mapped = TELEGRAM_PROVIDER_EVENT_MAP[event.type];
+    if (!mapped) {
+      this.logger.warn(`[Telegram] unknown provider event type: ${event.type}`);
+      return;
+    }
+    try {
+      await this.outboundWebhooksService.emitEvent(
+        event.tenantId || 'unknown',
+        mapped,
+        { provider: 'telegram', accountId: event.accountId, ...event.data },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[Telegram] outbound webhook emit failed (${event.type}): ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+    }
   }
 
   // ==================== WHATSAPP WEBHOOK HANDLER ====================

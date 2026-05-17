@@ -576,4 +576,80 @@ export class WebhooksController {
 
     return { received: true };
   }
+
+  // ==================== TELEGRAM WEBHOOKS ====================
+
+  /**
+   * Receive normalized inbound message events from the Telegram connector
+   * service drainer.
+   *
+   * Auth: x-webhook-key header must match SIGCORE_WEBHOOK_KEY.
+   * Payload shape (set by telegram-connector/sigcore-ingest.service.ts):
+   *   { eventType, provider: 'telegram', data: NormalizedInboundMessage, timestamp }
+   */
+  @Post('telegram/inbound')
+  @HttpCode(HttpStatus.OK)
+  async handleTelegramInbound(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() payload: {
+      eventType: string;
+      provider: 'telegram';
+      data: Record<string, unknown>;
+      timestamp: string;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid Telegram webhook key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+
+    const tenantId = (payload?.data as any)?.tenantId;
+    this.logger.log(
+      `Telegram inbound: ${payload?.eventType} for tenant ${tenantId ?? 'unknown'}`,
+    );
+
+    await this.webhooksService.handleTelegramWebhook(
+      payload.eventType,
+      payload.data,
+    );
+
+    return { received: true };
+  }
+
+  /**
+   * Receive Telegram provider lifecycle events
+   * (provider.account.connected/disconnected, message.received/sent/failed,
+   * conversation.updated) emitted by the connector.
+   *
+   * Separate channel from inbound message ingestion so downstream products
+   * can subscribe to signals without parsing the message firehose.
+   */
+  @Post('telegram/provider-events')
+  @HttpCode(HttpStatus.OK)
+  async handleTelegramProviderEvent(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() event: {
+      type: string;
+      provider: 'telegram';
+      tenantId: string;
+      accountId?: string;
+      timestamp: string;
+      data: Record<string, unknown>;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid Telegram provider-event key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+
+    this.logger.log(
+      `Telegram provider event: ${event.type} tenant=${event.tenantId} account=${event.accountId ?? 'n/a'}`,
+    );
+
+    await this.webhooksService.handleTelegramProviderEvent(event);
+
+    return { received: true };
+  }
 }

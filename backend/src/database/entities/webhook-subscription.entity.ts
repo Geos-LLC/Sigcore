@@ -34,6 +34,13 @@ export enum WebhookEventType {
   WHATSAPP_MESSAGE_OUTBOUND = 'whatsapp.message.outbound',
   WHATSAPP_MESSAGE_DELIVERED = 'whatsapp.message.delivered',
   WHATSAPP_STATUS_CHANGE = 'whatsapp.status.change',
+  // Telegram events (emitted by telegram-connector → Sigcore)
+  TELEGRAM_MESSAGE_INBOUND = 'telegram.message.inbound',
+  TELEGRAM_MESSAGE_SENT = 'telegram.message.sent',
+  TELEGRAM_MESSAGE_FAILED = 'telegram.message.failed',
+  TELEGRAM_CONVERSATION_UPDATED = 'telegram.conversation.updated',
+  TELEGRAM_ACCOUNT_CONNECTED = 'telegram.account.connected',
+  TELEGRAM_ACCOUNT_DISCONNECTED = 'telegram.account.disconnected',
 }
 
 export enum WebhookSubscriptionStatus {
