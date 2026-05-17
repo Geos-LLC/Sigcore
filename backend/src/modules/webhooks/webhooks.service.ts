@@ -838,6 +838,54 @@ export class WebhooksService {
     return statusMap[status || ''] || MessageStatus.PENDING;
   }
 
+  // ==================== TELEGRAM WEBHOOK HANDLER ====================
+
+  /**
+   * Receive a normalized inbound event from the Telegram connector service.
+   *
+   * The connector has already:
+   *   - decrypted credentials and validated tenant/account scope,
+   *   - normalized the Telegram update into the canonical inbound shape,
+   *   - deduped against prior deliveries.
+   *
+   * For Phase 2 we accept and log the event so downstream consumers can be
+   * wired against a working ingestion endpoint. Persistence (conversation /
+   * message rows backed by `ProviderType.TELEGRAM`) lands in a follow-up that
+   * extends entity schemas — keeping this PR's footprint focused on the
+   * connector boundary.
+   */
+  async handleTelegramWebhook(
+    eventType: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const tenantId = String((data as any)?.tenantId ?? '');
+    const accountId = String((data as any)?.accountId ?? '');
+    const externalConversationId = String((data as any)?.externalConversationId ?? '');
+    const externalMessageId = String((data as any)?.externalMessageId ?? '');
+
+    this.logger.log(
+      `[Telegram] ${eventType} tenant=${tenantId} account=${accountId} ` +
+        `conversation=${externalConversationId} message=${externalMessageId}`,
+    );
+
+    // Emit on the outbound webhook bus so subscribing products (TelePorter,
+    // LeadBridge) can consume the event today — they're the immediate
+    // downstream the issue calls out. Persistence is intentionally deferred.
+    try {
+      await this.outboundWebhooksService.emitEvent(
+        tenantId || 'unknown',
+        // Reuse the generic message-event shape; once Sigcore-side persistence
+        // is wired, swap to a Telegram-specific WebhookEventType.
+        WebhookEventType.WHATSAPP_STATUS_CHANGE,
+        { provider: 'telegram', eventType, ...data },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[Telegram] outbound webhook emit failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      );
+    }
+  }
+
   // ==================== WHATSAPP WEBHOOK HANDLER ====================
 
   async handleWhatsAppWebhook(

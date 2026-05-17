@@ -576,4 +576,47 @@ export class WebhooksController {
 
     return { received: true };
   }
+
+  // ==================== TELEGRAM WEBHOOKS ====================
+
+  /**
+   * Receive normalized inbound events from the Telegram connector service.
+   * Auth: x-webhook-key header must match SIGCORE_WEBHOOK_KEY env var.
+   *
+   * Payload shape (set by telegram-connector/sigcore-ingest.service.ts):
+   *   { eventType, provider: 'telegram', data: NormalizedInboundMessage, timestamp }
+   *
+   * `data.tenantId` is authoritative — the connector validates tenant/account
+   * scoping before forwarding. This endpoint is the seam where Sigcore takes
+   * ownership of the normalized event.
+   */
+  @Post('telegram/inbound')
+  @HttpCode(HttpStatus.OK)
+  async handleTelegramInbound(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() payload: {
+      eventType: string;
+      provider: 'telegram';
+      data: Record<string, unknown>;
+      timestamp: string;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid Telegram webhook key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+
+    const tenantId = (payload?.data as any)?.tenantId;
+    this.logger.log(
+      `Telegram webhook: ${payload?.eventType} for tenant ${tenantId ?? 'unknown'}`,
+    );
+
+    await this.webhooksService.handleTelegramWebhook(
+      payload.eventType,
+      payload.data,
+    );
+
+    return { received: true };
+  }
 }
