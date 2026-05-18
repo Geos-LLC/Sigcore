@@ -34,6 +34,11 @@ export enum WebhookEventType {
   WHATSAPP_MESSAGE_OUTBOUND = 'whatsapp.message.outbound',
   WHATSAPP_MESSAGE_DELIVERED = 'whatsapp.message.delivered',
   WHATSAPP_STATUS_CHANGE = 'whatsapp.status.change',
+  // Telegram events — reuse the same provider pattern as WhatsApp.
+  TELEGRAM_MESSAGE_INBOUND = 'telegram.message.inbound',
+  TELEGRAM_MESSAGE_OUTBOUND = 'telegram.message.outbound',
+  TELEGRAM_MESSAGE_DELIVERED = 'telegram.message.delivered',
+  TELEGRAM_STATUS_CHANGE = 'telegram.status.change',
 }
 
 export enum WebhookSubscriptionStatus {

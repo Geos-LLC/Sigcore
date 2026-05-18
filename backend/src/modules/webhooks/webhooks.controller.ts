@@ -576,4 +576,53 @@ export class WebhooksController {
 
     return { received: true };
   }
+
+  // ==================== GENERIC PROVIDER INGESTION ====================
+
+  /**
+   * Generic provider ingestion endpoint. Connector services (Telegram, future
+   * providers) call this with a normalized payload. Sigcore owns conversation/
+   * message persistence, identity mapping, and event fan-out — connectors do
+   * not call provider-specific Sigcore routes.
+   *
+   * Auth: x-webhook-key header must match SIGCORE_WEBHOOK_KEY env var.
+   *
+   * Payload shape mirrors the WhatsApp inbound contract so existing
+   * patterns are reused.
+   */
+  @Post('provider/inbound')
+  @HttpCode(HttpStatus.OK)
+  async handleProviderInbound(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() payload: {
+      provider: string;
+      workspaceId: string;
+      eventType: string;
+      data: Record<string, unknown>;
+      timestamp: string;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn(`Invalid webhook key on provider/inbound (provider=${payload?.provider})`);
+      throw new BadRequestException('Invalid webhook key');
+    }
+
+    if (!payload?.provider || !payload?.workspaceId || !payload?.eventType) {
+      throw new BadRequestException('provider, workspaceId, eventType are required');
+    }
+
+    this.logger.log(
+      `[provider/inbound] provider=${payload.provider} event=${payload.eventType} workspace=${payload.workspaceId}`,
+    );
+
+    await this.webhooksService.handleProviderInbound(
+      payload.provider,
+      payload.workspaceId,
+      payload.eventType,
+      payload.data,
+    );
+
+    return { received: true };
+  }
 }

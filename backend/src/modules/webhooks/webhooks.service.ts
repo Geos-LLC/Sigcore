@@ -1401,4 +1401,329 @@ export class WebhooksService {
     return statusMap[status || ''] || CallStatus.COMPLETED;
   }
 
+  // =========================================================================
+  // Generic provider ingestion dispatcher
+  //
+  // Connector services post normalized payloads to /webhooks/provider/inbound.
+  // Sigcore dispatches by provider and reuses the existing per-provider
+  // persistence code paths (no Telegram-specific storage tables).
+  // =========================================================================
+  async handleProviderInbound(
+    provider: string,
+    workspaceId: string,
+    eventType: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const p = (provider || '').toLowerCase();
+    switch (p) {
+      case 'telegram':
+        await this.handleTelegramWebhook(workspaceId, eventType, data);
+        return;
+      case 'whatsapp':
+        await this.handleWhatsAppWebhook(workspaceId, eventType, data);
+        return;
+      default:
+        this.logger.warn(`[provider/inbound] Unknown provider: ${provider}`);
+        return;
+    }
+  }
+
+  // =========================================================================
+  // Telegram inbound — reuses the OpenPhone/WhatsApp provider persistence
+  // model (CommunicationConversation + CommunicationMessage + WebhookEvent
+  // idempotency table). No Telegram-specific tables.
+  // =========================================================================
+  async handleTelegramWebhook(
+    workspaceId: string,
+    eventType: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    this.logger.log(`[Telegram] Processing ${eventType} for workspace ${workspaceId}`);
+
+    switch (eventType) {
+      case 'message_inbound':
+        await this.handleTelegramInboundMessage(workspaceId, data);
+        break;
+      case 'message_outbound':
+        // Sigcore already persisted the outbound message when it issued the
+        // send call; the connector's confirmation is informational.
+        this.logger.debug(`[Telegram] Outbound confirmed: ${data.externalMessageId}`);
+        break;
+      case 'message_ack':
+        await this.handleTelegramMessageAck(workspaceId, data);
+        break;
+      case 'status_change':
+        if (this.isTelegramEmissionEnabled()) {
+          await this.outboundWebhooksService.emitEvent(
+            workspaceId,
+            WebhookEventType.TELEGRAM_STATUS_CHANGE,
+            { workspaceId, provider: 'telegram', ...data },
+          );
+        }
+        break;
+      default:
+        this.logger.debug(`[Telegram] Unhandled event type: ${eventType}`);
+    }
+  }
+
+  /**
+   * Feature flag — gates Sigcore's outbound emission of telegram.* events.
+   *
+   * When TELEPORTER_SIGCORE_TELEGRAM_ENABLED is false (default), Sigcore still
+   * persists Telegram conversations/messages but does NOT fan out telegram.*
+   * webhook events. This keeps TelePorter on its direct GramJS path without
+   * receiving duplicate events from Sigcore.
+   *
+   * When true, TelePorter is expected to consume Telegram conversations from
+   * Sigcore. The flag is read on every event, so it can be flipped at runtime
+   * without a restart.
+   */
+  private isTelegramEmissionEnabled(): boolean {
+    const v = (process.env.TELEPORTER_SIGCORE_TELEGRAM_ENABLED || '').toLowerCase();
+    return v === 'true' || v === '1' || v === 'yes';
+  }
+
+  private async resolveTelegramTenantId(workspaceId: string): Promise<string | null> {
+    try {
+      const rows = await this.tenantIntegrationRepo.find({
+        where: { workspaceId, provider: ProviderType.TELEGRAM },
+      });
+      if (rows.length === 1) return rows[0].tenantId;
+      if (rows.length > 1) {
+        this.logger.warn(`[Telegram] Multiple tenant_integrations for workspace ${workspaceId}`);
+        return null;
+      }
+    } catch (e) {
+      this.logger.debug(`[Telegram] tenant_integrations lookup failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+    try {
+      const subs = await this.webhookSubscriptionRepo.find({
+        where: [
+          { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
+          { workspaceId, status: WebhookSubscriptionStatus.PAUSED },
+        ],
+      });
+      const tgSubs = subs.filter(s => (s.events || []).some(e => e.startsWith('telegram.')));
+      const tenantIds = Array.from(new Set(tgSubs.map(s => s.tenantId).filter(Boolean))) as string[];
+      if (tenantIds.length === 1) return tenantIds[0];
+    } catch (e) {
+      this.logger.debug(`[Telegram] subscription inference failed: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+    return null;
+  }
+
+  private async handleTelegramInboundMessage(
+    workspaceId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const externalMessageId = data.externalMessageId as string;
+    const externalConversationId = data.externalConversationId as string;
+    const text = (data.text as string) || '';
+    const direction = (data.direction as string) === 'out' ? MessageDirection.OUT : MessageDirection.IN;
+    const accountId = (data.accountId as string) || '';
+    const participantKey = (data.participantKey as string) || '';
+    const timestamp = data.timestamp ? new Date(data.timestamp as string) : new Date();
+
+    if (!externalConversationId) {
+      this.logger.warn('[Telegram] Missing externalConversationId — dropping event');
+      return;
+    }
+
+    // DB-backed idempotency. The IdempotencyService uses the shared
+    // `webhook_events` table keyed by (provider, externalId).
+    // This is the same table OpenPhone/Twilio/WhatsApp dedupe against.
+    const idemKey = externalMessageId || `${externalConversationId}:${timestamp.getTime()}`;
+    const isDup = await this.idempotencyService.isDuplicate('telegram', idemKey, {
+      eventType: 'message_inbound',
+      workspaceId,
+      payload: data,
+    });
+    if (isDup) {
+      this.logger.debug(`[Telegram] Dedup: ${idemKey} already processed`);
+      return;
+    }
+
+    const resolvedTenantId = await this.resolveTelegramTenantId(workspaceId);
+
+    // Find or create the conversation. Uses (workspaceId, externalId)
+    // uniqueness — same pattern as WhatsApp / OpenPhone.
+    let conversation = await this.conversationRepo.findOne({
+      where: {
+        workspaceId,
+        externalId: externalConversationId,
+        provider: ProviderType.TELEGRAM,
+      },
+    });
+
+    const providerMeta = (data.providerMetadata as Record<string, unknown>) || {};
+    const displayName = providerMeta.displayName as string | undefined;
+    const username = providerMeta.username as string | undefined;
+    const chatType = providerMeta.chatType as string | undefined;
+
+    if (!conversation) {
+      try {
+        conversation = this.conversationRepo.create({
+          workspaceId,
+          tenantId: resolvedTenantId,
+          externalId: externalConversationId,
+          provider: ProviderType.TELEGRAM,
+          channel: 'telegram' as any,
+          // Telegram doesn't have phone numbers; we put the chat id in
+          // phoneNumber to satisfy the column contract and store the rich
+          // metadata in `metadata` + `participantKey`.
+          phoneNumber: externalConversationId,
+          participantPhoneNumber: externalConversationId,
+          participantKey: participantKey || undefined,
+          externalChatId: externalConversationId,
+          metadata: {
+            externalChatId: externalConversationId,
+            accountId,
+            telegramChatId: providerMeta.telegramChatId,
+            telegramUserId: providerMeta.telegramUserId,
+            username,
+            displayName,
+            chatType,
+          },
+        });
+        await this.conversationRepo.save(conversation);
+        this.logger.log(`[Telegram] Created conversation ${conversation.id} chat=${externalConversationId} tenant=${resolvedTenantId || 'null'}`);
+      } catch (e: any) {
+        if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
+          conversation = await this.conversationRepo.findOne({
+            where: { workspaceId, externalId: externalConversationId, provider: ProviderType.TELEGRAM },
+          });
+          if (!conversation) return;
+        } else {
+          throw e;
+        }
+      }
+    } else if (resolvedTenantId && !conversation.tenantId) {
+      conversation.tenantId = resolvedTenantId;
+      await this.conversationRepo.save(conversation);
+    }
+
+    const messageProviderId = externalMessageId || `tg_${externalConversationId}_${timestamp.getTime()}`;
+    try {
+      const message = this.messageRepo.create({
+        conversationId: conversation.id,
+        direction,
+        channel: 'telegram' as any,
+        body: text,
+        fromNumber: direction === MessageDirection.IN ? externalConversationId : (accountId || 'self'),
+        toNumber: direction === MessageDirection.IN ? (accountId || 'self') : externalConversationId,
+        providerMessageId: messageProviderId,
+        status: direction === MessageDirection.OUT ? MessageStatus.SENT : MessageStatus.DELIVERED,
+        metadata: {
+          provider: 'telegram',
+          accountId,
+          telegramChatId: providerMeta.telegramChatId,
+          telegramUserId: providerMeta.telegramUserId,
+          chatType,
+          messageType: data.messageType || 'text',
+          username,
+          displayName,
+        } as Record<string, unknown>,
+      });
+      await this.messageRepo.save(message);
+
+      // Preserve original Telegram timestamp.
+      if (timestamp && !isNaN(timestamp.getTime())) {
+        await this.messageRepo.createQueryBuilder()
+          .update()
+          .set({ createdAt: timestamp } as any)
+          .where('id = :id', { id: message.id })
+          .execute();
+        message.createdAt = timestamp;
+      }
+
+      this.eventsGateway.emitNewMessage(workspaceId, {
+        conversationId: conversation.id,
+        message: {
+          id: message.id,
+          direction: message.direction,
+          body: message.body,
+          fromNumber: message.fromNumber,
+          toNumber: message.toNumber,
+          createdAt: message.createdAt,
+          channel: 'telegram',
+          provider: 'telegram',
+        },
+      });
+
+      // Outbound webhook fan-out is GATED by the TelePorter feature flag.
+      // While TelePorter is on its direct GramJS path, Sigcore should not
+      // emit telegram.* events. Conversations/messages still persist.
+      if (this.isTelegramEmissionEnabled()) {
+        await this.outboundWebhooksService.emitEvent(
+          workspaceId,
+          WebhookEventType.TELEGRAM_MESSAGE_INBOUND,
+          {
+            provider: 'telegram',
+            tenantId: resolvedTenantId || undefined,
+            conversation: {
+              id: conversation.id,
+              externalChatId: externalConversationId,
+              participantKey,
+              accountId,
+              chatType,
+              displayName,
+              username,
+            },
+            message: {
+              id: message.id,
+              externalMessageId,
+              text,
+              body: text,
+              direction: direction === MessageDirection.IN ? 'in' : 'out',
+              timestamp: timestamp.toISOString(),
+              messageType: data.messageType || 'text',
+            },
+          },
+          { tenantId: resolvedTenantId || undefined },
+        );
+      } else {
+        this.logger.debug(
+          `[Telegram] Skipping outbound emission — TELEPORTER_SIGCORE_TELEGRAM_ENABLED is false`,
+        );
+      }
+    } catch (e: any) {
+      if (e.code === '23505' || e.message?.includes('duplicate') || e.message?.includes('unique')) {
+        this.logger.debug(`[Telegram] Dedup (insert race): ${messageProviderId}`);
+        return;
+      }
+      throw e;
+    }
+  }
+
+  private async handleTelegramMessageAck(
+    workspaceId: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const externalMessageId = data.externalMessageId as string;
+    const status = data.status as string;
+    if (!externalMessageId) return;
+
+    const message = await this.messageRepo.findOne({
+      where: { providerMessageId: externalMessageId },
+    });
+    if (!message) return;
+
+    const newStatus = status === 'delivered' ? MessageStatus.DELIVERED
+      : status === 'read' ? MessageStatus.DELIVERED
+      : status === 'failed' ? MessageStatus.FAILED
+      : message.status;
+
+    if (newStatus !== message.status) {
+      message.status = newStatus;
+      await this.messageRepo.save(message);
+    }
+
+    if (this.isTelegramEmissionEnabled()) {
+      await this.outboundWebhooksService.emitEvent(
+        workspaceId,
+        WebhookEventType.TELEGRAM_MESSAGE_DELIVERED,
+        { provider: 'telegram', messageId: message.id, externalMessageId, status },
+      );
+    }
+  }
 }
