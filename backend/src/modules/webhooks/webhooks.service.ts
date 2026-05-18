@@ -878,6 +878,107 @@ export class WebhooksService {
     }
   }
 
+  // ===== Telegram (issue #1) =========================================
+  /**
+   * Telegram connector → Sigcore.
+   *
+   * Sigcore owns conversations/identities/messages.  This handler is the
+   * landing pad — it currently logs the inbound event and fans it onto the
+   * outbound webhook bus so TelePorter / LeadBridge can consume.  Extending
+   * `CommunicationConversation` / `CommunicationMessage` schemas to persist
+   * Telegram rows is a focused follow-up (see issue rollout, Phase 2 close).
+   *
+   * The connector does *not* migrate TelePorter's MTProto sessions; gate is
+   * `TELEPORTER_SIGCORE_TELEGRAM_ENABLED` on the TelePorter side.  See issue
+   * #1 ("MUST NOT migrate existing Telegram sessions into Sigcore core").
+   */
+  async handleTelegramInbound(payload: {
+    tenantId: string;
+    provider: 'telegram';
+    accountId: string;
+    message: Record<string, unknown>;
+  }): Promise<void> {
+    if (!payload?.tenantId || !payload?.accountId || !payload?.message) {
+      this.logger.warn('[Telegram] invalid inbound payload');
+      return;
+    }
+    this.logger.log(
+      `[Telegram] inbound message tenant=${payload.tenantId} account=${payload.accountId} ` +
+        `extId=${(payload.message as Record<string, unknown>).externalMessageId}`,
+    );
+
+    // Find the workspace this tenant belongs to so existing fan-out can
+    // dispatch to subscriptions.  When no workspace mapping exists we still
+    // log; downstream wiring (LeadBridge etc.) operates by tenantId.
+    const workspaceId = await this.resolveTelegramWorkspaceId(payload.tenantId);
+
+    if (workspaceId) {
+      await this.outboundWebhooksService.emitEvent(
+        workspaceId,
+        WebhookEventType.TELEGRAM_MESSAGE_RECEIVED,
+        {
+          tenantId: payload.tenantId,
+          provider: 'telegram',
+          accountId: payload.accountId,
+          message: payload.message,
+        },
+        { tenantId: payload.tenantId },
+      );
+    }
+  }
+
+  async handleTelegramProviderEvent(event: {
+    eventType: string;
+    tenantId: string;
+    accountId: string;
+    occurredAt: string;
+    data: Record<string, unknown>;
+  }): Promise<void> {
+    if (!event?.tenantId || !event?.accountId) return;
+    const map: Record<string, WebhookEventType> = {
+      'provider.account.connected': WebhookEventType.TELEGRAM_ACCOUNT_CONNECTED,
+      'provider.account.disconnected': WebhookEventType.TELEGRAM_ACCOUNT_DISCONNECTED,
+      'message.received': WebhookEventType.TELEGRAM_MESSAGE_RECEIVED,
+      'message.sent': WebhookEventType.TELEGRAM_MESSAGE_SENT,
+      'message.failed': WebhookEventType.TELEGRAM_MESSAGE_FAILED,
+      'conversation.updated': WebhookEventType.TELEGRAM_CONVERSATION_UPDATED,
+    };
+    const mapped = map[event.eventType];
+    if (!mapped) {
+      this.logger.debug(`[Telegram] unhandled provider event ${event.eventType}`);
+      return;
+    }
+
+    const workspaceId = await this.resolveTelegramWorkspaceId(event.tenantId);
+    if (!workspaceId) return;
+
+    await this.outboundWebhooksService.emitEvent(
+      workspaceId,
+      mapped,
+      {
+        tenantId: event.tenantId,
+        provider: 'telegram',
+        accountId: event.accountId,
+        occurredAt: event.occurredAt,
+        ...event.data,
+      },
+      { tenantId: event.tenantId },
+    );
+  }
+
+  private async resolveTelegramWorkspaceId(tenantId: string): Promise<string | undefined> {
+    if (!tenantId) return undefined;
+    try {
+      const tenant = await this.conversationRepo.manager
+        .getRepository('Tenant')
+        .findOne({ where: { id: tenantId } }) as { workspaceId?: string } | null;
+      return tenant?.workspaceId;
+    } catch (e) {
+      this.logger.debug(`[Telegram] tenant lookup failed: ${e instanceof Error ? e.message : 'unknown'}`);
+      return undefined;
+    }
+  }
+
   /**
    * Delete all WhatsApp conversations + messages for a workspace.
    * Called on reconnect so fresh sync replaces stale data.

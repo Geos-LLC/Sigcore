@@ -576,4 +576,58 @@ export class WebhooksController {
 
     return { received: true };
   }
+
+  // ==================== TELEGRAM WEBHOOKS ====================
+
+  /**
+   * Receive inbound normalized messages from the Telegram connector service.
+   * Auth: `x-webhook-key` header must match `SIGCORE_WEBHOOK_KEY`.
+   *
+   * Telegram MTProto sessions stay in TelePorter; this endpoint accepts only
+   * what the connector has already normalized (no raw GramJS payloads).
+   */
+  @Post('telegram/inbound')
+  @HttpCode(HttpStatus.OK)
+  async handleTelegramInbound(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() payload: {
+      tenantId: string;
+      provider: 'telegram';
+      accountId: string;
+      message: Record<string, unknown>;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid Telegram webhook key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+    await this.webhooksService.handleTelegramInbound(payload);
+    return { received: true };
+  }
+
+  /**
+   * Receive provider-lifecycle events (account.connected/disconnected,
+   * message.sent/failed, conversation.updated) from the Telegram connector.
+   */
+  @Post('telegram/provider-events')
+  @HttpCode(HttpStatus.OK)
+  async handleTelegramProviderEvents(
+    @Headers('x-webhook-key') webhookKey: string,
+    @Body() event: {
+      eventType: string;
+      tenantId: string;
+      accountId: string;
+      occurredAt: string;
+      data: Record<string, unknown>;
+    },
+  ) {
+    const expectedKey = process.env.SIGCORE_WEBHOOK_KEY;
+    if (expectedKey && webhookKey !== expectedKey) {
+      this.logger.warn('Invalid Telegram provider-events webhook key');
+      throw new BadRequestException('Invalid webhook key');
+    }
+    await this.webhooksService.handleTelegramProviderEvent(event);
+    return { received: true };
+  }
 }

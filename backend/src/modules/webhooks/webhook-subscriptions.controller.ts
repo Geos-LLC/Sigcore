@@ -236,6 +236,12 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.WHATSAPP_MESSAGE_OUTBOUND]: 'Triggered when an outbound WhatsApp message is sent',
       [WebhookEventType.WHATSAPP_MESSAGE_DELIVERED]: 'Triggered when a WhatsApp message is delivered/read',
       [WebhookEventType.WHATSAPP_STATUS_CHANGE]: 'Triggered when WhatsApp connection status changes',
+      [WebhookEventType.TELEGRAM_MESSAGE_RECEIVED]: 'Triggered when an inbound Telegram message is received from the connector',
+      [WebhookEventType.TELEGRAM_MESSAGE_SENT]: 'Triggered when an outbound Telegram message is sent through the connector',
+      [WebhookEventType.TELEGRAM_MESSAGE_FAILED]: 'Triggered when a Telegram message fails to deliver',
+      [WebhookEventType.TELEGRAM_CONVERSATION_UPDATED]: 'Triggered when a Telegram conversation is updated',
+      [WebhookEventType.TELEGRAM_ACCOUNT_CONNECTED]: 'Triggered when a Telegram account connects',
+      [WebhookEventType.TELEGRAM_ACCOUNT_DISCONNECTED]: 'Triggered when a Telegram account disconnects',
     };
     return descriptions[event] || 'No description available';
   }
