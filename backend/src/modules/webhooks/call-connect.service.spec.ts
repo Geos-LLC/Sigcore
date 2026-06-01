@@ -6,6 +6,11 @@ import {
   CallerIdStrategy,
   AgentVoicemailMode,
 } from '../../database/entities/call-connect-settings.entity';
+import {
+  CallConnectSession,
+  SessionStatus,
+  CallConnectProvider,
+} from '../../database/entities/call-connect-session.entity';
 
 // ---------------------------------------------------------------------------
 // Helpers: build mock repositories & services
@@ -44,7 +49,7 @@ function buildService(settingsRepo = buildSettingsRepo()) {
     config as any,
   );
 
-  return { service, settingsRepo, tenantPhoneRepo };
+  return { service, settingsRepo, sessionRepo, tenantPhoneRepo };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,5 +252,112 @@ describe('CallConnectService – upsertSettings', () => {
 
       expect(settingsRepo.find).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent TwiML rendering — Fix A: per-session whisper must override workspace
+// settings, so cross-tenant sessions on a shared bot number render the same
+// substituted whisper LB sent in /call-connect/start regardless of which
+// tenant owns the settings row.
+// ---------------------------------------------------------------------------
+function makeSession(overrides: Partial<CallConnectSession> = {}): CallConnectSession {
+  return {
+    id: 'session-1',
+    businessId: WORKSPACE_ID,
+    tenantId: null as any,
+    leadId: 'lead-1',
+    leadPhoneE164: '+15551234567',
+    leadSummary: 'Ed R. — Regular home cleaning — Jacksonville',
+    agentId: null as any,
+    agentPhoneE164: AGENT_PHONE,
+    mode: CallConnectMode.AGENT_FIRST,
+    status: SessionStatus.CREATED,
+    provider: CallConnectProvider.TWILIO,
+    fromNumberE164: BOT_NUMBER,
+    agentCallSid: null as any,
+    leadCallSid: null as any,
+    conferenceName: 'cc_session-1',
+    attempt: 1,
+    failureReason: null as any,
+    recordingUrl: null as any,
+    agentWhisperMessage: null as any,
+    leadGreetingMessage: null as any,
+    leadVoicemailMessage: null as any,
+    sigcoreConversationId: null as any,
+    recordAgentLeg: false,
+    timeline: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  };
+}
+
+describe('CallConnectService – handleAgentTwiml whisper precedence', () => {
+  it('uses session.agentWhisperMessage when present (per-session wins over settings)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    const perSessionWhisper =
+      'You have a new lead for Regular home cleaning. Customer name: Ed R.. Press any key to connect.';
+    sessionRepo.findOne.mockResolvedValue(makeSession({ agentWhisperMessage: perSessionWhisper }));
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentWhisperMessage: 'WORKSPACE TEMPLATE THAT SHOULD NOT BE USED' }),
+    );
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).toContain(perSessionWhisper);
+    expect(twiml).not.toContain('WORKSPACE TEMPLATE THAT SHOULD NOT BE USED');
+    // Gather must wrap the whisper so DTMF pressed during playback is captured.
+    expect(twiml).toMatch(/<Gather[^>]*>[\s\S]*Press any key to connect\.[\s\S]*<\/Gather>/);
+  });
+
+  it('falls back to settings.agentWhisperMessage when session field is null (no LB override)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(makeSession({ agentWhisperMessage: null as any }));
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentWhisperMessage: 'Workspace whisper for {customerName}.' }),
+    );
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    // {customerName} substituted from leadSummary "Ed R. — Regular home cleaning — Jacksonville"
+    expect(twiml).toContain('Workspace whisper for Ed R..');
+  });
+
+  it('falls back to the built-in default when neither session nor settings have a whisper', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(makeSession({ agentWhisperMessage: null as any }));
+    settingsRepo.findOne.mockResolvedValue(makeSettings({ agentWhisperMessage: null as any }));
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    // Default template: "New lead for {category}. Customer: {customerName}. Press {digit} to connect."
+    expect(twiml).toContain('Regular home cleaning');
+    expect(twiml).toContain('Ed R.');
+    expect(twiml).toContain('to connect');
+  });
+
+  it('renders gather + hangup TwiML even when settings row is missing entirely (cross-tenant shared-phone path)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    const perSessionWhisper = 'Press any key to connect.';
+    sessionRepo.findOne.mockResolvedValue(makeSession({ agentWhisperMessage: perSessionWhisper }));
+    // Simulates the Yelp-JAX scenario: agent TwiML lookup keys by session.businessId
+    // (= workspaceId), and that row may not exist when settings were configured per-account.
+    settingsRepo.findOne.mockResolvedValue(null);
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).toContain(perSessionWhisper);
+    // Default acceptDigits='0123456789' (length>3) → "any key"
+    expect(twiml).toContain('Press any key to connect.');
+    expect(twiml).toContain('<Hangup');
+  });
+
+  it('returns hangup TwiML when session is not found', async () => {
+    const { service, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(null);
+
+    const twiml = await service.handleAgentTwiml('missing-session');
+    expect(twiml).toContain('<Hangup');
   });
 });

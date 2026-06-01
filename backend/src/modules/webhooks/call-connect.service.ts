@@ -256,7 +256,7 @@ export class CallConnectService {
     await this.sessionRepo.save(session);
 
     this.logger.log(
-      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode} recordAgentLeg=${session.recordAgentLeg}`,
+      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode} recordAgentLeg=${session.recordAgentLeg} perSessionWhisper=${session.agentWhisperMessage ? 'yes' : 'no'} perSessionGreeting=${session.leadGreetingMessage ? 'yes' : 'no'} perSessionVoicemail=${session.leadVoicemailMessage ? 'yes' : 'no'}`,
     );
 
     // 6. Emit session.created event to LeadBridge
@@ -336,11 +336,19 @@ export class CallConnectService {
       // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
       const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
       // Per-session whisper (pre-built by caller) takes priority over settings template
+      const whisperSource: 'session' | 'settings' | 'default' = session.agentWhisperMessage
+        ? 'session'
+        : settings?.agentWhisperMessage
+          ? 'settings'
+          : 'default';
       const template =
         session.agentWhisperMessage ||
         settings?.agentWhisperMessage ||
         'New lead for {category}. Customer: {customerName}. Press {digit} to connect.';
       const whisper = this.substituteTemplateVars(template, session, { digit: digitHint });
+      this.logger.log(
+        `[agent-twiml] session=${sessionId} business=${session.businessId} settingsFound=${!!settings} whisperSource=${whisperSource} whisperLen=${whisper.length}`,
+      );
 
       // 15s is plenty after the whisper; fast-answer detection in handleProviderCallStatus
       // already short-circuits voicemail calls before this TwiML runs.
