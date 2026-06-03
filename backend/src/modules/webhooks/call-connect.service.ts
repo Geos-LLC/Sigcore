@@ -390,7 +390,11 @@ export class CallConnectService {
       );
     }
 
-    return response.toString();
+    const body = response.toString();
+    this.logger.log(
+      `[agent-twiml-body] session=${sessionId} body=${body.length > 1000 ? body.slice(0, 1000) + '…[truncated]' : body}`,
+    );
+    return body;
   }
 
   /**
@@ -1302,7 +1306,7 @@ export class CallConnectService {
       agentCallSid: call.sid,
     });
 
-    this.logger.log(`Agent call initiated: ${call.sid}`);
+    this.logger.log(`[agent-call-sid] session=${session.id} agentCallSid=${call.sid}`);
   }
 
   private async startParallelMode(
@@ -1358,7 +1362,7 @@ export class CallConnectService {
     });
 
     this.logger.log(
-      `Parallel calls initiated: agent=${agentCall.sid}, lead=${leadCall.sid}`,
+      `[agent-call-sid] session=${session.id} agentCallSid=${agentCall.sid} leadCallSid=${leadCall.sid}`,
     );
   }
 
