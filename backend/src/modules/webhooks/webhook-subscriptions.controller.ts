@@ -21,7 +21,7 @@ import {
   WebhookEventType,
   WebhookSubscriptionStatus,
 } from '../../database/entities/webhook-subscription.entity';
-import { IsString, IsUrl, IsArray, IsEnum, IsOptional, IsObject } from 'class-validator';
+import { IsString, IsUrl, IsArray, IsEnum, IsOptional, IsObject, IsIn } from 'class-validator';
 
 class CreateWebhookSubscriptionDto {
   @IsString()
@@ -41,6 +41,15 @@ class CreateWebhookSubscriptionDto {
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  /**
+   * Payload contract version. Omit to get the current default for new
+   * subscriptions (`v2`, nested `data.metadata`). Pass `'v1'` only if
+   * the consumer has a pre-2026-06 verifier that reads spread fields.
+   */
+  @IsIn(['v1', 'v2'])
+  @IsOptional()
+  payloadVersion?: 'v1' | 'v2';
 }
 
 class UpdateWebhookSubscriptionDto {
@@ -68,6 +77,16 @@ class UpdateWebhookSubscriptionDto {
   @IsObject()
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  /**
+   * Flip the payload contract version. The documented migration path:
+   * consumer updates its verifier to handle the v2 nested-metadata
+   * shape, then PATCHes `payloadVersion: 'v2'` here to switch over.
+   * Effect is immediate on the next emitted event.
+   */
+  @IsIn(['v1', 'v2'])
+  @IsOptional()
+  payloadVersion?: 'v1' | 'v2';
 }
 
 /**

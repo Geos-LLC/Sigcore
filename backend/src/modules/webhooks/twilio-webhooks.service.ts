@@ -509,11 +509,19 @@ export class TwilioWebhooksService {
     // Emit webhook event to subscriptions (fire and forget)
     // Resolve tenantId from the message's fromNumber (our number for outbound status updates)
     if (this.outboundWebhooksService && message.conversation) {
+      // Twilio status callback statuses we fan out:
+      //   delivered  → MESSAGE_DELIVERED
+      //   failed/undelivered → MESSAGE_FAILED (mapMessageStatus collapses both)
+      //   sent (carrier-handoff confirmation, pre-delivery) → MESSAGE_SENT
+      // Statuses we don't fan out: PENDING (queued/sending — too noisy,
+      // most subscribers don't care about pre-Twilio states).
       const eventType = message.status === MessageStatus.DELIVERED
         ? WebhookEventType.MESSAGE_DELIVERED
         : message.status === MessageStatus.FAILED
           ? WebhookEventType.MESSAGE_FAILED
-          : null;
+          : message.status === MessageStatus.SENT
+            ? WebhookEventType.MESSAGE_SENT
+            : null;
 
       if (eventType) {
         let statusTenantId: string | undefined;
