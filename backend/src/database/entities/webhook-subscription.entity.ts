@@ -66,6 +66,23 @@ export class WebhookSubscription {
   @Column({ name: 'secret', type: 'text', nullable: true })
   secret?: string;
 
+  /**
+   * Payload contract version.
+   *
+   * - `v1` spreads `message.metadata` flat into `data` (the original
+   *   SF/LB/Callio/HireFunnel-pre-2026-06 shape). Existing rows are
+   *   backfilled to `v1` by migration `1765000000000` so behavior is
+   *   byte-identical to before this column existed.
+   * - `v2` nests it under `data.metadata`. New subscriptions default
+   *   to `v2` at the service layer (see `createSubscription`).
+   *
+   * The `deliveredAt` / `failedAt` / `sentAt` timestamp aliases are
+   * additive in BOTH versions — v1 subscribers gain the new fields
+   * without losing any existing field.
+   */
+  @Column({ name: 'payload_version', type: 'varchar', length: 8, default: 'v1' })
+  payloadVersion: 'v1' | 'v2';
+
   @Column({ type: 'simple-array' })
   events: WebhookEventType[];
 

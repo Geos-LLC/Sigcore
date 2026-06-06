@@ -57,39 +57,13 @@ export class OutboundWebhooksService {
     const scope: { tenantId?: string; businessId?: string; profileId?: string } =
       typeof scopeArg === 'string' ? { tenantId: scopeArg } : scopeArg ?? {};
 
-    const subscriptions = await this.subscriptionRepo.find({
-      where: [
-        { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
-        { workspaceId, status: WebhookSubscriptionStatus.PAUSED },
-      ],
-    });
-
-    // Filter to only subscriptions that listen for this event.
-    let relevantSubscriptions = subscriptions.filter((sub) =>
-      sub.events.includes(eventType),
+    const matching = await this.loadMatchingSubscriptions(
+      workspaceId,
+      eventType,
+      scope,
     );
 
-    // Per-sub scope match (additive — narrowest scope wins per sub, but
-    // multiple subs at different scopes can all match the same event).
-    relevantSubscriptions = relevantSubscriptions.filter((sub) => {
-      if (sub.communicationProfileId) {
-        return (
-          !!scope.profileId && scope.profileId === sub.communicationProfileId
-        );
-      }
-      if (sub.communicationBusinessId) {
-        return (
-          !!scope.businessId && scope.businessId === sub.communicationBusinessId
-        );
-      }
-      if (sub.tenantId) {
-        return !!scope.tenantId && scope.tenantId === sub.tenantId;
-      }
-      // workspace-scoped sub: fires for every event in this workspace.
-      return true;
-    });
-
-    if (relevantSubscriptions.length === 0) {
+    if (matching.length === 0) {
       this.logger.debug(
         `No matching subscriptions for event ${eventType} in workspace ${workspaceId} (scope=${JSON.stringify(
           scope,
@@ -98,9 +72,9 @@ export class OutboundWebhooksService {
       return;
     }
 
-    if (relevantSubscriptions.length > 1) {
+    if (matching.length > 1) {
       this.logger.log(
-        `[emitEvent] ${relevantSubscriptions.length} subscriptions matched ` +
+        `[emitEvent] ${matching.length} subscriptions matched ` +
           `(event=${eventType} workspace=${workspaceId} scope=${JSON.stringify(scope)})`,
       );
     }
@@ -111,17 +85,38 @@ export class OutboundWebhooksService {
       data,
     };
 
-    // Send to all subscriptions in parallel (fire and forget for performance)
+    // emitEvent is the static-payload dispatcher (no per-sub shape
+    // variance). Non-message event types — call.*, call_connect.*,
+    // whatsapp.status.change, etc. — are unversioned today. If we ever
+    // need versioned payloads for them, mirror the per-sub dispatch
+    // pattern from emitMessageEvent below.
     await Promise.allSettled(
-      relevantSubscriptions.map((sub) => this.sendWebhook(sub, payload)),
+      matching.map((sub) => this.sendWebhook(sub, payload)),
     );
   }
 
   /**
-   * Emit message event. The 5th arg accepts either a tenantId string
-   * (legacy callers) or a `{ tenantId, businessId, profileId }` scope
-   * object so callers wired through the routing resolver can fan out
-   * additively across all matching scopes.
+   * Emit message event with per-subscription payload versioning.
+   *
+   * Each matching subscription receives a payload shaped to its
+   * `payloadVersion` column:
+   *
+   *   - v1 (existing SF / LeadBridge / Callio / HireFunnel contract):
+   *       `message.metadata` is SPREAD flat into `data` — preserves the
+   *       shape every consumer wired before 2026-06-05 already expects.
+   *
+   *   - v2 (new tenants from 2026-06 forward): `message.metadata` is
+   *       NESTED under `data.metadata` — cleaner contract, no key
+   *       collisions between provider fields and consumer metadata.
+   *
+   * The `deliveredAt` / `failedAt` / `sentAt` aliases are ADDITIVE in
+   * both versions. v1 consumers don't read those keys today, so adding
+   * them is byte-safe for the byte-pin contract.
+   *
+   * The 5th arg accepts either a tenantId string (legacy callers) or a
+   * `{ tenantId, businessId, profileId }` scope object so callers
+   * wired through the routing resolver can fan out additively across
+   * all matching scopes.
    */
   async emitMessageEvent(
     workspaceId: string,
@@ -135,7 +130,107 @@ export class OutboundWebhooksService {
     const scope: { tenantId?: string; businessId?: string; profileId?: string } =
       typeof scopeArg === 'string' ? { tenantId: scopeArg } : scopeArg ?? {};
 
-    const data = {
+    const matching = await this.loadMatchingSubscriptions(
+      workspaceId,
+      eventType,
+      scope,
+    );
+
+    if (matching.length === 0) {
+      this.logger.debug(
+        `No matching subscriptions for event ${eventType} in workspace ${workspaceId} (scope=${JSON.stringify(
+          scope,
+        )})`,
+      );
+      return;
+    }
+
+    if (matching.length > 1) {
+      this.logger.log(
+        `[emitMessageEvent] ${matching.length} subscriptions matched ` +
+          `(event=${eventType} workspace=${workspaceId} scope=${JSON.stringify(scope)})`,
+      );
+    }
+
+    // Build both shapes once; dispatch picks per-sub.
+    const v1Data = this.buildMessageDataV1(
+      message,
+      additionalData,
+      scope,
+      eventType,
+    );
+    const v2Data = this.buildMessageDataV2(
+      message,
+      additionalData,
+      scope,
+      eventType,
+    );
+    const timestamp = new Date().toISOString();
+
+    await Promise.allSettled(
+      matching.map((sub) => {
+        const data = sub.payloadVersion === 'v2' ? v2Data : v1Data;
+        const payload: WebhookPayload = { event: eventType, timestamp, data };
+        return this.sendWebhook(sub, payload);
+      }),
+    );
+  }
+
+  /**
+   * Load active + paused subs in this workspace that listen for
+   * `eventType` and whose narrowest scope matches `scope`. Extracted so
+   * `emitEvent` and `emitMessageEvent` share one implementation of the
+   * filtering rules (Issue #114 + additive fan-out, decision #4/#10).
+   */
+  private async loadMatchingSubscriptions(
+    workspaceId: string,
+    eventType: WebhookEventType,
+    scope: { tenantId?: string; businessId?: string; profileId?: string },
+  ): Promise<WebhookSubscription[]> {
+    const subscriptions = await this.subscriptionRepo.find({
+      where: [
+        { workspaceId, status: WebhookSubscriptionStatus.ACTIVE },
+        { workspaceId, status: WebhookSubscriptionStatus.PAUSED },
+      ],
+    });
+
+    return subscriptions
+      .filter((sub) => sub.events.includes(eventType))
+      .filter((sub) => {
+        if (sub.communicationProfileId) {
+          return (
+            !!scope.profileId &&
+            scope.profileId === sub.communicationProfileId
+          );
+        }
+        if (sub.communicationBusinessId) {
+          return (
+            !!scope.businessId &&
+            scope.businessId === sub.communicationBusinessId
+          );
+        }
+        if (sub.tenantId) {
+          return !!scope.tenantId && scope.tenantId === sub.tenantId;
+        }
+        return true;
+      });
+  }
+
+  /**
+   * v1 message-event data shape. Locked — `outbound-webhooks.versioning.spec.ts`
+   * byte-pins this output against the pre-2026-06-05 contract so any
+   * SF/LeadBridge/Callio/HireFunnel consumer keeps working.
+   *
+   * Aliases (deliveredAt/failedAt/sentAt) are emitted in v1 too because
+   * they're purely additive keys; nothing existing reads them.
+   */
+  private buildMessageDataV1(
+    message: CommunicationMessage,
+    additionalData: Record<string, unknown> | undefined,
+    scope: { tenantId?: string; businessId?: string; profileId?: string },
+    eventType: WebhookEventType,
+  ): Record<string, unknown> {
+    return {
       messageId: message.id,
       conversationId: message.conversationId,
       direction: message.direction,
@@ -146,17 +241,66 @@ export class OutboundWebhooksService {
       status: message.status,
       providerMessageId: message.providerMessageId,
       createdAt: message.createdAt,
-      // Include metadata (contains tenantId, leadId from LeadBridge)
+      // v1: spread metadata flat into data — load-bearing for every
+      // existing consumer. DO NOT CHANGE this ordering or nesting.
       ...(message.metadata || {}),
       ...(additionalData || {}),
-      // Surface the resolved scope on the wire so subscribers can route
-      // by profile/business without needing a separate lookup.
+      ...this.timestampAliases(eventType),
       ...(scope.tenantId && { tenantId: scope.tenantId }),
       ...(scope.businessId && { communicationBusinessId: scope.businessId }),
       ...(scope.profileId && { communicationProfileId: scope.profileId }),
     };
+  }
 
-    await this.emitEvent(workspaceId, eventType, data, scope);
+  /**
+   * v2 message-event data shape. Nested `metadata`, no spread. Used by
+   * subscriptions explicitly opted into v2 (HireFunnel and every
+   * tenant onboarded from 2026-06 onward by default).
+   */
+  private buildMessageDataV2(
+    message: CommunicationMessage,
+    additionalData: Record<string, unknown> | undefined,
+    scope: { tenantId?: string; businessId?: string; profileId?: string },
+    eventType: WebhookEventType,
+  ): Record<string, unknown> {
+    return {
+      messageId: message.id,
+      conversationId: message.conversationId,
+      direction: message.direction,
+      channel: message.channel,
+      body: message.body,
+      fromNumber: message.fromNumber,
+      toNumber: message.toNumber,
+      status: message.status,
+      providerMessageId: message.providerMessageId,
+      createdAt: message.createdAt,
+      metadata: message.metadata ?? {},
+      ...(additionalData || {}),
+      ...this.timestampAliases(eventType),
+      ...(scope.tenantId && { tenantId: scope.tenantId }),
+      ...(scope.businessId && { communicationBusinessId: scope.businessId }),
+      ...(scope.profileId && { communicationProfileId: scope.profileId }),
+    };
+  }
+
+  /**
+   * Status-specific timestamp aliases. Only emitted on the matching
+   * event type, dispatch-time stamped so the receiver sees when the
+   * status transition was observed (not when Twilio's callback hit
+   * Sigcore — close enough in practice).
+   */
+  private timestampAliases(eventType: WebhookEventType): Record<string, string> {
+    const now = new Date().toISOString();
+    if (eventType === WebhookEventType.MESSAGE_DELIVERED) {
+      return { deliveredAt: now };
+    }
+    if (eventType === WebhookEventType.MESSAGE_FAILED) {
+      return { failedAt: now };
+    }
+    if (eventType === WebhookEventType.MESSAGE_SENT) {
+      return { sentAt: now };
+    }
+    return {};
   }
 
   /**
@@ -252,8 +396,16 @@ export class OutboundWebhooksService {
 
   /**
    * Create a webhook subscription.
-   * Upserts by (workspaceId, webhookUrl) — if a subscription for this URL already
-   * exists in the workspace, it is updated in-place rather than creating a duplicate.
+   *
+   * Upserts by (workspaceId, webhookUrl) — if a subscription for this
+   * URL already exists in the workspace, it is updated in-place rather
+   * than creating a duplicate.
+   *
+   * `payloadVersion` defaults to `'v2'` for NEW subscriptions (clean
+   * nested-metadata contract). Upserts preserve the existing row's
+   * `payloadVersion` unless the caller explicitly passes one — so a
+   * pre-existing v1 subscription isn't silently upgraded when its
+   * owner PATCHes events or secret.
    */
   async createSubscription(
     workspaceId: string,
@@ -263,6 +415,7 @@ export class OutboundWebhooksService {
       secret?: string;
       events: WebhookEventType[];
       metadata?: Record<string, unknown>;
+      payloadVersion?: 'v1' | 'v2';
     },
     tenantId?: string,
   ): Promise<WebhookSubscription> {
@@ -271,13 +424,16 @@ export class OutboundWebhooksService {
     });
 
     if (existing) {
-      // Upsert: update the existing subscription instead of creating a duplicate
+      // Upsert: update in place. Only touch payloadVersion when the
+      // caller explicitly passed one — silent upgrades would re-break
+      // consumers whose verifier is tied to the v1 shape.
       await this.subscriptionRepo.update(existing.id, {
         name: data.name,
         secret: data.secret,
         events: data.events,
         metadata: data.metadata,
         ...(tenantId && { tenantId }),
+        ...(data.payloadVersion && { payloadVersion: data.payloadVersion }),
         status: WebhookSubscriptionStatus.ACTIVE,
         failureCount: 0,
       } as any);
@@ -291,11 +447,14 @@ export class OutboundWebhooksService {
       workspaceId,
       ...data,
       ...(tenantId && { tenantId }),
+      payloadVersion: data.payloadVersion ?? 'v2',
       status: WebhookSubscriptionStatus.ACTIVE,
       failureCount: 0,
     });
     await this.subscriptionRepo.save(subscription);
-    this.logger.log(`Created webhook subscription: ${subscription.name} (${subscription.id})`);
+    this.logger.log(
+      `Created webhook subscription: ${subscription.name} (${subscription.id}) [payloadVersion=${subscription.payloadVersion}]`,
+    );
     return subscription;
   }
 
@@ -319,7 +478,12 @@ export class OutboundWebhooksService {
   }
 
   /**
-   * Update a subscription
+   * Update a subscription.
+   *
+   * `payloadVersion` is updatable — the documented migration path for
+   * a v1 consumer that has updated its verifier to handle v2 is to
+   * PATCH this field. The flip is immediate; the next emitted event
+   * uses the new shape.
    */
   async updateSubscription(
     workspaceId: string,
@@ -331,6 +495,7 @@ export class OutboundWebhooksService {
       events: WebhookEventType[];
       status: WebhookSubscriptionStatus;
       metadata: Record<string, unknown>;
+      payloadVersion: 'v1' | 'v2';
     }>,
   ): Promise<WebhookSubscription | null> {
     await this.subscriptionRepo.update({ id, workspaceId }, data as any);
