@@ -20,11 +20,17 @@ import {
   PhoneNumberPricing,
   PricingType,
   Workspace,
+  ApiKey,
+  WebhookSubscription,
 } from '../../database/entities';
+import { CommunicationBusiness } from '../../database/entities/communication-business.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
 import { IntegrationStatus, ProviderType } from '../../database/entities/communication-integration.entity';
 import { ChannelType } from '../../database/entities/sender.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
+import { ensureOutboundReadyForTenantPhone } from './ensure-outbound-ready.helpers';
 
 export interface AvailableNumberWithPricing {
   phoneNumber: string;
@@ -83,10 +89,80 @@ export class PhoneNumberProvisioningService {
     private tenantRepo: Repository<Tenant>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
+    @InjectRepository(CommunicationBusiness)
+    private communicationBusinessRepo: Repository<CommunicationBusiness>,
+    @InjectRepository(CommunicationProfile)
+    private communicationProfileRepo: Repository<CommunicationProfile>,
+    @InjectRepository(ProfilePhoneAssignment)
+    private profilePhoneAssignmentRepo: Repository<ProfilePhoneAssignment>,
+    @InjectRepository(WebhookSubscription)
+    private webhookSubscriptionRepo: Repository<WebhookSubscription>,
+    @InjectRepository(ApiKey)
+    private apiKeyRepo: Repository<ApiKey>,
     private encryptionService: EncryptionService,
     private twilioProvider: TwilioProvider,
     private configService: ConfigService,
   ) {}
+
+  /**
+   * Materialize the (CommunicationBusiness → default CommunicationProfile →
+   * ProfilePhoneAssignment) chain a freshly purchased TenantPhoneNumber needs
+   * before outbound resolution will accept it. Idempotent.
+   *
+   * Failure here MUST NOT roll back the Twilio purchase — the number is
+   * already provisioned upstream and the order has been billed. We log a
+   * clear warning so the next call (or a manual re-trigger) can heal the
+   * chain, and the operator can fall back to admin/phone-numbers/assign.
+   */
+  private async ensureOutboundReady(allocation: TenantPhoneNumber): Promise<void> {
+    try {
+      const tenant = await this.tenantRepo.findOne({
+        where: { id: allocation.tenantId, workspaceId: allocation.workspaceId },
+      });
+      if (!tenant) {
+        this.logger.warn(
+          `[ensureOutboundReady] tenant ${allocation.tenantId} not found — skipping (phone ${allocation.phoneNumber} purchased but not linked)`,
+        );
+        return;
+      }
+
+      const webhooks = await this.webhookSubscriptionRepo.find({
+        where: { tenantId: allocation.tenantId },
+        select: ['webhookUrl'],
+      });
+      const apiKeys = await this.apiKeyRepo.find({
+        where: { tenantId: allocation.tenantId },
+        select: ['name'],
+      });
+
+      const result = await ensureOutboundReadyForTenantPhone(
+        {
+          business: this.communicationBusinessRepo,
+          profile: this.communicationProfileRepo,
+          ppa: this.profilePhoneAssignmentRepo,
+        },
+        allocation,
+        {
+          name: tenant.name ?? null,
+          externalId: tenant.externalId ?? null,
+          webhookUrls: webhooks.map((w) => w.webhookUrl).filter((u): u is string => !!u),
+          apiKeyNames: apiKeys.map((k) => k.name).filter((n): n is string => !!n),
+        },
+      );
+
+      if (result.changed) {
+        this.logger.log(
+          `[ensureOutboundReady] ${allocation.phoneNumber} → business=${result.businessId.slice(0, 8)} profile=${result.profileId.slice(0, 8)} ppa=${result.ppaId.slice(0, 8)}`,
+        );
+      }
+    } catch (err: any) {
+      // Twilio purchase already succeeded; record so operator can heal via
+      // POST /admin/phone-numbers/assign. Do NOT throw.
+      this.logger.warn(
+        `[ensureOutboundReady] Failed to materialize outbound chain for ${allocation.phoneNumber} (tenant=${allocation.tenantId}): ${err?.message ?? err}. Re-running the helper or calling /admin/phone-numbers/assign will heal it.`,
+      );
+    }
+  }
 
   /**
    * Search available phone numbers with pricing information
@@ -273,6 +349,13 @@ export class PhoneNumberProvisioningService {
         },
       });
       await this.tenantPhoneRepo.save(allocation);
+
+      // Materialize CommunicationBusiness → default CommunicationProfile →
+      // ProfilePhoneAssignment so outbound resolution accepts the new
+      // number immediately. Sigcore owns this invariant; clients must not
+      // construct the chain. Failures here are logged and do NOT roll
+      // back the Twilio purchase — see ensureOutboundReady for recovery.
+      await this.ensureOutboundReady(allocation);
 
       // Update order with allocation reference
       order.tenantPhoneNumberId = allocation.id;

@@ -13,7 +13,11 @@ import {
   PhoneNumberOrder,
   PhoneNumberPricing,
   Workspace,
+  WebhookSubscription,
 } from '../../database/entities';
+import { CommunicationBusiness } from '../../database/entities/communication-business.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { CommunicationModule } from '../communication/communication.module';
 import { ApiModule } from '../api/api.module';
@@ -29,6 +33,10 @@ import { ApiModule } from '../api/api.module';
       PhoneNumberOrder,
       PhoneNumberPricing,
       Workspace,
+      WebhookSubscription,
+      CommunicationBusiness,
+      CommunicationProfile,
+      ProfilePhoneAssignment,
     ]),
     forwardRef(() => CommunicationModule),
     forwardRef(() => ApiModule),
