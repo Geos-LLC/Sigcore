@@ -27,3 +27,5 @@ export * from './communication-participant.entity';
 export * from './communication-business.entity';
 export * from './communication-profile.entity';
 export * from './profile-phone-assignment.entity';
+export * from './telegram-subscriber.entity';
+export * from './telegram-placement.entity';
