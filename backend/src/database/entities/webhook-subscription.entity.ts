@@ -34,6 +34,9 @@ export enum WebhookEventType {
   WHATSAPP_MESSAGE_OUTBOUND = 'whatsapp.message.outbound',
   WHATSAPP_MESSAGE_DELIVERED = 'whatsapp.message.delivered',
   WHATSAPP_STATUS_CHANGE = 'whatsapp.status.change',
+  // Telegram publisher events (channel ad placements via TelePorter)
+  TELEGRAM_PLACEMENT_SENT = 'telegram.placement.sent',
+  TELEGRAM_PLACEMENT_FAILED = 'telegram.placement.failed',
 }
 
 export enum WebhookSubscriptionStatus {

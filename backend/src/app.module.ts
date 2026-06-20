@@ -5,6 +5,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { SigcoreAuthModule } from './modules/auth/sigcore-auth.module';
 import { CommunicationModule } from './modules/communication/communication.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
+import { TelegramPublisherModule } from './modules/integrations/telegram/telegram-publisher.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { EventsModule } from './modules/events/events.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
@@ -54,6 +55,7 @@ import { RequireTenantScopeGuard } from './modules/auth/require-tenant-scope.gua
     SigcoreAuthModule,
     CommunicationModule,
     IntegrationsModule,
+    TelegramPublisherModule,
     WebhooksModule,
     EventsModule,
     TenantsModule,

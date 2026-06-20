@@ -255,6 +255,8 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.WHATSAPP_MESSAGE_OUTBOUND]: 'Triggered when an outbound WhatsApp message is sent',
       [WebhookEventType.WHATSAPP_MESSAGE_DELIVERED]: 'Triggered when a WhatsApp message is delivered/read',
       [WebhookEventType.WHATSAPP_STATUS_CHANGE]: 'Triggered when WhatsApp connection status changes',
+      [WebhookEventType.TELEGRAM_PLACEMENT_SENT]: 'Triggered when a Telegram channel placement is successfully sent',
+      [WebhookEventType.TELEGRAM_PLACEMENT_FAILED]: 'Triggered when a Telegram channel placement fails to send',
     };
     return descriptions[event] || 'No description available';
   }
