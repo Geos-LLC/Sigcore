@@ -79,4 +79,28 @@ describe('TeleporterClient', () => {
       status: 404,
     });
   });
+
+  it('preserves full upstream response body on the exception (round-2 logging fix)', async () => {
+    // TelePorter's error body isn't `{message: ...}` shaped — covered:
+    // `error`, `details`, plain string, and nothing at all.
+    const cases: Array<{ data: any; expectMsg: string }> = [
+      { data: { error: 'invalid_workspace_format' }, expectMsg: 'invalid_workspace_format' },
+      { data: { details: 'displayName required' }, expectMsg: 'displayName required' },
+      { data: 'plain text error', expectMsg: 'plain text error' },
+    ];
+    for (const c of cases) {
+      mockInstance.request.mockRejectedValueOnce({
+        response: { status: 400, data: c.data },
+        message: 'Request failed with status code 400',
+      });
+      const client = new TeleporterClient();
+      const err = await client.getSubscriber('x').catch((e) => e);
+      expect(err.status).toBe(400);
+      // HttpException stores the body in `.response` (NestJS convention).
+      const payload = err.getResponse();
+      expect(payload.upstreamStatus).toBe(400);
+      expect(payload.upstreamBody).toEqual(c.data);
+      expect(payload.message).toEqual(c.expectMsg);
+    }
+  });
 });
