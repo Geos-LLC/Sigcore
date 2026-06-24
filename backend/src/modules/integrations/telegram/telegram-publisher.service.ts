@@ -77,23 +77,23 @@ export class TelegramPublisherService {
       };
     }
 
-    // New row.
+    // Call µsvc FIRST. Only persist after a 2xx so a TelePorter rejection
+    // doesn't leave a phantom `provisioning` row that blocks every retry
+    // via the early-return branch above (round-1 + round-2 incidents,
+    // 2026-06-24). If the call throws, propagate — caller gets the wrapped
+    // teleporter_request_failed and the DB stays clean.
+    const info = await this.client.provisionSubscriber(workspaceId, displayName);
+
     const row = this.subscriberRepo.create({
       workspaceId,
       tenantId: tenantId ?? undefined,
-      status: 'provisioning' as const,
-    });
-    await this.subscriberRepo.save(row);
-
-    const info = await this.client.provisionSubscriber(workspaceId, displayName);
-
-    await this.subscriberRepo.update(row.id, {
       teleporterSubscriberId: info.subscriberId,
       botUsername: info.botUsername,
       inviteHint: info.inviteHint,
-      status: info.status === 'ready' ? 'ready' : 'provisioning',
+      status: info.status === 'ready' ? 'ready' : ('provisioning' as const),
       ...(info.status === 'ready' ? { provisionedAt: new Date() } : {}),
     });
+    await this.subscriberRepo.save(row);
 
     return { botUsername: info.botUsername, status: info.status, inviteHint: info.inviteHint };
   }

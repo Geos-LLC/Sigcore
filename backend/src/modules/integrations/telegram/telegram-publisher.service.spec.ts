@@ -65,15 +65,54 @@ describe('TelegramPublisherService', () => {
       const result = await svc.subscribe('ws-1', 'tenant-1', 'My Bot');
 
       expect(client.provisionSubscriber).toHaveBeenCalledWith('ws-1', 'My Bot');
-      expect(subRepo.update).toHaveBeenCalledWith(
-        'sub-uuid',
+      // µsvc bakes everything into one create+save; no separate update.
+      expect(subRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
+          workspaceId: 'ws-1',
+          tenantId: 'tenant-1',
           teleporterSubscriberId: 'tp_sub_1',
           botUsername: 'hf_bot',
           status: 'ready',
         }),
       );
+      expect(subRepo.save).toHaveBeenCalled();
+      expect(subRepo.update).not.toHaveBeenCalled();
       expect(result).toEqual({ botUsername: 'hf_bot', status: 'ready', inviteHint: 'add me' });
+    });
+
+    it('does NOT persist a row when µsvc throws (round-2 regression: no phantom provisioning rows)', async () => {
+      subRepo.findOne.mockResolvedValue(null);
+      client.provisionSubscriber.mockRejectedValue(
+        Object.assign(new Error('teleporter_request_failed'), { status: 400 }),
+      );
+
+      await expect(svc.subscribe('ws-1', 'tenant-1', undefined)).rejects.toThrow(
+        'teleporter_request_failed',
+      );
+
+      // Critical: neither create nor save should be called when upstream rejects.
+      expect(subRepo.create).not.toHaveBeenCalled();
+      expect(subRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('calls µsvc BEFORE any DB write (order check)', async () => {
+      subRepo.findOne.mockResolvedValue(null);
+      const callOrder: string[] = [];
+      client.provisionSubscriber.mockImplementation(async () => {
+        callOrder.push('usvc');
+        return { subscriberId: 'tp_1', botUsername: 'b', status: 'ready' };
+      });
+      subRepo.create.mockImplementation((x: any) => {
+        callOrder.push('create');
+        return { ...x, id: 'r' };
+      });
+      subRepo.save.mockImplementation(async () => {
+        callOrder.push('save');
+        return { id: 'r' };
+      });
+
+      await svc.subscribe('ws-1', 'tenant-1', undefined);
+      expect(callOrder).toEqual(['usvc', 'create', 'save']);
     });
 
     it('returns existing active subscriber without re-calling µsvc', async () => {

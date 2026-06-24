@@ -86,10 +86,36 @@ export class TeleporterClient {
     } catch (e) {
       const err = e as AxiosError<any>;
       const status = err.response?.status ?? HttpStatus.BAD_GATEWAY;
-      const msg = err.response?.data?.message || err.message || 'TelePorter request failed';
-      this.logger.error(`TelePorter ${method} ${path} → ${status}: ${msg}`);
+      const data = err.response?.data;
+      // Surface the full upstream response body — TelePorter's error shape
+      // is not contract-locked, so grabbing only `data.message` loses the
+      // actual reason on every other shape (round-2 incident 2026-06-24
+      // hit exactly this: 400 with body in `error`/`details`/whatever).
+      // Log the body verbatim and pick the most-informative single string
+      // for the exception message.
+      const dataStr =
+        typeof data === 'string'
+          ? data
+          : data
+            ? JSON.stringify(data).slice(0, 1000)
+            : '';
+      const msg =
+        (typeof data === 'object' && data &&
+          (data.message || data.error || data.detail || data.details)) ||
+        dataStr ||
+        err.message ||
+        'TelePorter request failed';
+      const bodyPreview = body ? JSON.stringify(body).slice(0, 400) : '<no body>';
+      this.logger.error(
+        `TelePorter ${method} ${path} → ${status} | reqBody=${bodyPreview} | respBody=${dataStr || '<empty>'}`,
+      );
       throw new HttpException(
-        { error: 'teleporter_request_failed', message: msg, upstreamStatus: status },
+        {
+          error: 'teleporter_request_failed',
+          message: typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 500),
+          upstreamStatus: status,
+          upstreamBody: data ?? null,
+        },
         status >= 400 && status < 600 ? status : HttpStatus.BAD_GATEWAY,
       );
     }
