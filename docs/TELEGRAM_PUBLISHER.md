@@ -30,8 +30,10 @@ TelePorter → telegram-service /webhooks/teleporter → Sigcore /internal/teleg
    - `SERVICE_API_KEY` — generate a 32-byte hex; must match `TELEGRAM_SERVICE_API_KEY` on the main Sigcore service.
    - `SIGCORE_API_URL` — `https://sigcore-production.up.railway.app`
    - `SIGCORE_WEBHOOK_KEY` — must match the same env on main Sigcore (shared with WhatsApp µsvc).
-   - `TELEPORTER_BASE_URL` — coordinate with the TelePorter agent (e.g. `https://teleporter.one/api/v1`).
-   - `TELEPORTER_SERVICE_KEY` — shared secret with TelePorter; double-duty as auth header outbound and HMAC verify key inbound.
+   - `TELEPORTER_BASE_URL` — Publisher API base, e.g. `https://teleporter-publisher-api-ymx24hag7a-uc.a.run.app/api/v1`.
+   - `TELEPORTER_SERVICE_KEY` — outbound auth header (`X-TelePorter-Service-Key`). Issued by TelePorter in Secret Manager.
+   - `TELEPORTER_CALLBACK_HMAC_SECRET` — per-integrator HMAC key for verifying inbound `/webhooks/teleporter` callbacks. **Distinct** from the service key — TelePorter issues this when Sigcore is registered as an integrator. The µsvc falls back to `TELEPORTER_SERVICE_KEY` for the HMAC check if `TELEPORTER_CALLBACK_HMAC_SECRET` is unset (legacy single-secret config); set both with the same value if you want that behavior explicitly.
+   - `TELEPORTER_INTEGRATOR_ID` — integrator handle (e.g. `sigcore-hirefunnel`). Reserved for future per-call identification; not sent today.
    - `TELEPORTER_CALLBACK_URL` — `https://telegram-publisher-production.up.railway.app/webhooks/teleporter` (the public URL TelePorter will hit when a message is sent or fails).
    - `TELEGRAM_VERIFY_CACHE_TTL_MS=3600000` (1h; tune down if `bot_removed_from_chat`-style staleness becomes a problem)
    - `TELEGRAM_VERIFY_CACHE_MAX_ENTRIES=5000`
@@ -152,10 +154,13 @@ Subscriptions follow the standard Sigcore outbound HMAC contract (`X-Callio-Time
 
 ## Shared-secret rotation
 
-Two shared secrets are load-bearing:
+Three shared secrets are load-bearing:
 
 1. **`SIGCORE_WEBHOOK_KEY`** (main Sigcore ↔ telegram-service callback)
-2. **`TELEPORTER_SERVICE_KEY`** (telegram-service ↔ TelePorter, both directions)
+2. **`TELEPORTER_SERVICE_KEY`** (telegram-service → TelePorter outbound auth)
+3. **`TELEPORTER_CALLBACK_HMAC_SECRET`** (TelePorter → telegram-service inbound HMAC)
+
+#2 and #3 are issued by TelePorter and rotated on their side. The Sigcore side just consumes them. #1 is owned by Sigcore.
 
 Both must be rotated **simultaneously on both ends** within seconds of each other. The
 safe order:
@@ -166,7 +171,7 @@ safe order:
 4. Update the sender.
 5. Verify a fresh event flows end-to-end.
 
-For `TELEPORTER_SERVICE_KEY` specifically: the key does double duty (outbound auth header AND HMAC verify key for inbound). Both halves must rotate atomically. Coordinate with the TelePorter agent.
+Coordinate with the TelePorter agent on `TELEPORTER_SERVICE_KEY` + `TELEPORTER_CALLBACK_HMAC_SECRET` rotations — both live in their Secret Manager and they hand over the new values.
 
 ## Verify-cache TTL knob
 
@@ -189,4 +194,7 @@ The cache is in-memory in the µsvc (per architectural decision: it sits closer 
 
 ## Contract gaps surfaced during build
 
-(none yet — update this section as the TelePorter agent's contract evolves.)
+- **2026-06-20** — TelePorter contract uses **two** secrets, not one:
+  - `TELEPORTER_SERVICE_KEY` for outbound auth (`X-TelePorter-Service-Key` header)
+  - `TELEPORTER_CALLBACK_HMAC_SECRET` for verifying inbound `X-TelePorter-Signature` HMAC
+  The original brief described a single secret doing both jobs. µsvc updated to read the dedicated env var with a fallback to the service key for back-compat. Tests updated, both kept as separate Railway env vars on staging.

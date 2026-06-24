@@ -9,6 +9,7 @@ describe('WebhooksController', () => {
 
   beforeEach(() => {
     process.env.TELEPORTER_SERVICE_KEY = SECRET;
+    delete process.env.TELEPORTER_CALLBACK_HMAC_SECRET;
     process.env.SIGCORE_WEBHOOK_KEY = 'sigcore-webhook-key';
     forwardSpy = jest.fn().mockResolvedValue(undefined);
     controller = new WebhooksController({ forwardEvent: forwardSpy } as any);
@@ -74,12 +75,25 @@ describe('WebhooksController', () => {
     });
   });
 
-  it('returns 503 when TELEPORTER_SERVICE_KEY unset', async () => {
+  it('returns 503 when both callback HMAC envs unset', async () => {
     delete process.env.TELEPORTER_SERVICE_KEY;
+    delete process.env.TELEPORTER_CALLBACK_HMAC_SECRET;
     const { req, sig } = signedReq({ event: 'message.sent', subscriberWorkspaceId: 'ws-1', messageId: 'msg_1' });
     await expect(controller.handleTeleporterCallback(req, sig)).rejects.toMatchObject({
       status: HttpStatus.SERVICE_UNAVAILABLE,
     });
+  });
+
+  it('prefers TELEPORTER_CALLBACK_HMAC_SECRET over TELEPORTER_SERVICE_KEY', async () => {
+    // Sign with the callback secret; service key is a different (wrong) value.
+    const CALLBACK_SECRET = 'integrator-callback-secret';
+    process.env.TELEPORTER_SERVICE_KEY = 'NOT_THE_HMAC_KEY';
+    process.env.TELEPORTER_CALLBACK_HMAC_SECRET = CALLBACK_SECRET;
+    const body = { event: 'message.sent', subscriberWorkspaceId: 'ws-1', messageId: 'msg_1' };
+    const raw = Buffer.from(JSON.stringify(body));
+    const sig = crypto.createHmac('sha256', CALLBACK_SECRET).update(raw).digest('hex');
+    const result = await controller.handleTeleporterCallback({ body: raw } as any, sig);
+    expect(result).toEqual({ received: true });
   });
 
   it('ignores unsupported event types', async () => {

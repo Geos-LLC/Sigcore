@@ -32,7 +32,9 @@ export class WebhooksController {
 
   /**
    * TelePorter → telegram-service callback. Verified via HMAC-SHA256 of
-   * the raw body with TELEPORTER_SERVICE_KEY.
+   * the raw body with TELEPORTER_CALLBACK_HMAC_SECRET (per-integrator
+   * callback secret issued by TelePorter at registration — distinct
+   * from TELEPORTER_SERVICE_KEY which is the outbound auth header).
    *
    * NOTE: main.ts mounts express.raw() on this path so req.body is a
    * Buffer of the unparsed JSON. We parse here AFTER verifying.
@@ -43,9 +45,12 @@ export class WebhooksController {
     @Req() req: Request,
     @Headers('x-teleporter-signature') signature: string,
   ) {
-    const secret = process.env.TELEPORTER_SERVICE_KEY;
+    const secret =
+      process.env.TELEPORTER_CALLBACK_HMAC_SECRET || process.env.TELEPORTER_SERVICE_KEY;
     if (!secret) {
-      this.logger.error('TELEPORTER_SERVICE_KEY not set — refusing callback');
+      this.logger.error(
+        'TELEPORTER_CALLBACK_HMAC_SECRET not set — refusing callback',
+      );
       throw new HttpException('Service misconfigured', HttpStatus.SERVICE_UNAVAILABLE);
     }
     if (!signature) {
