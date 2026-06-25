@@ -14,12 +14,22 @@ import * as crypto from 'crypto';
 import { SigcoreCallbackClient } from './sigcore-callback-client.service';
 
 interface TeleporterCallbackPayload {
-  event: 'message.sent' | 'message.failed';
+  event:
+    | 'message.sent'
+    | 'message.failed'
+    | 'account.linked'
+    | 'account.revoked';
   subscriberWorkspaceId: string;
-  messageId: string;
+  // Message events
+  messageId?: string;
   providerMessageId?: string;
   errorCode?: string;
   errorMessage?: string;
+  // Account events
+  accountId?: string;
+  tgUserId?: string;
+  tgUsername?: string;
+  reason?: string;
   occurredAt?: string;
   data?: Record<string, unknown>;
 }
@@ -72,28 +82,55 @@ export class WebhooksController {
       throw new HttpException('Invalid JSON body', HttpStatus.BAD_REQUEST);
     }
 
-    if (payload.event !== 'message.sent' && payload.event !== 'message.failed') {
+    const SUPPORTED = new Set([
+      'message.sent',
+      'message.failed',
+      'account.linked',
+      'account.revoked',
+    ]);
+    if (!SUPPORTED.has(payload.event)) {
       this.logger.log(`Ignoring TelePorter event ${payload.event}`);
       return { received: true, ignored: 'unsupported_event' };
     }
-    if (!payload.subscriberWorkspaceId || !payload.messageId) {
-      throw new HttpException('Missing workspaceId or messageId', HttpStatus.BAD_REQUEST);
+    if (!payload.subscriberWorkspaceId) {
+      throw new HttpException('Missing subscriberWorkspaceId', HttpStatus.BAD_REQUEST);
     }
 
-    const normalizedEventType: 'placement.sent' | 'placement.failed' =
-      payload.event === 'message.sent' ? 'placement.sent' : 'placement.failed';
+    const isMessageEvent =
+      payload.event === 'message.sent' || payload.event === 'message.failed';
+    if (isMessageEvent && !payload.messageId) {
+      throw new HttpException('Missing messageId on message event', HttpStatus.BAD_REQUEST);
+    }
+
+    const eventTypeMap = {
+      'message.sent': 'placement.sent',
+      'message.failed': 'placement.failed',
+      'account.linked': 'account.linked',
+      'account.revoked': 'account.revoked',
+    } as const;
+    const normalizedEventType = eventTypeMap[payload.event];
+
+    const dataForEvent = isMessageEvent
+      ? {
+          messageId: payload.messageId,
+          providerMessageId: payload.providerMessageId,
+          errorCode: payload.errorCode,
+          errorMessage: payload.errorMessage,
+          ...(payload.data || {}),
+        }
+      : {
+          accountId: payload.accountId,
+          tgUserId: payload.tgUserId,
+          tgUsername: payload.tgUsername,
+          reason: payload.reason,
+          ...(payload.data || {}),
+        };
 
     await this.callback.forwardEvent({
       workspaceId: payload.subscriberWorkspaceId,
       eventType: normalizedEventType,
       timestamp: payload.occurredAt || new Date().toISOString(),
-      data: {
-        messageId: payload.messageId,
-        providerMessageId: payload.providerMessageId,
-        errorCode: payload.errorCode,
-        errorMessage: payload.errorMessage,
-        ...(payload.data || {}),
-      },
+      data: dataForEvent,
     });
 
     return { received: true };

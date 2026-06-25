@@ -52,3 +52,32 @@ export class SubscribeDto {
   @IsString()
   displayName?: string;
 }
+
+// ===== Account-mode DTOs =====
+
+export class StartAccountLinkDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(32)
+  phoneNumber: string;
+
+  @IsOptional()
+  @IsString()
+  password?: string;
+
+  // Truthy required — controller / service rejects when not strictly true.
+  riskAcknowledged: boolean;
+}
+
+export class AccountCodeDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(16)
+  code: string;
+}
+
+export class AccountPasswordDto {
+  @IsString()
+  @MinLength(1)
+  password: string;
+}

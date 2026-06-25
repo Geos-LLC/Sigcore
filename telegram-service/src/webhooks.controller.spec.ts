@@ -114,4 +114,47 @@ describe('WebhooksController', () => {
     const result = await controller.handleTeleporterCallback({ body: raw } as any, sig);
     expect(result).toEqual({ received: true });
   });
+
+  it('forwards account.linked → account.linked with tg fields', async () => {
+    const { req, sig } = signedReq({
+      event: 'account.linked',
+      subscriberWorkspaceId: 'ws-1',
+      accountId: 'sigcore-hf__ws-1',
+      tgUserId: '999',
+      tgUsername: '@x',
+    });
+    await controller.handleTeleporterCallback(req, sig);
+    expect(forwardSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'ws-1',
+        eventType: 'account.linked',
+        data: expect.objectContaining({ accountId: 'sigcore-hf__ws-1', tgUserId: '999', tgUsername: '@x' }),
+      }),
+    );
+  });
+
+  it('forwards account.revoked → account.revoked with reason', async () => {
+    const { req, sig } = signedReq({
+      event: 'account.revoked',
+      subscriberWorkspaceId: 'ws-1',
+      reason: 'SESSION_REVOKED',
+    });
+    await controller.handleTeleporterCallback(req, sig);
+    expect(forwardSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'account.revoked',
+        data: expect.objectContaining({ reason: 'SESSION_REVOKED' }),
+      }),
+    );
+  });
+
+  it('account events do NOT require messageId', async () => {
+    const { req, sig } = signedReq({
+      event: 'account.linked',
+      subscriberWorkspaceId: 'ws-1',
+      accountId: 'x',
+    });
+    const result = await controller.handleTeleporterCallback(req, sig);
+    expect(result).toEqual({ received: true });
+  });
 });

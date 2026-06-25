@@ -14,10 +14,21 @@ import { TelegramPublisherService } from './telegram-publisher.service';
 
 interface CallbackBody {
   workspaceId: string;
-  eventType: 'placement.sent' | 'placement.failed';
+  eventType:
+    | 'placement.sent'
+    | 'placement.failed'
+    | 'account.linked'
+    | 'account.revoked';
   timestamp: string;
   data: Record<string, unknown>;
 }
+
+const SUPPORTED_EVENTS = new Set<CallbackBody['eventType']>([
+  'placement.sent',
+  'placement.failed',
+  'account.linked',
+  'account.revoked',
+]);
 
 /**
  * Internal endpoint — called only by telegram-service.
@@ -47,8 +58,8 @@ export class TelegramEventCallbackController {
     if (!body?.workspaceId || !body?.eventType || !body?.data) {
       throw new BadRequestException('Missing required fields');
     }
-    if (body.eventType !== 'placement.sent' && body.eventType !== 'placement.failed') {
-      throw new BadRequestException('Unsupported eventType');
+    if (!SUPPORTED_EVENTS.has(body.eventType)) {
+      throw new BadRequestException(`Unsupported eventType '${body.eventType}'`);
     }
 
     await this.service.handleProviderEvent(body);

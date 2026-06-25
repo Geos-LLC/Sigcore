@@ -56,4 +56,14 @@ describe('TelegramEventCallbackController', () => {
     expect(result).toEqual({ received: true });
     expect(service.handleProviderEvent).toHaveBeenCalledWith(validBody);
   });
+
+  it.each(['account.linked', 'account.revoked'])(
+    'accepts new account event %s',
+    async (eventType) => {
+      const body = { ...validBody, eventType: eventType as any, data: { accountId: 'a' } };
+      const result = await controller.handleEvent('shared-secret', body);
+      expect(result).toEqual({ received: true });
+      expect(service.handleProviderEvent).toHaveBeenCalledWith(body);
+    },
+  );
 });

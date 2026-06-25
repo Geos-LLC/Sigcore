@@ -257,6 +257,8 @@ export class WebhookSubscriptionsController {
       [WebhookEventType.WHATSAPP_STATUS_CHANGE]: 'Triggered when WhatsApp connection status changes',
       [WebhookEventType.TELEGRAM_PLACEMENT_SENT]: 'Triggered when a Telegram channel placement is successfully sent',
       [WebhookEventType.TELEGRAM_PLACEMENT_FAILED]: 'Triggered when a Telegram channel placement fails to send',
+      [WebhookEventType.TELEGRAM_ACCOUNT_LINKED]: 'Triggered when a recruiter completes Telegram account linking',
+      [WebhookEventType.TELEGRAM_ACCOUNT_REVOKED]: 'Triggered when a linked Telegram account session is revoked',
     };
     return descriptions[event] || 'No description available';
   }

@@ -1,9 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 
+export type SigcoreTelegramEventType =
+  | 'placement.sent'
+  | 'placement.failed'
+  | 'account.linked'
+  | 'account.revoked';
+
 export interface SigcoreTelegramEvent {
   workspaceId: string;
-  eventType: 'placement.sent' | 'placement.failed';
+  eventType: SigcoreTelegramEventType;
   data: Record<string, unknown>;
   timestamp: string;
 }

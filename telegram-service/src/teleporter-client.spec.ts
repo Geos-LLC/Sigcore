@@ -82,6 +82,63 @@ describe('TeleporterClient', () => {
     });
   });
 
+  describe('account-mode methods', () => {
+    it('startAccountLink POSTs /accounts with body', async () => {
+      mockInstance.request.mockResolvedValue({ data: { accountId: 'acc_1', status: 'code_requested' } });
+      const client = new TeleporterClient();
+      await client.startAccountLink({ subscriberWorkspaceId: 'ws-1', phoneNumber: '+1', riskAcknowledged: true });
+      expect(mockInstance.request).toHaveBeenCalledWith({
+        method: 'POST', url: '/accounts',
+        data: { subscriberWorkspaceId: 'ws-1', phoneNumber: '+1', riskAcknowledged: true },
+      });
+    });
+
+    it('submitAccountCode POSTs /accounts/:ws/code', async () => {
+      mockInstance.request.mockResolvedValue({ data: { accountId: 'acc_1', status: 'linked' } });
+      const client = new TeleporterClient();
+      await client.submitAccountCode('ws-1', '12345');
+      expect(mockInstance.request).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'POST', url: '/accounts/ws-1/code', data: { code: '12345' } }),
+      );
+    });
+
+    it('submitAccountPassword POSTs /accounts/:ws/password', async () => {
+      mockInstance.request.mockResolvedValue({ data: { accountId: 'acc_1', status: 'linked' } });
+      const client = new TeleporterClient();
+      await client.submitAccountPassword('ws-1', 's3cret');
+      expect(mockInstance.request).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'POST', url: '/accounts/ws-1/password', data: { password: 's3cret' } }),
+      );
+    });
+
+    it('resendAccountCode POSTs /accounts/:ws/resend-code', async () => {
+      mockInstance.request.mockResolvedValue({ data: { status: 'code_requested' } });
+      const client = new TeleporterClient();
+      await client.resendAccountCode('ws-1');
+      expect(mockInstance.request).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'POST', url: '/accounts/ws-1/resend-code' }),
+      );
+    });
+
+    it('getAccount GETs /accounts/:ws', async () => {
+      mockInstance.request.mockResolvedValue({ data: { accountId: 'acc_1', status: 'linked' } });
+      const client = new TeleporterClient();
+      await client.getAccount('ws-1');
+      expect(mockInstance.request).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'GET', url: '/accounts/ws-1' }),
+      );
+    });
+
+    it('deleteAccount DELETEs /accounts/:ws', async () => {
+      mockInstance.request.mockResolvedValue({ data: { status: 'unlinked' } });
+      const client = new TeleporterClient();
+      await client.deleteAccount('ws-1');
+      expect(mockInstance.request).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'DELETE', url: '/accounts/ws-1' }),
+      );
+    });
+  });
+
   it('preserves full upstream response body on the exception (round-2 logging fix)', async () => {
     // TelePorter's error body isn't `{message: ...}` shaped — covered:
     // `error`, `details`, plain string, and nothing at all.

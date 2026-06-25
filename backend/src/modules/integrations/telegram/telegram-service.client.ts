@@ -14,6 +14,31 @@ export interface PublishResult {
   scheduledAt?: string;
 }
 
+export type AccountLinkStatus =
+  | 'code_requested'
+  | 'password_required'
+  | 'linked'
+  | 'revoked';
+
+export interface AccountStartResult {
+  accountId: string;
+  status: 'code_requested' | 'password_required';
+  codeLength?: number;
+}
+
+export interface AccountStepResult {
+  accountId: string;
+  status: AccountLinkStatus;
+  tgUserId?: string;
+  tgUsername?: string;
+}
+
+export interface AccountInfo {
+  accountId: string;
+  status: AccountLinkStatus;
+  tgUsername?: string;
+}
+
 /**
  * Main-side HTTP client for the telegram-service microservice.
  * Mirrors WhatsAppWebProvider's fetch wrapper shape so anyone debugging
@@ -48,6 +73,7 @@ export class TelegramServiceClient {
     workspaceId: string;
     chatRef: string;
     probe?: boolean;
+    asAccount?: boolean;
   }): Promise<Record<string, unknown>> {
     return this.call('POST', '/verify-chat', input);
   }
@@ -60,12 +86,50 @@ export class TelegramServiceClient {
     imageUrl?: string;
     scheduledAt?: string;
     idempotencyKey: string;
+    asAccount?: boolean;
+    accountId?: string;
   }): Promise<PublishResult> {
     return this.call('POST', '/publish', input);
   }
 
   async cancelMessage(teleporterMessageId: string): Promise<PublishResult> {
     return this.call('POST', `/messages/${encodeURIComponent(teleporterMessageId)}/cancel`);
+  }
+
+  // ===== Account-mode endpoints (pass-through wrappers) =====
+
+  async startAccountLink(input: {
+    workspaceId: string;
+    phoneNumber: string;
+    password?: string;
+    riskAcknowledged: boolean;
+  }): Promise<AccountStartResult> {
+    return this.call('POST', '/accounts', input);
+  }
+
+  async submitAccountCode(workspaceId: string, code: string): Promise<AccountStepResult> {
+    return this.call('POST', `/accounts/${encodeURIComponent(workspaceId)}/code`, { code });
+  }
+
+  async submitAccountPassword(
+    workspaceId: string,
+    password: string,
+  ): Promise<AccountStepResult> {
+    return this.call('POST', `/accounts/${encodeURIComponent(workspaceId)}/password`, {
+      password,
+    });
+  }
+
+  async resendAccountCode(workspaceId: string): Promise<{ status: 'code_requested' }> {
+    return this.call('POST', `/accounts/${encodeURIComponent(workspaceId)}/resend-code`);
+  }
+
+  async getAccount(workspaceId: string): Promise<AccountInfo> {
+    return this.call('GET', `/accounts/${encodeURIComponent(workspaceId)}`);
+  }
+
+  async deleteAccount(workspaceId: string): Promise<{ status: 'unlinked' }> {
+    return this.call('DELETE', `/accounts/${encodeURIComponent(workspaceId)}`);
   }
 
   private async call<T = any>(method: string, path: string, body?: unknown): Promise<T> {

@@ -37,6 +37,9 @@ export enum WebhookEventType {
   // Telegram publisher events (channel ad placements via TelePorter)
   TELEGRAM_PLACEMENT_SENT = 'telegram.placement.sent',
   TELEGRAM_PLACEMENT_FAILED = 'telegram.placement.failed',
+  // Telegram account-mode lifecycle (recruiter linked their own TG account)
+  TELEGRAM_ACCOUNT_LINKED = 'telegram.account.linked',
+  TELEGRAM_ACCOUNT_REVOKED = 'telegram.account.revoked',
 }
 
 export enum WebhookSubscriptionStatus {

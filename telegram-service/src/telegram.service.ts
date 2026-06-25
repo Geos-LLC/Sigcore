@@ -1,5 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { TeleporterClient, PublishMessageDto, SubscriberInfo, PublishMessageResult } from './teleporter-client.service';
+import {
+  TeleporterClient,
+  PublishMessageDto,
+  SubscriberInfo,
+  PublishMessageResult,
+  StartAccountLinkDto,
+  AccountStartResult,
+  AccountStepResult,
+  AccountInfo,
+} from './teleporter-client.service';
 import { VerifyCache } from './verify-cache.service';
 
 /**
@@ -13,6 +22,7 @@ export interface VerifyChatRequest {
   workspaceId: string;
   chatRef: string;
   probe?: boolean;
+  asAccount?: boolean;
 }
 
 export interface PublishRequest {
@@ -23,6 +33,8 @@ export interface PublishRequest {
   imageUrl?: string;
   scheduledAt?: string;
   idempotencyKey: string;
+  asAccount?: boolean;
+  accountId?: string;
 }
 
 @Injectable()
@@ -48,12 +60,16 @@ export class TelegramService {
 
   async verifyChat(req: VerifyChatRequest): Promise<Record<string, unknown>> {
     const isProbe = req.probe === true;
+    // Account-mode verify can yield different results than bot-mode (the
+    // recruiter user may be a member of channels the bot isn't admin-of).
+    // Don't share cache entries across modes — namespace the key.
+    const cacheKey = req.asAccount ? `account:${req.chatRef}` : req.chatRef;
 
     // Cache read: skip when probe (caller explicitly wants a fresh probe).
     if (!isProbe) {
-      const cached = this.cache.get(req.workspaceId, req.chatRef);
+      const cached = this.cache.get(req.workspaceId, cacheKey);
       if (cached) {
-        this.logger.debug(`verify cache HIT for ${req.workspaceId}:${req.chatRef}`);
+        this.logger.debug(`verify cache HIT for ${req.workspaceId}:${cacheKey}`);
         return cached;
       }
     }
@@ -62,13 +78,14 @@ export class TelegramService {
       subscriberWorkspaceId: req.workspaceId,
       chatRef: req.chatRef,
       probe: req.probe,
+      asAccount: req.asAccount,
     });
 
     const enriched = this.injectPayToPostWarning(verdict);
 
     // Cache writes only when verdict is non-probe — probes are expensive
     // and may reflect transient state we don't want to bake into the cache.
-    if (!isProbe) this.cache.set(req.workspaceId, req.chatRef, enriched);
+    if (!isProbe) this.cache.set(req.workspaceId, cacheKey, enriched);
 
     return enriched;
   }
@@ -87,6 +104,8 @@ export class TelegramService {
       scheduledAt: req.scheduledAt,
       idempotencyKey: req.idempotencyKey,
       callbackUrl,
+      asAccount: req.asAccount,
+      accountId: req.accountId,
     };
 
     return this.teleporter.publishMessage(dto);
@@ -94,6 +113,46 @@ export class TelegramService {
 
   async cancel(messageId: string): Promise<PublishMessageResult> {
     return this.teleporter.cancelMessage(messageId);
+  }
+
+  // ===== Account-mode pass-through =====
+
+  async startAccountLink(input: {
+    workspaceId: string;
+    phoneNumber: string;
+    password?: string;
+    riskAcknowledged: boolean;
+  }): Promise<AccountStartResult> {
+    const dto: StartAccountLinkDto = {
+      subscriberWorkspaceId: input.workspaceId,
+      phoneNumber: input.phoneNumber,
+      password: input.password,
+      riskAcknowledged: input.riskAcknowledged,
+    };
+    return this.teleporter.startAccountLink(dto);
+  }
+
+  async submitAccountCode(workspaceId: string, code: string): Promise<AccountStepResult> {
+    return this.teleporter.submitAccountCode(workspaceId, code);
+  }
+
+  async submitAccountPassword(
+    workspaceId: string,
+    password: string,
+  ): Promise<AccountStepResult> {
+    return this.teleporter.submitAccountPassword(workspaceId, password);
+  }
+
+  async resendAccountCode(workspaceId: string): Promise<{ status: 'code_requested' }> {
+    return this.teleporter.resendAccountCode(workspaceId);
+  }
+
+  async getAccount(workspaceId: string): Promise<AccountInfo> {
+    return this.teleporter.getAccount(workspaceId);
+  }
+
+  async deleteAccount(workspaceId: string): Promise<{ status: 'unlinked' }> {
+    return this.teleporter.deleteAccount(workspaceId);
   }
 
   /**

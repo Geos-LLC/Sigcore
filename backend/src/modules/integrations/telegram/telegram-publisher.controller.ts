@@ -1,9 +1,11 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   Param,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { SigcoreAuthGuard } from '../../auth/sigcore-auth.guard';
@@ -25,8 +27,13 @@ export class TelegramPublisherController {
     @WorkspaceId() workspaceId: string,
     @TenantId() tenantId: string | null,
     @Body() body: SubscribeDto,
+    @Query('mode') modeQuery?: string,
   ) {
-    return this.service.subscribe(workspaceId, tenantId || undefined, body?.displayName);
+    const mode: 'bot' | 'account' = modeQuery === 'account' ? 'account' : 'bot';
+    if (modeQuery && modeQuery !== 'bot' && modeQuery !== 'account') {
+      throw new BadRequestException(`Invalid mode '${modeQuery}' — expected 'bot' or 'account'`);
+    }
+    return this.service.subscribe(workspaceId, tenantId || undefined, body?.displayName, mode);
   }
 
   @Get('status')
