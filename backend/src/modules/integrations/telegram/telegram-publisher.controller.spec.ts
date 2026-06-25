@@ -29,14 +29,23 @@ describe('TelegramPublisherController', () => {
     controller = mod.get(TelegramPublisherController);
   });
 
-  it('subscribe wires workspaceId + tenantId + displayName', async () => {
+  it('subscribe wires workspaceId + tenantId + displayName (default mode=bot)', async () => {
     await controller.subscribe('ws-1', 'tenant-1', { displayName: 'My Bot' });
-    expect(svc.subscribe).toHaveBeenCalledWith('ws-1', 'tenant-1', 'My Bot');
+    expect(svc.subscribe).toHaveBeenCalledWith('ws-1', 'tenant-1', 'My Bot', 'bot');
   });
 
   it('subscribe normalises null tenantId to undefined', async () => {
     await controller.subscribe('ws-1', null, {});
-    expect(svc.subscribe).toHaveBeenCalledWith('ws-1', undefined, undefined);
+    expect(svc.subscribe).toHaveBeenCalledWith('ws-1', undefined, undefined, 'bot');
+  });
+
+  it('subscribe respects ?mode=account query', async () => {
+    await controller.subscribe('ws-1', 'tenant-1', {}, 'account');
+    expect(svc.subscribe).toHaveBeenCalledWith('ws-1', 'tenant-1', undefined, 'account');
+  });
+
+  it('subscribe rejects invalid mode value', async () => {
+    await expect(controller.subscribe('ws-1', 'tenant-1', {}, 'bogus' as any)).rejects.toThrow();
   });
 
   it('status calls service.getStatus', async () => {

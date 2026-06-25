@@ -8,6 +8,12 @@ import {
 } from 'typeorm';
 
 export type TelegramSubscriberStatus = 'provisioning' | 'ready' | 'retired';
+export type TelegramSubscriberMode = 'bot' | 'account';
+export type TelegramLinkStatus =
+  | 'code_requested'
+  | 'password_required'
+  | 'linked'
+  | 'revoked';
 
 @Entity('telegram_subscribers')
 @Index(['workspaceId'])
@@ -33,6 +39,21 @@ export class TelegramSubscriber {
 
   @Column({ type: 'varchar', length: 32, default: 'provisioning' })
   status: TelegramSubscriberStatus;
+
+  @Column({ type: 'varchar', length: 16, default: 'bot' })
+  mode: TelegramSubscriberMode;
+
+  @Column({ name: 'tg_user_id', type: 'varchar', length: 64, nullable: true })
+  tgUserId?: string;
+
+  @Column({ name: 'tg_username', type: 'varchar', length: 128, nullable: true })
+  tgUsername?: string;
+
+  @Column({ name: 'link_account_id', type: 'varchar', length: 128, nullable: true })
+  linkAccountId?: string;
+
+  @Column({ name: 'link_status', type: 'varchar', length: 32, nullable: true })
+  linkStatus?: TelegramLinkStatus;
 
   @Column({ name: 'provisioned_at', type: 'timestamptz', nullable: true })
   provisionedAt?: Date;

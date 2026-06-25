@@ -17,6 +17,7 @@ export interface VerifyChatDto {
   subscriberWorkspaceId: string;
   chatRef: string;
   probe?: boolean;
+  asAccount?: boolean;
 }
 
 export interface PublishMessageDto {
@@ -28,12 +29,48 @@ export interface PublishMessageDto {
   scheduledAt?: string;
   idempotencyKey: string;
   callbackUrl: string;
+  asAccount?: boolean;
+  accountId?: string;
 }
 
 export interface PublishMessageResult {
   messageId: string;
   status: 'queued' | 'scheduled' | 'sent' | 'failed' | 'cancelled';
   scheduledAt?: string;
+}
+
+// ===== Account-mode types =====
+
+export type AccountLinkStatus =
+  | 'code_requested'
+  | 'password_required'
+  | 'linked'
+  | 'revoked';
+
+export interface StartAccountLinkDto {
+  subscriberWorkspaceId: string;
+  phoneNumber: string;
+  password?: string;
+  riskAcknowledged: boolean;
+}
+
+export interface AccountStartResult {
+  accountId: string;
+  status: 'code_requested' | 'password_required';
+  codeLength?: number;
+}
+
+export interface AccountStepResult {
+  accountId: string;
+  status: AccountLinkStatus;
+  tgUserId?: string;
+  tgUsername?: string;
+}
+
+export interface AccountInfo {
+  accountId: string;
+  status: AccountLinkStatus;
+  tgUsername?: string;
 }
 
 @Injectable()
@@ -82,6 +119,59 @@ export class TeleporterClient {
 
   async getMessage(messageId: string): Promise<PublishMessageResult> {
     return this.call('GET', `/messages/${encodeURIComponent(messageId)}`);
+  }
+
+  // ===== Account-mode endpoints =====
+
+  async startAccountLink(dto: StartAccountLinkDto): Promise<AccountStartResult> {
+    return this.call('POST', '/accounts', dto);
+  }
+
+  async submitAccountCode(
+    subscriberWorkspaceId: string,
+    code: string,
+  ): Promise<AccountStepResult> {
+    return this.call(
+      'POST',
+      `/accounts/${encodeURIComponent(subscriberWorkspaceId)}/code`,
+      { code },
+    );
+  }
+
+  async submitAccountPassword(
+    subscriberWorkspaceId: string,
+    password: string,
+  ): Promise<AccountStepResult> {
+    return this.call(
+      'POST',
+      `/accounts/${encodeURIComponent(subscriberWorkspaceId)}/password`,
+      { password },
+    );
+  }
+
+  async resendAccountCode(
+    subscriberWorkspaceId: string,
+  ): Promise<{ status: 'code_requested' }> {
+    return this.call(
+      'POST',
+      `/accounts/${encodeURIComponent(subscriberWorkspaceId)}/resend-code`,
+    );
+  }
+
+  async getAccount(subscriberWorkspaceId: string): Promise<AccountInfo> {
+    return this.call(
+      'GET',
+      `/accounts/${encodeURIComponent(subscriberWorkspaceId)}`,
+    );
+  }
+
+  async deleteAccount(
+    subscriberWorkspaceId: string,
+  ): Promise<{ status: 'unlinked' }> {
+    return this.call(
+      'DELETE',
+      `/accounts/${encodeURIComponent(subscriberWorkspaceId)}`,
+    );
   }
 
   private async call<T = any>(method: string, path: string, body?: unknown): Promise<T> {

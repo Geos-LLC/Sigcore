@@ -7,6 +7,7 @@ import { ApiKey } from '../../../database/entities/api-key.entity';
 import { SigcoreAuthModule } from '../../auth/sigcore-auth.module';
 import { WebhooksModule } from '../../webhooks/webhooks.module';
 import { TelegramPublisherController } from './telegram-publisher.controller';
+import { TelegramAccountController } from './telegram-account.controller';
 import { TelegramEventCallbackController } from './telegram-event-callback.controller';
 import { TelegramPublisherService } from './telegram-publisher.service';
 import { TelegramServiceClient } from './telegram-service.client';
@@ -18,7 +19,11 @@ import { TelegramServiceClient } from './telegram-service.client';
     SigcoreAuthModule,
     forwardRef(() => WebhooksModule),
   ],
-  controllers: [TelegramPublisherController, TelegramEventCallbackController],
+  controllers: [
+    TelegramPublisherController,
+    TelegramAccountController,
+    TelegramEventCallbackController,
+  ],
   providers: [TelegramPublisherService, TelegramServiceClient],
   exports: [TelegramPublisherService],
 })
