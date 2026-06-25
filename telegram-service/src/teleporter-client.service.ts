@@ -44,10 +44,15 @@ export class TeleporterClient {
   constructor() {
     const baseURL = process.env.TELEPORTER_BASE_URL || 'http://localhost:4000';
     const key = process.env.TELEPORTER_SERVICE_KEY || '';
+    const integratorId = process.env.TELEPORTER_INTEGRATOR_ID || '';
     this.http = axios.create({
       baseURL,
       timeout: 10_000,
-      headers: { 'X-TelePorter-Service-Key': key, 'Content-Type': 'application/json' },
+      headers: {
+        'X-TelePorter-Service-Key': key,
+        'X-TelePorter-Integrator-Id': integratorId,
+        'Content-Type': 'application/json',
+      },
     });
   }
 

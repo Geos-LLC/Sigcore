@@ -13,15 +13,17 @@ describe('TeleporterClient', () => {
     (mockedAxios.create as jest.Mock).mockReturnValue(mockInstance);
     process.env.TELEPORTER_BASE_URL = 'https://teleporter.test/api/v1';
     process.env.TELEPORTER_SERVICE_KEY = 'secret-key';
+    process.env.TELEPORTER_INTEGRATOR_ID = 'sigcore-hirefunnel';
   });
 
-  it('configures axios with base URL + service key header', () => {
+  it('configures axios with base URL + service key + integrator id headers', () => {
     new TeleporterClient();
     expect(mockedAxios.create).toHaveBeenCalledWith(
       expect.objectContaining({
         baseURL: 'https://teleporter.test/api/v1',
         headers: expect.objectContaining({
           'X-TelePorter-Service-Key': 'secret-key',
+          'X-TelePorter-Integrator-Id': 'sigcore-hirefunnel',
         }),
       }),
     );
