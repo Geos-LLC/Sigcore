@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fixprompt/browser": "^0.0.2",
     "axios": "^1.6.2",
     "date-fns": "^3.0.6",
     "lucide-react": "^0.294.0",
