@@ -1404,10 +1404,21 @@ export class OpenPhoneProvider implements CommunicationProvider {
       }
 
       // Register call webhook
+      //
+      // NOTE (2026-06-29): `call.recording.completed` removed from subscription.
+      // Sigcore's webhook handler had no `case 'call.recording.completed'` —
+      // it fell through to the default branch and logged "Unhandled webhook type",
+      // so we were paying webhook bandwidth + cluttering the Quo workspace's
+      // webhook list for an event we silently discarded. LeadBridge now subscribes
+      // directly to that event for its own call recording sync feature (Option A
+      // in the architecture decision — see Obsidian LeadBridge.md "Recording Sync").
+      // If a future feature needs the recording URL inside Sigcore, restore the
+      // event subscription AND add the matching case in webhooks.service.ts
+      // handleOpenPhoneWebhook + a column on communication_calls.
       try {
         const callResponse = await client.post('/webhooks/calls', {
           url: webhookUrl,
-          events: ['call.completed', 'call.ringing', 'call.recording.completed'],
+          events: ['call.completed', 'call.ringing'],
           resourceIds: ['*'], // All phone numbers
           label: 'Callio Calls',
         });

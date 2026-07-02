@@ -926,6 +926,23 @@ export class TwilioWebhooksService {
       this.eventsGateway.emitCallUpdate(call.conversation.workspaceId, call);
       this.logger.log(`Emitted call update event for workspace ${call.conversation.workspaceId}`);
     }
+
+    // Also propagate recordingUrl to any Call Connect session that owns this
+    // CallSid, then re-emit call_connect.ended with recordingUrl so LeadBridge
+    // can write LeadCallConnect.recordingUrl and surface "Listen to recording"
+    // on the lead detail card. Silent no-op if the CallSid isn't a CC leg.
+    if (this.callConnectService) {
+      try {
+        await this.callConnectService.attachRecordingToSession(
+          payload.CallSid,
+          payload.RecordingUrl,
+        );
+      } catch (err: any) {
+        this.logger.warn(
+          `[handleRecordingComplete] attachRecordingToSession failed for CallSid ${payload.CallSid}: ${err.message}`,
+        );
+      }
+    }
   }
 
   /**

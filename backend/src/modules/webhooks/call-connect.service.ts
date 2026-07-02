@@ -1256,6 +1256,50 @@ export class CallConnectService {
     return session;
   }
 
+  /**
+   * Attach a Twilio recording URL to whichever session owns the CallSid, then
+   * emit a call_connect.ended event carrying `recordingUrl` so downstream
+   * subscribers (LeadBridge) can populate `LeadCallConnect.recordingUrl` and
+   * light up the "Listen to recording" link on the lead detail card.
+   *
+   * Called by TwilioWebhooksService.handleRecordingComplete after it saves
+   * the URL on the sibling `CommunicationCall` row. That save (call.recordingUrl)
+   * is orthogonal — the Call entity is queried by conversations UI; the session's
+   * recordingUrl is what LeadBridge cares about.
+   *
+   * The CallSid can belong to either leg (agent or lead) — search both.
+   * Silent no-op if no matching session (recording is for a non-CC call, e.g.
+   * an inbound voicemail via the forwarding number).
+   */
+  async attachRecordingToSession(callSid: string, recordingUrl: string): Promise<void> {
+    if (!callSid || !recordingUrl) return;
+    const session = await this.sessionRepo.findOne({
+      where: [{ agentCallSid: callSid }, { leadCallSid: callSid }],
+    });
+    if (!session) return; // recording is for something other than a CC session
+
+    // Prefer the agent-leg recording since that's the one the whisper + bridged
+    // conversation gets recorded on. If we already have a recording (e.g. the
+    // lead leg fired first for some reason), don't overwrite.
+    if (session.recordingUrl) {
+      this.logger.log(
+        `[attachRecording] Session ${session.id} already has recordingUrl — skipping (incoming ${callSid})`,
+      );
+      return;
+    }
+
+    session.recordingUrl = recordingUrl;
+    await this.sessionRepo.save(session);
+    this.logger.log(`[attachRecording] Session ${session.id} recordingUrl set from CallSid ${callSid}`);
+
+    // Emit a second call_connect.ended event carrying the recordingUrl so LB
+    // updates LeadCallConnect.recordingUrl. Reusing the existing event type
+    // avoids needing every existing subscription to be re-registered with a new
+    // event — LB's handleWebhookEvent is idempotent on repeated ended events
+    // (status stays ENDED, timeline gets one extra entry, recordingUrl written).
+    await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, { recordingUrl });
+  }
+
   // ──────────────────────────────────────────────────────────────
   // Private helpers
   // ──────────────────────────────────────────────────────────────

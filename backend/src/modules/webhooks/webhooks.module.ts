@@ -12,6 +12,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
+import { InternalTwilioProxyController } from './internal-twilio-proxy.controller';
 import { MessagingModule } from '../messaging/messaging.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
 import { RoutingModule } from '../routing/routing.module';
@@ -60,6 +61,7 @@ import {
     WebhookSubscriptionsV1Controller,
     WebhookSubscriptionsAliasController,
     CallConnectController,
+    InternalTwilioProxyController,
   ],
   providers: [
     WebhooksService,
