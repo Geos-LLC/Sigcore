@@ -43,6 +43,7 @@ import {
   ProviderType,
 } from '../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../database/entities/tenant-integration.entity';
+import { CallConnectSettings } from '../database/entities/call-connect-settings.entity';
 import { EncryptionService } from '../common/services/encryption.service';
 import { CallConnectService } from '../modules/webhooks/call-connect.service';
 
@@ -64,6 +65,7 @@ async function main() {
   try {
     const ds = app.get(DataSource);
     const sessionRepo = ds.getRepository(CallConnectSession);
+    const settingsRepo = ds.getRepository(CallConnectSettings);
     const integrationRepo = ds.getRepository(CommunicationIntegration);
     const tenantIntegrationRepo = ds.getRepository(TenantIntegration);
     const encryption = app.get(EncryptionService);
@@ -76,7 +78,6 @@ async function main() {
       agentCallSid: Not(IsNull()),
     };
     if (SESSION_ID) where.id = SESSION_ID;
-    if (SINCE) where.createdAt = { $gt: SINCE } as never; // fallback below
 
     let candidates: CallConnectSession[];
     if (SINCE) {
@@ -99,6 +100,19 @@ async function main() {
     if (candidates.length === 0) {
       log('Nothing to backfill.');
       return;
+    }
+
+    // Resolve the Sigcore workspaceId for a session. CallConnectSession.businessId
+    // is the LeadBridge savedAccountId (per-account PK), NOT the workspaceId — the
+    // workspace lives on CallConnectSettings, looked up by businessId. Legacy rows
+    // where businessId happens to equal workspaceId fall back cleanly.
+    const workspaceCache = new Map<string, string | null>();
+    async function workspaceForBusiness(businessId: string): Promise<string | null> {
+      if (workspaceCache.has(businessId)) return workspaceCache.get(businessId) ?? null;
+      const settings = await settingsRepo.findOne({ where: { businessId } });
+      const ws = settings?.workspaceId || businessId; // legacy fallback: businessId == workspaceId
+      workspaceCache.set(businessId, ws);
+      return ws;
     }
 
     // Twilio client cache keyed by "workspaceId::tenantId"
@@ -140,9 +154,15 @@ async function main() {
     };
 
     for (const s of candidates) {
-      const client = await twilioFor(s.businessId, s.tenantId);
+      const workspaceId = await workspaceForBusiness(s.businessId);
+      if (!workspaceId) {
+        log(`  SKIP  ${s.id.slice(0, 8)}  (no CallConnectSettings for business=${s.businessId})`);
+        summary.no_twilio_integration++;
+        continue;
+      }
+      const client = await twilioFor(workspaceId, s.tenantId);
       if (!client) {
-        log(`  SKIP  ${s.id.slice(0, 8)}  (no Twilio integration for ws=${s.businessId} tenant=${s.tenantId})`);
+        log(`  SKIP  ${s.id.slice(0, 8)}  (no Twilio integration for ws=${workspaceId} tenant=${s.tenantId})`);
         summary.no_twilio_integration++;
         continue;
       }
