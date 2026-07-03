@@ -892,13 +892,27 @@ export class TwilioWebhooksService {
   async handleRecordingComplete(payload: TwilioRecordingPayload): Promise<void> {
     this.logger.log(`Processing Twilio recording: CallSid=${payload.CallSid}, RecordingSid=${payload.RecordingSid}`);
 
+    // Propagate to any Call Connect session that owns this CallSid FIRST. CC agent/lead
+    // legs are not stored in communication_calls, so the callRepo lookup below returns
+    // null for them — we still need to persist recordingUrl on CallConnectSession and
+    // re-emit call_connect.ended to LB so LeadCallConnect.recordingUrl gets set.
+    if (this.callConnectService) {
+      this.callConnectService
+        .attachRecordingToSession(payload.CallSid, payload.RecordingUrl)
+        .catch((err) => {
+          this.logger.warn(
+            `[handleRecordingComplete] attachRecordingToSession failed for CallSid ${payload.CallSid}: ${err.message}`,
+          );
+        });
+    }
+
     const call = await this.callRepo.findOne({
       where: { providerCallId: payload.CallSid },
       relations: ['conversation'],
     });
 
     if (!call) {
-      this.logger.warn(`Call ${payload.CallSid} not found for recording update`);
+      this.logger.warn(`Call ${payload.CallSid} not found in communication_calls — may be a Call Connect leg`);
       return;
     }
 
@@ -925,23 +939,6 @@ export class TwilioWebhooksService {
     if (call.conversation) {
       this.eventsGateway.emitCallUpdate(call.conversation.workspaceId, call);
       this.logger.log(`Emitted call update event for workspace ${call.conversation.workspaceId}`);
-    }
-
-    // Also propagate recordingUrl to any Call Connect session that owns this
-    // CallSid, then re-emit call_connect.ended with recordingUrl so LeadBridge
-    // can write LeadCallConnect.recordingUrl and surface "Listen to recording"
-    // on the lead detail card. Silent no-op if the CallSid isn't a CC leg.
-    if (this.callConnectService) {
-      try {
-        await this.callConnectService.attachRecordingToSession(
-          payload.CallSid,
-          payload.RecordingUrl,
-        );
-      } catch (err: any) {
-        this.logger.warn(
-          `[handleRecordingComplete] attachRecordingToSession failed for CallSid ${payload.CallSid}: ${err.message}`,
-        );
-      }
     }
   }
 
