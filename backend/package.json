@@ -23,7 +23,9 @@
     "lb:backfill-conversations": "npx ts-node -r tsconfig-paths/register src/scripts/lb-backfill-conversation-profiles.ts",
     "audit:duplicates": "npx ts-node -r tsconfig-paths/register src/scripts/audit-duplicates.ts",
     "cleanup:repoint-duplicates:dry-run": "npx ts-node -r tsconfig-paths/register src/scripts/cleanup-repoint-duplicates.ts",
-    "cleanup:repoint-duplicates": "npx ts-node -r tsconfig-paths/register src/scripts/cleanup-repoint-duplicates.ts"
+    "cleanup:repoint-duplicates": "npx ts-node -r tsconfig-paths/register src/scripts/cleanup-repoint-duplicates.ts",
+    "backfill:cc-recordings:dry-run": "DRY_RUN=1 npx ts-node -r tsconfig-paths/register src/scripts/backfill-cc-recording-urls.ts",
+    "backfill:cc-recordings": "DRY_RUN=0 npx ts-node -r tsconfig-paths/register src/scripts/backfill-cc-recording-urls.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
