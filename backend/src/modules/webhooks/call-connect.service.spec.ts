@@ -286,6 +286,7 @@ function makeSession(overrides: Partial<CallConnectSession> = {}): CallConnectSe
     leadVoicemailMessage: null as any,
     sigcoreConversationId: null as any,
     recordAgentLeg: false,
+    skipAgentWhisper: false,
     timeline: [],
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -359,5 +360,59 @@ describe('CallConnectService – handleAgentTwiml whisper precedence', () => {
 
     const twiml = await service.handleAgentTwiml('missing-session');
     expect(twiml).toContain('<Hangup');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skipAgentWhisper — AI receptionist branch: bypass whisper + DTMF Gather and
+// drop the agent leg directly into the conference. LB sets this when it's
+// routing inbound leads to a Callio AI number that answers with speech.
+// ---------------------------------------------------------------------------
+describe('CallConnectService – handleAgentTwiml skipAgentWhisper branch', () => {
+  it('skips Gather + whisper and drops agent straight into conference when session.skipAgentWhisper=true', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: true,
+        agentWhisperMessage: 'IGNORED — should not appear in TwiML',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentWhisperMessage: 'ALSO IGNORED' }),
+    );
+    // initiateLeadCall is fire-and-forget and touches the Twilio client — stub it
+    // out so the test doesn't leak an unhandled rejection.
+    const initiateSpy = jest
+      .spyOn(service as any, 'initiateLeadCall')
+      .mockResolvedValue(undefined);
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('IGNORED');
+    expect(twiml).not.toContain('to connect');
+    expect(twiml).toMatch(/<Dial>[\s\S]*<Conference[^>]*>cc_session-1<\/Conference>[\s\S]*<\/Dial>/);
+    expect(initiateSpy).toHaveBeenCalledTimes(1);
+    // Session must be advanced to AGENT_ACCEPTED so downstream state machine
+    // treats the AI-agent leg as an accepted agent.
+    expect(sessionRepo.save).toHaveBeenCalled();
+    const lastSave = sessionRepo.save.mock.calls[sessionRepo.save.mock.calls.length - 1][0];
+    expect(lastSave.status).toBe(SessionStatus.AGENT_ACCEPTED);
+  });
+
+  it('keeps the whisper + Gather flow when skipAgentWhisper=false (default AGENT_FIRST path)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: false,
+        agentWhisperMessage: 'Human-agent whisper.',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(makeSettings());
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).toContain('<Gather');
+    expect(twiml).toContain('Human-agent whisper.');
   });
 });

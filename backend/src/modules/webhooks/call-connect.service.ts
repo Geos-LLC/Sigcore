@@ -243,6 +243,7 @@ export class CallConnectService {
       leadGreetingMessage: dto.leadGreetingMessage || undefined,
       leadVoicemailMessage: dto.leadVoicemailMessage || undefined,
       recordAgentLeg: dto.recordAgentLeg ?? false,
+      skipAgentWhisper: dto.skipAgentWhisper ?? false,
       mode,
       status: SessionStatus.CREATED,
       provider: CallConnectProvider.TWILIO,
@@ -256,7 +257,7 @@ export class CallConnectService {
     await this.sessionRepo.save(session);
 
     this.logger.log(
-      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode} recordAgentLeg=${session.recordAgentLeg} perSessionWhisper=${session.agentWhisperMessage ? 'yes' : 'no'} perSessionGreeting=${session.leadGreetingMessage ? 'yes' : 'no'} perSessionVoicemail=${session.leadVoicemailMessage ? 'yes' : 'no'}`,
+      `[startSession] Created session=${session.id} workspace=${workspaceId} business=${businessId} bot=${fromNumber} agent=${agentPhone} lead=${dto.leadId} mode=${mode} recordAgentLeg=${session.recordAgentLeg} skipAgentWhisper=${session.skipAgentWhisper} perSessionWhisper=${session.agentWhisperMessage ? 'yes' : 'no'} perSessionGreeting=${session.leadGreetingMessage ? 'yes' : 'no'} perSessionVoicemail=${session.leadVoicemailMessage ? 'yes' : 'no'}`,
     );
 
     // 6. Emit session.created event to LeadBridge
@@ -331,7 +332,28 @@ export class CallConnectService {
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
 
-    if (session.mode === CallConnectMode.AGENT_FIRST) {
+    if (session.mode === CallConnectMode.AGENT_FIRST && session.skipAgentWhisper) {
+      // AI-agent leg: no whisper, no DTMF gate. Kick off the lead call
+      // immediately (fire-and-forget, same pattern handleAgentGatherAction
+      // uses when a human agent accepts) then drop the AI leg straight
+      // into the conference.
+      this.logger.log(
+        `[agent-twiml] session=${sessionId} skipAgentWhisper=true — bypassing Gather, dropping agent into conference`,
+      );
+      await this.updateSession(session, { status: SessionStatus.AGENT_ACCEPTED });
+      await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED);
+      this.initiateLeadCall(session).catch((err) => {
+        this.logger.error(
+          `skip-whisper: lead call failed for session ${session.id}: ${err.message}`,
+        );
+        this.failSession(session, `Lead call initiation failed: ${err.message}`).catch(() => {});
+      });
+      const dial = response.dial();
+      dial.conference(
+        { startConferenceOnEnter: true, endConferenceOnExit: true },
+        session.conferenceName,
+      );
+    } else if (session.mode === CallConnectMode.AGENT_FIRST) {
       const acceptDigits = settings?.agentAcceptDigits || '0123456789';
       // For TTS: "any key" when all digits are in the accept string, otherwise list the digit(s)
       const digitHint = acceptDigits.length > 3 ? 'any key' : acceptDigits;
