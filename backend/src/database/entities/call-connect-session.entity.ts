@@ -116,6 +116,14 @@ export class CallConnectSession {
   @Column({ name: 'record_agent_leg', type: 'boolean', default: false })
   recordAgentLeg: boolean;
 
+  /**
+   * When true, skip the whisper + DTMF Gather on the agent leg and drop the
+   * agent leg directly into the conference. Set by callers routing to a voice AI
+   * that answers with speech and can't press a DTMF digit.
+   */
+  @Column({ name: 'skip_agent_whisper', type: 'boolean', default: false })
+  skipAgentWhisper: boolean;
+
   /** Append-only audit trail of state transitions */
   @Column({ type: 'jsonb', default: [] })
   timeline: Array<Record<string, unknown>>;

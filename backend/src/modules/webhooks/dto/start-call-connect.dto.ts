@@ -60,4 +60,14 @@ export class StartCallConnectDto {
   @IsOptional()
   @IsBoolean()
   recordAgentLeg?: boolean;
+
+  /**
+   * When true, skip the whisper + DTMF Gather on the agent leg and drop the
+   * agent leg directly into the conference. Used when the "agent" is an AI
+   * receptionist that answers with speech (not a keypress), so the Gather
+   * would time out waiting for a digit and the call would never bridge.
+   */
+  @IsOptional()
+  @IsBoolean()
+  skipAgentWhisper?: boolean;
 }
