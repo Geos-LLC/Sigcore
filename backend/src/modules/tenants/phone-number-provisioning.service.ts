@@ -501,9 +501,24 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
-   * Get all orders for a workspace
+   * Get all orders for a workspace, honoring the caller's scope.
+   *
+   * Workspace-scoped caller (callerTenantId=null): all orders in the workspace.
+   * Tenant-scoped caller: only orders for their own tenant. This endpoint
+   * previously leaked cross-tenant order history to any tenant key sitting in
+   * the shared master workspace.
    */
-  async getWorkspaceOrderHistory(workspaceId: string): Promise<PhoneNumberOrder[]> {
+  async getWorkspaceOrderHistory(
+    workspaceId: string,
+    callerTenantId?: string | null,
+  ): Promise<PhoneNumberOrder[]> {
+    if (callerTenantId) {
+      return this.orderRepo.find({
+        where: { workspaceId, tenantId: callerTenantId },
+        order: { createdAt: 'DESC' },
+        relations: ['tenant'],
+      });
+    }
     return this.orderRepo.find({
       where: { workspaceId },
       order: { createdAt: 'DESC' },
