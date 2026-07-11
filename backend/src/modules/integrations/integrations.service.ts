@@ -9,6 +9,7 @@ import {
   IntegrationStatus,
 } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { Tenant } from '../../database/entities/tenant.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { ContactIdentity } from '../../database/entities/contact-identity.entity';
 import { OpenPhoneContactSnapshot } from '../../database/entities/openphone-contact-snapshot.entity';
@@ -19,7 +20,13 @@ import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioVoiceService } from '../communication/twilio-voice.service';
 import { normalizeToE164, last10Digits } from '../../common/util/phone';
 import { OpenPhoneContactCacheService, resolveDisplayName } from './openphone-contact-cache.service';
-import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
+import {
+  SetupIntegrationDto,
+  SetupTwilioIntegrationDto,
+  UpdateTwilioPhoneNumberDto,
+  EnsureIntegrationDto,
+  EnsureIntegrationResult,
+} from './dto';
 
 export interface IntegrationInfo {
   id: string;
@@ -59,6 +66,8 @@ export class IntegrationsService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(TenantIntegration)
     private tenantIntegrationRepo: Repository<TenantIntegration>,
+    @InjectRepository(Tenant)
+    private tenantRepo: Repository<Tenant>,
     @InjectRepository(Workspace)
     private workspaceRepo: Repository<Workspace>,
     @InjectRepository(ContactIdentity)
@@ -267,6 +276,167 @@ export class IntegrationsService {
     }
 
     return this.getIntegration(workspaceId, dto.provider) as Promise<IntegrationInfo>;
+  }
+
+  /**
+   * Idempotent ensure of a (workspaceId, tenantId, provider) integration row.
+   *
+   * Wave-2 Task 1 (see Wave-2 Migration Runbook §Task 1). This is the
+   * permanent registration mechanism used by Callio's boot-time registrar to
+   * guarantee a `CommunicationIntegration` row exists for each voice-enabled
+   * workspace × tenant × provider triplet. It is deliberately additive to the
+   * existing setup* endpoints (which register webhooks with the provider) and
+   * does NOT perform any provider-side API calls.
+   *
+   * Semantics:
+   *   - Look up existing row on (workspaceId, tenantId, provider). Note that
+   *     the on-disk uniqueness is (workspaceId, provider) — see the entity's
+   *     @Index. `tenantId` is an additive scoping key kept in metadata for
+   *     rows registered via this path so multiple tenants in the same
+   *     workspace can share credentials until Wave-3's subaccount split.
+   *   - If credentials supplied: rotate. The existing decrypted credentials
+   *     JSON is merged with the new fields ("new wins" per key) and the
+   *     result is re-encrypted. This lets Callio pass just accountSid+authToken
+   *     without wiping out webhook secrets already in place.
+   *   - If credentials absent: pure lookup or create-with-empty. Existing
+   *     row returned unchanged. A fresh row is created with an empty
+   *     credentials blob so the id is stable for reference.
+   *   - Returns { id, created, workspaceId, tenantId, provider }.
+   *   - Concurrent calls: race on the (workspaceId, provider) unique index —
+   *     the loser retries the find so exactly one row ends up in the table.
+   *     This is by design: the runbook's `ensure_concurrent_calls_race_produces_one_row`
+   *     test asserts single-row outcome.
+   */
+  async ensureIntegration(
+    workspaceId: string,
+    dto: EnsureIntegrationDto,
+  ): Promise<EnsureIntegrationResult> {
+    if (!dto.tenantId) {
+      throw new BadRequestException('tenantId is required');
+    }
+    if (!dto.provider) {
+      throw new BadRequestException('provider is required');
+    }
+
+    // Workspace-tenant ownership check — mirrors IntegrationResourceGuard
+    // check=1 but locally, since ensure is the entry point.
+    const tenant = await this.tenantRepo.findOne({
+      where: { id: dto.tenantId, workspaceId },
+    });
+    if (!tenant) {
+      throw new NotFoundException(
+        `Tenant ${dto.tenantId} not found in workspace ${workspaceId}`,
+      );
+    }
+
+    await this.ensureWorkspace(workspaceId);
+
+    const runOnce = async (): Promise<EnsureIntegrationResult> => {
+      const existing = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: dto.provider },
+      });
+
+      if (existing) {
+        // Rotate iff credentials supplied.
+        if (dto.credentials && Object.keys(dto.credentials).length > 0) {
+          let existingCreds: Record<string, unknown> = {};
+          try {
+            existingCreds = JSON.parse(
+              this.encryptionService.decrypt(existing.credentialsEncrypted),
+            );
+          } catch {
+            existingCreds = {};
+          }
+          const merged = { ...existingCreds, ...dto.credentials };
+          existing.credentialsEncrypted = this.encryptionService.encrypt(
+            JSON.stringify(merged),
+          );
+          if (dto.providerAccountId) {
+            existing.externalWorkspaceId = dto.providerAccountId;
+          }
+          const metadata = (existing.metadata as Record<string, unknown>) || {};
+          const ensureMeta = (metadata.ensure as Record<string, unknown>) || {};
+          metadata.ensure = {
+            ...ensureMeta,
+            tenantId: dto.tenantId,
+            lastRotatedAt: new Date().toISOString(),
+            friendlyName: dto.friendlyName ?? ensureMeta.friendlyName,
+          };
+          existing.metadata = metadata;
+          await this.integrationRepo.save(existing);
+          this.logger.log(
+            `[ensureIntegration] rotated credentials for workspace=${workspaceId} tenant=${dto.tenantId} provider=${dto.provider} id=${existing.id}`,
+          );
+        } else {
+          this.logger.log(
+            `[ensureIntegration] returning existing row for workspace=${workspaceId} tenant=${dto.tenantId} provider=${dto.provider} id=${existing.id} (no credentials supplied)`,
+          );
+        }
+        return {
+          id: existing.id,
+          created: false,
+          workspaceId,
+          tenantId: dto.tenantId,
+          provider: dto.provider,
+        };
+      }
+
+      const credsBlob = dto.credentials
+        ? JSON.stringify(dto.credentials)
+        : JSON.stringify({});
+      const created = this.integrationRepo.create({
+        workspaceId,
+        provider: dto.provider,
+        credentialsEncrypted: this.encryptionService.encrypt(credsBlob),
+        externalWorkspaceId: dto.providerAccountId,
+        status: IntegrationStatus.ACTIVE,
+        metadata: {
+          ensure: {
+            tenantId: dto.tenantId,
+            friendlyName: dto.friendlyName,
+            createdAt: new Date().toISOString(),
+          },
+        },
+      });
+      const saved = await this.integrationRepo.save(created);
+      this.logger.log(
+        `[ensureIntegration] created workspace=${workspaceId} tenant=${dto.tenantId} provider=${dto.provider} id=${saved.id}`,
+      );
+      return {
+        id: saved.id,
+        created: true,
+        workspaceId,
+        tenantId: dto.tenantId,
+        provider: dto.provider,
+      };
+    };
+
+    try {
+      return await runOnce();
+    } catch (err: any) {
+      // Concurrent race on unique (workspaceId, provider) index — retry the
+      // lookup path once. The winning row is now visible; second caller
+      // reports created:false.
+      const code = err?.code || err?.driverError?.code;
+      if (code === '23505') {
+        this.logger.warn(
+          `[ensureIntegration] unique-violation race for workspace=${workspaceId} provider=${dto.provider} — re-reading winning row`,
+        );
+        const existing = await this.integrationRepo.findOne({
+          where: { workspaceId, provider: dto.provider },
+        });
+        if (existing) {
+          return {
+            id: existing.id,
+            created: false,
+            workspaceId,
+            tenantId: dto.tenantId,
+            provider: dto.provider,
+          };
+        }
+      }
+      throw err;
+    }
   }
 
   /**
