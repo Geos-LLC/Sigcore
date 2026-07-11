@@ -44,6 +44,7 @@ function buildMockRepo() {
 function buildService() {
   const integrationRepo = buildMockRepo();
   const tenantIntegrationRepo = buildMockRepo();
+  const tenantRepo = buildMockRepo();
   const workspaceRepo = buildMockRepo();
   const contactIdentityRepo = buildMockRepo();
   const snapshotRepo = buildMockRepo();
@@ -66,6 +67,7 @@ function buildService() {
   const service = new IntegrationsService(
     integrationRepo as any,
     tenantIntegrationRepo as any,
+    tenantRepo as any,
     workspaceRepo as any,
     contactIdentityRepo as any,
     snapshotRepo as any,

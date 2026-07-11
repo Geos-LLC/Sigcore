@@ -1,10 +1,11 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { IntegrationsController } from './integrations.controller';
+import { IntegrationsController, IntegrationsV1Controller } from './integrations.controller';
 import { IntegrationsService } from './integrations.service';
 import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
 import { CommunicationIntegration } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import { Tenant } from '../../database/entities/tenant.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { ContactIdentity } from '../../database/entities/contact-identity.entity';
 import { OpenPhoneContactSnapshot } from '../../database/entities/openphone-contact-snapshot.entity';
@@ -25,6 +26,7 @@ import { CommunicationModule } from '../communication/communication.module';
     TypeOrmModule.forFeature([
       CommunicationIntegration,
       TenantIntegration,
+      Tenant,
       Workspace,
       ContactIdentity,
       OpenPhoneContactSnapshot,
@@ -33,7 +35,7 @@ import { CommunicationModule } from '../communication/communication.module';
     ]),
     forwardRef(() => CommunicationModule),
   ],
-  controllers: [IntegrationsController, WhatsAppController, SfWhatsAppController],
+  controllers: [IntegrationsController, IntegrationsV1Controller, WhatsAppController, SfWhatsAppController],
   providers: [IntegrationsService, OpenPhoneContactCacheService, EncryptionService, OpenPhoneProvider, TwilioProvider, TwilioVoiceService, WhatsAppWebProvider, SfAuthGuard],
   exports: [IntegrationsService, OpenPhoneContactCacheService, WhatsAppWebProvider],
 })

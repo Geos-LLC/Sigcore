@@ -14,7 +14,12 @@ import {
 import { IntegrationsService } from './integrations.service';
 import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
 import { CommunicationService } from '../communication/communication.service';
-import { SetupIntegrationDto, SetupTwilioIntegrationDto, UpdateTwilioPhoneNumberDto } from './dto';
+import {
+  SetupIntegrationDto,
+  SetupTwilioIntegrationDto,
+  UpdateTwilioPhoneNumberDto,
+  EnsureIntegrationDto,
+} from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
 import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
@@ -498,5 +503,36 @@ export class IntegrationsController {
       body.callerId,
     );
     return { data: { twiml } };
+  }
+}
+
+/**
+ * Wave-2 Task 1 — v1 integrations surface.
+ *
+ * Separate controller for the `/v1/integrations/*` path prefix so we do not
+ * disturb existing route registrations under `/integrations/*`. Only carries
+ * the new idempotent ensure endpoint today; further v1 integration endpoints
+ * (e.g. GET /v1/integrations/:id, DELETE /v1/integrations/:id) belong here.
+ *
+ * Auth: reuses SigcoreAuthGuard. No @RequiresTenantScope() — ensure accepts
+ * a tenantId in the body and is callable from Callio's workspace-scoped
+ * service key (X-Sigcore-Key + X-Workspace-Id).
+ */
+@Controller('v1/integrations')
+@UseGuards(SigcoreAuthGuard)
+export class IntegrationsV1Controller {
+  constructor(private readonly integrationsService: IntegrationsService) {}
+
+  @Post('ensure')
+  @HttpCode(HttpStatus.OK)
+  async ensureIntegration(
+    @WorkspaceId() workspaceId: string,
+    @Body() dto: EnsureIntegrationDto,
+  ) {
+    const result = await this.integrationsService.ensureIntegration(
+      workspaceId,
+      dto,
+    );
+    return { data: result };
   }
 }
