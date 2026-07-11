@@ -22,7 +22,8 @@ import { BootstrapController } from './bootstrap.controller';
 import { Workspace } from './database/entities/workspace.entity';
 import { ApiKey } from './database/entities/api-key.entity';
 import { RequireTenantScopeGuard } from './modules/auth/require-tenant-scope.guard';
-import { RequireWorkspaceScopeGuard } from './modules/auth/require-workspace-scope.guard';
+// RequireWorkspaceScopeGuard is applied per-endpoint via @UseGuards through the
+// @RequiresWorkspaceScope() decorator, not globally.
 
 @Module({
   imports: [
@@ -69,11 +70,9 @@ import { RequireWorkspaceScopeGuard } from './modules/auth/require-workspace-sco
   ],
   controllers: [HealthController, DocsController, BootstrapController],
   providers: [
-    // Global guards: run AFTER per-controller guards (SigcoreAuthGuard).
-    // - RequireTenantScopeGuard: @RequiresTenantScope() blocks workspace-scoped keys
-    // - RequireWorkspaceScopeGuard: @RequiresWorkspaceScope() blocks tenant-scoped keys
+    // Global guard: runs AFTER per-controller guards (SigcoreAuthGuard).
+    // Checks @RequiresTenantScope() metadata and blocks workspace-scoped keys.
     { provide: APP_GUARD, useClass: RequireTenantScopeGuard },
-    { provide: APP_GUARD, useClass: RequireWorkspaceScopeGuard },
   ],
 })
 export class AppModule {}

@@ -36,9 +36,6 @@ import {
 /**
  * Enforce per-tenant scope on `/:id/*` routes. Tenant-scoped callers may only
  * touch their own tenant record. Workspace-scoped callers pass through.
- *
- * Prefer this over sprinkling `if (req.apiKeyScope === 'tenant')` — the
- * meaning is explicit and the shape matches getTenant()'s in-service check.
  */
 function assertCanAccessTenant(callerTenantId: string | null, targetTenantId: string): void {
   if (callerTenantId && callerTenantId !== targetTenantId) {

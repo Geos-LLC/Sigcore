@@ -1,29 +1,25 @@
 import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
 
+// Kept for backward-compat with the earlier metadata-based design; unused now.
 export const REQUIRES_WORKSPACE_SCOPE_KEY = 'requiresWorkspaceScope';
 
 /**
  * Guard that enforces workspace-scoped auth for admin/multi-tenant endpoints.
- * Blocks tenant-scoped keys from accessing operations that span multiple tenants
- * (orphan cleanup, pricing config writes, cross-tenant reallocation, provisioning).
+ * Applied directly via `@UseGuards(RequireWorkspaceScopeGuard)` (typically
+ * through the `@RequiresWorkspaceScope()` convenience decorator, which wraps
+ * it in `applyDecorators`). Runs after SigcoreAuthGuard sets
+ * `request.authScopeType`.
  *
- * Runs after SigcoreAuthGuard (which sets request.authScopeType). Registered
- * globally via APP_GUARD alongside RequireTenantScopeGuard.
- * Use @RequiresWorkspaceScope() decorator to mark admin-only endpoints.
+ * HISTORY: this guard was originally global (registered via APP_GUARD) and
+ * relied on `Reflector.getAllAndOverride` to detect the marker. That path
+ * silently failed at runtime in production on 2026-07-11 (local unit tests
+ * + metadata reproduction passed, prod behavior said metadata not found).
+ * Rewired to be a directly-applied guard because @UseGuards uses Nest's own
+ * well-exercised metadata path (same one SigcoreAuthGuard rides on).
  */
 @Injectable()
 export class RequireWorkspaceScopeGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
-
   canActivate(context: ExecutionContext): boolean {
-    const requiresWorkspace = this.reflector.getAllAndOverride<boolean>(
-      REQUIRES_WORKSPACE_SCOPE_KEY,
-      [context.getHandler(), context.getClass()],
-    );
-
-    if (!requiresWorkspace) return true;
-
     const request = context.switchToHttp().getRequest();
     const authScopeType = request.authScopeType;
 
