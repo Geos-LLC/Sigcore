@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
@@ -93,6 +94,18 @@ export class TenantsService {
 
   async createTenant(workspaceId: string, dto: CreateTenantDto): Promise<Tenant> {
     const externalId = dto.externalId?.trim() || this.generateExternalId(dto.name);
+
+    // Defensive: block anchor names / external_ids on the raw create path too.
+    // findOrCreateTenantByExternalId already validates this on POST /tenants/provision,
+    // but a workspace-scoped caller could otherwise mint "Callio"/"LeadBridge"/etc.
+    // via POST /tenants and pollute the anchor set.
+    const helpers = await import('./idempotent-provisioning.helpers');
+    if (helpers.isAnchorProvisionInput({ externalTenantId: externalId, displayName: dto.name })) {
+      throw new BadRequestException(
+        'Refusing to create a tenant with an anchor name/external_id ' +
+          '(LeadBridge, HireFunnel, ServiceFlow, Callio). Anchor tenants are platform handles, not customers.',
+      );
+    }
 
     // Check if tenant with externalId already exists
     const existing = await this.tenantRepo.findOne({
@@ -262,9 +275,26 @@ export class TenantsService {
   }
 
   /**
-   * Get all tenants for a workspace
+   * Get tenants for a workspace, honoring the caller's scope.
+   *
+   * - Workspace-scoped caller (callerTenantId=null): returns every tenant in
+   *   the workspace. Used by admin UI listings.
+   * - Tenant-scoped caller (callerTenantId set): returns `[self]` — a single-row
+   *   list containing only the caller's own tenant, if it exists in this
+   *   workspace. Enforces the PLATFORM_API_MODEL.md rule that a tenant key sees
+   *   only what it owns. Prevents the Callio→LB customer-list leak.
    */
-  async getTenants(workspaceId: string): Promise<Tenant[]> {
+  async getTenants(
+    workspaceId: string,
+    opts?: { callerTenantId?: string | null },
+  ): Promise<Tenant[]> {
+    const callerTenantId = opts?.callerTenantId ?? null;
+    if (callerTenantId) {
+      return this.tenantRepo.find({
+        where: { workspaceId, id: callerTenantId },
+        relations: ['phoneNumbers'],
+      });
+    }
     return this.tenantRepo.find({
       where: { workspaceId },
       relations: ['phoneNumbers'],
@@ -273,9 +303,24 @@ export class TenantsService {
   }
 
   /**
-   * Get a tenant by ID
+   * Get a tenant by ID, honoring the caller's scope.
+   *
+   * When `callerTenantId` is provided and does not match `tenantId`, throws
+   * ForbiddenException — a tenant key must not read cross-tenant data. Existing
+   * internal callers (that pass no callerTenantId) retain the workspace-only
+   * check so admin flows keep working.
    */
-  async getTenant(workspaceId: string, tenantId: string): Promise<Tenant> {
+  async getTenant(
+    workspaceId: string,
+    tenantId: string,
+    callerTenantId?: string | null,
+  ): Promise<Tenant> {
+    if (callerTenantId && callerTenantId !== tenantId) {
+      throw new ForbiddenException(
+        'Tenant-scoped API keys can only access their own tenant record.',
+      );
+    }
+
     const tenant = await this.tenantRepo.findOne({
       where: { workspaceId, id: tenantId },
       relations: ['phoneNumbers'],

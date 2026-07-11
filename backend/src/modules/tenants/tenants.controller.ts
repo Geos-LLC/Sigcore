@@ -11,7 +11,6 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
-  Request,
   ForbiddenException,
   BadRequestException,
 } from '@nestjs/common';
@@ -21,6 +20,7 @@ import { ApiKeysService } from '../api/api-keys.service';
 import { CommunicationService } from '../communication/communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
+import { RequiresWorkspaceScope } from '../auth/decorators/require-workspace-scope.decorator';
 import { TenantStatus } from '../../database/entities/tenant.entity';
 import { IntegrationStatus } from '../../database/entities/communication-integration.entity';
 import {
@@ -33,6 +33,21 @@ import {
  * Tenants Controller (JWT Auth - for UI/Admin)
  * Manages external clients/tenants and their phone number allocations
  */
+/**
+ * Enforce per-tenant scope on `/:id/*` routes. Tenant-scoped callers may only
+ * touch their own tenant record. Workspace-scoped callers pass through.
+ *
+ * Prefer this over sprinkling `if (req.apiKeyScope === 'tenant')` — the
+ * meaning is explicit and the shape matches getTenant()'s in-service check.
+ */
+function assertCanAccessTenant(callerTenantId: string | null, targetTenantId: string): void {
+  if (callerTenantId && callerTenantId !== targetTenantId) {
+    throw new ForbiddenException(
+      'Tenant-scoped API keys can only access their own tenant record.',
+    );
+  }
+}
+
 @Controller('tenants')
 @UseGuards(SigcoreAuthGuard)
 export class TenantsController {
@@ -43,6 +58,8 @@ export class TenantsController {
     private readonly communicationService: CommunicationService,
   ) {}
 
+  private assertCanAccessTenant = assertCanAccessTenant;
+
   // ==================== TENANT MANAGEMENT ====================
 
   /**
@@ -51,6 +68,7 @@ export class TenantsController {
    */
   @Post()
   @HttpCode(HttpStatus.CREATED)
+  @RequiresWorkspaceScope()
   async createTenant(
     @WorkspaceId() workspaceId: string,
     @Body() dto: CreateTenantDto,
@@ -74,9 +92,9 @@ export class TenantsController {
    */
   @Post('provision')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async provisionTenant(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Body()
     dto: {
       externalTenantId: string;
@@ -86,10 +104,6 @@ export class TenantsController {
       reuseActiveKey?: boolean;
     },
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot provision tenants');
-    }
-
     const helpers = await import('./idempotent-provisioning.helpers');
     const { tenant, reused } =
       await this.tenantsService.findOrCreateTenantByExternalId(workspaceId, {
@@ -155,26 +169,32 @@ export class TenantsController {
    */
   @Post(':tenantId/copy-integrations')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async copyIntegrations(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Param('tenantId') tenantId: string,
     @Body() dto: { fromTenantId: string },
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot copy integrations');
-    }
     const result = await this.tenantsService.copyTenantIntegrations(workspaceId, dto.fromTenantId, tenantId);
     return { data: result };
   }
 
   /**
-   * Get all tenants
+   * List tenants visible to the caller.
+   *
+   * Workspace-scoped: full list, admin listing (unchanged).
+   * Tenant-scoped: returns `[self]` — the caller's own tenant record only.
+   * Fixes the Callio-shared-workspace leak where every tenant key in the master
+   * workspace saw the union of every product's provisioned tenants.
+   *
    * GET /api/tenants
    */
   @Get()
-  async getTenants(@WorkspaceId() workspaceId: string) {
-    const tenants = await this.tenantsService.getTenants(workspaceId);
+  async getTenants(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+  ) {
+    const tenants = await this.tenantsService.getTenants(workspaceId, { callerTenantId });
     return { data: tenants };
   }
 
@@ -185,18 +205,24 @@ export class TenantsController {
    * GET /api/tenants/sync/status
    */
   @Get('sync/status')
+  @RequiresWorkspaceScope()
   async getSyncStatus(@WorkspaceId() workspaceId: string) {
     const status = this.communicationService.getSyncStatus(workspaceId);
     return { data: status };
   }
 
   /**
-   * Get all tenants with their integrations — for sync monitor overview.
+   * Get tenants (with integrations) for the sync monitor.
+   * Workspace-scoped: full workspace overview.
+   * Tenant-scoped: single-row overview for the caller's own tenant.
    * GET /api/tenants/sync/overview
    */
   @Get('sync/overview')
-  async getSyncOverview(@WorkspaceId() workspaceId: string) {
-    const tenants = await this.tenantsService.getTenants(workspaceId);
+  async getSyncOverview(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+  ) {
+    const tenants = await this.tenantsService.getTenants(workspaceId, { callerTenantId });
     const overview = [];
 
     for (const tenant of tenants) {
@@ -254,6 +280,7 @@ export class TenantsController {
    */
   @Post('sync/cancel')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async cancelSync(@WorkspaceId() workspaceId: string) {
     const result = this.communicationService.cancelSync(workspaceId);
     return { data: result };
@@ -263,10 +290,20 @@ export class TenantsController {
 
   /**
    * Find orphaned tenants (no integrations, no phone numbers).
+   * Workspace-scoped: full workspace scan.
+   * Tenant-scoped: `[]` — orphan enumeration is inherently cross-tenant, but a
+   * hard 403 would break naive UIs; an empty list matches the "you see nothing
+   * you don't own" model without needing error handling.
    * GET /api/tenants/orphans
    */
   @Get('orphans')
-  async findOrphanedTenants(@WorkspaceId() workspaceId: string) {
+  async findOrphanedTenants(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+  ) {
+    if (callerTenantId) {
+      return { data: [] };
+    }
     const orphans = await this.tenantsService.findOrphanedTenants(workspaceId);
     return { data: orphans };
   }
@@ -277,6 +314,7 @@ export class TenantsController {
    */
   @Delete('orphans')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async deleteOrphanedTenants(
     @WorkspaceId() workspaceId: string,
     @Body() body?: { tenantIds?: string[] },
@@ -286,28 +324,31 @@ export class TenantsController {
   }
 
   /**
-   * Get a specific tenant
+   * Get a specific tenant. Tenant-scoped callers may only read their own.
    * GET /api/tenants/:id
    */
   @Get(':id')
   async getTenant(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
   ) {
-    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId);
+    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId, callerTenantId);
     return { data: tenant };
   }
 
   /**
-   * Update a tenant
+   * Update a tenant. Tenant-scoped callers may only update their own.
    * PUT /api/tenants/:id
    */
   @Put(':id')
   async updateTenant(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
     @Body() dto: { name?: string; status?: TenantStatus; metadata?: Record<string, unknown>; webhookUrl?: string; webhookSecret?: string },
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const tenant = await this.tenantsService.updateTenant(workspaceId, tenantId, dto);
     return { data: tenant };
   }
@@ -328,9 +369,11 @@ export class TenantsController {
   @Put(':id/webhook')
   async configureTenantWebhook(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
     @Body() dto: { webhookUrl?: string; webhookSecret?: string },
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const tenant = await this.tenantsService.configureWebhook(
       workspaceId,
       tenantId,
@@ -347,9 +390,10 @@ export class TenantsController {
   @Get(':id/webhook')
   async getTenantWebhook(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
   ) {
-    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId);
+    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId, callerTenantId);
     return {
       data: {
         webhookUrl: tenant.webhookUrl,
@@ -360,11 +404,13 @@ export class TenantsController {
   }
 
   /**
-   * Delete a tenant
+   * Delete a tenant. Workspace-scoped callers only — a tenant deleting itself
+   * would leave provisioning callers holding a dead reference.
    * DELETE /api/tenants/:id
    */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequiresWorkspaceScope()
   async deleteTenant(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -375,21 +421,25 @@ export class TenantsController {
   // ==================== PHONE NUMBER MANAGEMENT ====================
 
   /**
-   * Get all available phone numbers (from integrations)
+   * Get all available phone numbers across every integration in the workspace.
+   * Workspace-admin only — the response includes `allocatedTo` for cross-tenant
+   * allocations and cannot be safely shown to a tenant caller.
    * GET /api/tenants/phone-numbers/available
    */
   @Get('phone-numbers/available')
+  @RequiresWorkspaceScope()
   async getAvailablePhoneNumbers(@WorkspaceId() workspaceId: string) {
     const phoneNumbers = await this.tenantsService.getAvailablePhoneNumbers(workspaceId);
     return { data: phoneNumbers };
   }
 
   /**
-   * Allocate a phone number to a tenant
+   * Allocate a phone number to a tenant (admin action).
    * POST /api/tenants/:id/phone-numbers
    */
   @Post(':id/phone-numbers')
   @HttpCode(HttpStatus.CREATED)
+  @RequiresWorkspaceScope()
   async allocatePhoneNumber(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -403,24 +453,28 @@ export class TenantsController {
   }
 
   /**
-   * Get phone numbers allocated to a tenant
+   * Get phone numbers allocated to a tenant.
+   * Tenant-scoped callers may read their own numbers.
    * GET /api/tenants/:id/phone-numbers
    */
   @Get(':id/phone-numbers')
   async getTenantPhoneNumbers(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const phoneNumbers = await this.tenantsService.getTenantPhoneNumbers(workspaceId, tenantId);
     return { data: phoneNumbers };
   }
 
   /**
-   * Deallocate a phone number from a tenant
+   * Deallocate a phone number from a tenant (admin action).
    * DELETE /api/tenants/:id/phone-numbers/:allocationId
    */
   @Delete(':id/phone-numbers/:allocationId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequiresWorkspaceScope()
   async deallocatePhoneNumber(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -430,16 +484,19 @@ export class TenantsController {
   }
 
   /**
-   * Set a phone number as default for a tenant
+   * Set a phone number as default for a tenant.
+   * Tenant-scoped callers may set defaults on their own tenant.
    * POST /api/tenants/:id/phone-numbers/:allocationId/default
    */
   @Post(':id/phone-numbers/:allocationId/default')
   @HttpCode(HttpStatus.OK)
   async setDefaultPhoneNumber(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
     @Param('allocationId') allocationId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const allocation = await this.tenantsService.setDefaultPhoneNumber(
       workspaceId,
       tenantId,
@@ -455,6 +512,7 @@ export class TenantsController {
    * GET /api/tenants/phone-numbers/search?country=US&areaCode=415
    */
   @Get('phone-numbers/search')
+  @RequiresWorkspaceScope()
   async searchAvailableNumbers(
     @WorkspaceId() workspaceId: string,
     @Query() query: SearchPhoneNumbersDto,
@@ -469,11 +527,13 @@ export class TenantsController {
   }
 
   /**
-   * Purchase a phone number for a tenant
+   * Purchase a phone number for a tenant (admin action).
+   * Tenant self-service purchase lives at POST /api/v1/tenants/:tenantId/phone-numbers/purchase.
    * POST /api/tenants/:id/phone-numbers/purchase
    */
   @Post(':id/phone-numbers/purchase')
   @HttpCode(HttpStatus.CREATED)
+  @RequiresWorkspaceScope()
   async purchasePhoneNumber(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -490,11 +550,13 @@ export class TenantsController {
   }
 
   /**
-   * Release a provisioned phone number
+   * Release a provisioned phone number (admin action).
+   * Tenant self-service release lives at POST /api/v1/tenants/:tenantId/phone-numbers/:allocationId/release.
    * POST /api/tenants/:id/phone-numbers/:allocationId/release
    */
   @Post(':id/phone-numbers/:allocationId/release')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async releasePhoneNumber(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -515,14 +577,11 @@ export class TenantsController {
    */
   @Post(':id/phone-numbers/refresh-webhooks')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async refreshPhoneWebhooks(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Param('id') tenantId: string,
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot refresh phone webhooks');
-    }
     const result = await this.provisioningService.refreshPhoneWebhooks(workspaceId, tenantId);
     return { data: result };
   }
@@ -539,15 +598,12 @@ export class TenantsController {
    */
   @Post(':id/phone-numbers/set-webhook-url')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async setPhoneSmsWebhookUrl(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Param('id') tenantId: string,
     @Body() dto: { smsUrl: string; smsMethod?: string },
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot set phone webhook URLs');
-    }
     if (!dto?.smsUrl || typeof dto.smsUrl !== 'string') {
       throw new BadRequestException('smsUrl is required');
     }
@@ -573,15 +629,12 @@ export class TenantsController {
    */
   @Patch('phone-numbers/:phoneNumber/reallocate')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async reallocatePhoneNumber(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Param('phoneNumber') phoneNumber: string,
     @Body() dto: { tenantId: string },
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot reallocate phone numbers');
-    }
     const allocation = await this.provisioningService.reallocatePhoneNumber(
       workspaceId,
       phoneNumber,
@@ -598,15 +651,12 @@ export class TenantsController {
    */
   @Patch('phone-numbers/:phoneNumber/call-forwarding')
   @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
   async setPhoneCallForwarding(
     @WorkspaceId() workspaceId: string,
-    @Request() req: any,
     @Param('phoneNumber') phoneNumber: string,
     @Body() dto: { callForwardingNumber: string | null },
   ) {
-    if (req.apiKeyScope === 'tenant') {
-      throw new ForbiddenException('Tenant keys cannot set phone call-forwarding');
-    }
     const result = await this.provisioningService.setPhoneCallForwarding(
       workspaceId,
       phoneNumber,
@@ -623,38 +673,49 @@ export class TenantsController {
   @HttpCode(HttpStatus.OK)
   async retryA2PAttachment(
     @WorkspaceId() workspaceId: string,
-    @Param('id') _tenantId: string,
+    @TenantId() callerTenantId: string | null,
+    @Param('id') tenantId: string,
     @Param('allocationId') allocationId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const result = await this.provisioningService.retryA2PAttachment(workspaceId, allocationId);
     return { data: result };
   }
 
   /**
-   * Get order history for a tenant
+   * Get order history for a tenant.
+   * Tenant-scoped callers may read their own tenant's history.
    * GET /api/tenants/:id/phone-numbers/orders
    */
   @Get(':id/phone-numbers/orders')
   async getTenantOrderHistory(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('id') tenantId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const orders = await this.provisioningService.getTenantOrderHistory(workspaceId, tenantId);
     return { data: orders };
   }
 
   /**
-   * Get all phone number orders for the workspace
+   * Get all phone number orders for the workspace.
+   * Workspace-scoped: all orders. Tenant-scoped: caller's tenant only.
    * GET /api/tenants/phone-numbers/orders
    */
   @Get('phone-numbers/orders')
-  async getWorkspaceOrderHistory(@WorkspaceId() workspaceId: string) {
-    const orders = await this.provisioningService.getWorkspaceOrderHistory(workspaceId);
+  async getWorkspaceOrderHistory(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+  ) {
+    const orders = await this.provisioningService.getWorkspaceOrderHistory(workspaceId, callerTenantId);
     return { data: orders };
   }
 
   /**
-   * Get pricing configuration
+   * Get pricing configuration.
+   * Workspace-level config; the same shape is exposed to tenants at
+   * GET /api/v1/tenants/phone-numbers/pricing so tenants can display prices.
    * GET /api/tenants/pricing
    */
   @Get('pricing')
@@ -664,10 +725,11 @@ export class TenantsController {
   }
 
   /**
-   * Update pricing configuration
+   * Update pricing configuration (workspace-admin only).
    * PUT /api/tenants/pricing
    */
   @Put('pricing')
+  @RequiresWorkspaceScope()
   async updatePricingConfig(
     @WorkspaceId() workspaceId: string,
     @Body() dto: UpdatePricingConfigDto,
@@ -679,11 +741,15 @@ export class TenantsController {
   // ==================== TENANT API KEYS (Admin) ====================
 
   /**
-   * Create an API key for a tenant
+   * Create an API key for a tenant (workspace-admin only).
+   * Minting keys is a cross-tenant mutation that must not be reachable from a
+   * tenant-scoped caller — otherwise Callio's tenant key could mint a key for
+   * an LB customer's tenant in the same workspace.
    * POST /api/tenants/:id/api-keys
    */
   @Post(':id/api-keys')
   @HttpCode(HttpStatus.CREATED)
+  @RequiresWorkspaceScope()
   async createTenantApiKey(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -708,10 +774,13 @@ export class TenantsController {
   }
 
   /**
-   * List API keys for a tenant
+   * List API keys for a tenant (workspace-admin only).
+   * Returns full key secrets and last-used metadata — must not be accessible
+   * to tenant-scoped callers.
    * GET /api/tenants/:id/api-keys
    */
   @Get(':id/api-keys')
+  @RequiresWorkspaceScope()
   async getTenantApiKeys(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -731,11 +800,12 @@ export class TenantsController {
   }
 
   /**
-   * Revoke a tenant API key
+   * Revoke a tenant API key (workspace-admin only).
    * DELETE /api/tenants/:id/api-keys/:keyId
    */
   @Delete(':id/api-keys/:keyId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequiresWorkspaceScope()
   async deleteTenantApiKey(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -747,11 +817,15 @@ export class TenantsController {
   // ==================== TENANT INTEGRATIONS (Admin) ====================
 
   /**
-   * Connect a provider integration for a tenant (admin creates on behalf of tenant)
+   * Connect a provider integration for a tenant (workspace-admin only).
+   * Tenant self-service equivalent: POST /api/v1/tenants/:tenantId/integrations.
+   * Blocking tenant-scoped callers here prevents cross-tenant integration
+   * mutation (Callio tenant key touching an LB tenant's Twilio/OpenPhone).
    * POST /api/tenants/:id/integrations
    */
   @Post(':id/integrations')
   @HttpCode(HttpStatus.CREATED)
+  @RequiresWorkspaceScope()
   async connectTenantIntegration(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -766,10 +840,12 @@ export class TenantsController {
   }
 
   /**
-   * Get all integrations for a tenant
+   * Get all integrations for a tenant (workspace-admin only).
+   * Tenant self-service equivalent: GET /api/v1/tenants/:tenantId/integrations.
    * GET /api/tenants/:id/integrations
    */
   @Get(':id/integrations')
+  @RequiresWorkspaceScope()
   async getTenantIntegrations(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -779,10 +855,11 @@ export class TenantsController {
   }
 
   /**
-   * Update a tenant integration
+   * Update a tenant integration (workspace-admin only).
    * PUT /api/tenants/:id/integrations/:integrationId
    */
   @Put(':id/integrations/:integrationId')
+  @RequiresWorkspaceScope()
   async updateTenantIntegration(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -805,11 +882,12 @@ export class TenantsController {
   }
 
   /**
-   * Delete a tenant integration
+   * Delete a tenant integration (workspace-admin only).
    * DELETE /api/tenants/:id/integrations/:integrationId
    */
   @Delete(':id/integrations/:integrationId')
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RequiresWorkspaceScope()
   async deleteTenantIntegration(
     @WorkspaceId() workspaceId: string,
     @Param('id') tenantId: string,
@@ -830,30 +908,43 @@ export class TenantsV1Controller {
     private readonly provisioningService: PhoneNumberProvisioningService,
   ) {}
 
+  private assertCanAccessTenant = assertCanAccessTenant;
+
   /**
-   * Get tenant by external ID
+   * Get tenant by external ID.
+   * Tenant-scoped callers may only look up their own tenant; a mismatch
+   * returns null rather than exposing another tenant's record.
    * GET /api/v1/tenants/by-external-id?externalId=xxx
    */
   @Get('by-external-id')
   async getTenantByExternalId(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Query('externalId') externalId: string,
   ) {
     const tenant = await this.tenantsService.getTenantByExternalId(workspaceId, externalId);
+    if (tenant && callerTenantId && tenant.id !== callerTenantId) {
+      return { data: null };
+    }
     return { data: tenant };
   }
 
   /**
-   * Get phone numbers for a tenant by external ID
+   * Get phone numbers for a tenant by external ID.
+   * Tenant-scoped callers may only look up their own.
    * GET /api/v1/tenants/by-external-id/phone-numbers?externalId=xxx
    */
   @Get('by-external-id/phone-numbers')
   async getTenantPhoneNumbersByExternalId(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Query('externalId') externalId: string,
   ) {
     const tenant = await this.tenantsService.getTenantByExternalId(workspaceId, externalId);
     if (!tenant) {
+      return { data: [] };
+    }
+    if (callerTenantId && tenant.id !== callerTenantId) {
       return { data: [] };
     }
     const phoneNumbers = await this.tenantsService.getTenantPhoneNumbers(workspaceId, tenant.id);
@@ -867,8 +958,10 @@ export class TenantsV1Controller {
   @Get(':tenantId/default-phone-number')
   async getDefaultPhoneNumber(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const phoneNumber = await this.tenantsService.getTenantDefaultPhoneNumber(workspaceId, tenantId);
     return { data: phoneNumber };
   }
@@ -897,9 +990,11 @@ export class TenantsV1Controller {
   @HttpCode(HttpStatus.CREATED)
   async connectIntegration(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
     @Body() dto: ConnectTenantIntegrationDto,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const integration = await this.tenantsService.connectTenantIntegration(
       workspaceId,
       tenantId,
@@ -925,8 +1020,10 @@ export class TenantsV1Controller {
   @Get(':tenantId/integrations')
   async getIntegrations(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const integrations = await this.tenantsService.getTenantIntegrations(workspaceId, tenantId);
     // Return without encrypted credentials
     return {
@@ -950,9 +1047,11 @@ export class TenantsV1Controller {
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteIntegration(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
     @Param('integrationId') integrationId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     await this.tenantsService.deleteTenantIntegration(workspaceId, tenantId, integrationId);
   }
 
@@ -1003,9 +1102,11 @@ export class TenantsV1Controller {
   @HttpCode(HttpStatus.CREATED)
   async purchasePhoneNumber(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
     @Body() dto: PurchasePhoneNumberDto,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const result = await this.provisioningService.tenantPurchaseNumber(
       workspaceId,
       tenantId,
@@ -1024,9 +1125,11 @@ export class TenantsV1Controller {
   @HttpCode(HttpStatus.OK)
   async releasePhoneNumber(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
     @Param('allocationId') allocationId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const result = await this.provisioningService.tenantReleaseNumber(
       workspaceId,
       tenantId,
@@ -1042,17 +1145,22 @@ export class TenantsV1Controller {
   @Get(':tenantId/phone-numbers/orders')
   async getTenantOrderHistory(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const orders = await this.provisioningService.getTenantOrderHistory(workspaceId, tenantId);
     return { data: orders };
   }
 
   /**
-   * Update pricing configuration
+   * Update pricing configuration (workspace-admin only).
+   * Historically mounted under /v1/ for legacy reasons; keep the URL but
+   * enforce workspace scope since it's a config mutation.
    * PUT /api/v1/tenants/phone-numbers/pricing
    */
   @Put('phone-numbers/pricing')
+  @RequiresWorkspaceScope()
   async updatePricingConfig(
     @WorkspaceId() workspaceId: string,
     @Body() dto: UpdatePricingConfigDto,
@@ -1102,9 +1210,11 @@ export class TenantsV1Controller {
   @Put(':tenantId/webhook')
   async configureWebhook(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
     @Body() dto: { webhookUrl?: string; webhookSecret?: string },
   ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
     const tenant = await this.tenantsService.configureWebhook(
       workspaceId,
       tenantId,
@@ -1126,9 +1236,10 @@ export class TenantsV1Controller {
   @Get(':tenantId/webhook')
   async getWebhook(
     @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
     @Param('tenantId') tenantId: string,
   ) {
-    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId);
+    const tenant = await this.tenantsService.getTenant(workspaceId, tenantId, callerTenantId);
     return {
       data: {
         webhookUrl: tenant.webhookUrl,
