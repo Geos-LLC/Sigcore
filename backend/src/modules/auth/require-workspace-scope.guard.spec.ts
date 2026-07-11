@@ -1,10 +1,8 @@
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
 import { RequireWorkspaceScopeGuard } from './require-workspace-scope.guard';
 
 describe('RequireWorkspaceScopeGuard', () => {
   let guard: RequireWorkspaceScopeGuard;
-  let reflector: Reflector;
 
   const createMockContext = (request: Record<string, unknown>): ExecutionContext =>
     ({
@@ -14,12 +12,10 @@ describe('RequireWorkspaceScopeGuard', () => {
     }) as unknown as ExecutionContext;
 
   beforeEach(() => {
-    reflector = new Reflector();
-    guard = new RequireWorkspaceScopeGuard(reflector);
+    guard = new RequireWorkspaceScopeGuard();
   });
 
-  it('allows workspace-scoped key on protected endpoint', () => {
-    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(true);
+  it('allows workspace-scoped key', () => {
     const ctx = createMockContext({
       authScopeType: 'workspace',
       workspaceId: 'ws-1',
@@ -29,8 +25,7 @@ describe('RequireWorkspaceScopeGuard', () => {
     expect(guard.canActivate(ctx)).toBe(true);
   });
 
-  it('rejects tenant-scoped key on protected endpoint', () => {
-    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(true);
+  it('rejects tenant-scoped key', () => {
     const ctx = createMockContext({
       tenantId: 'tenant-abc',
       authScopeType: 'tenant',
@@ -44,20 +39,7 @@ describe('RequireWorkspaceScopeGuard', () => {
     );
   });
 
-  it('passes through when endpoint is not marked', () => {
-    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
-    const ctx = createMockContext({
-      tenantId: 'tenant-abc',
-      authScopeType: 'tenant',
-      workspaceId: 'ws-1',
-      method: 'GET',
-      url: '/tenants',
-    });
-    expect(guard.canActivate(ctx)).toBe(true);
-  });
-
-  it('rejects tenant scope on GET /tenants/orphans DELETE (workspace-admin cleanup)', () => {
-    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(true);
+  it('rejects tenant scope on DELETE /tenants/orphans (workspace-admin cleanup)', () => {
     const ctx = createMockContext({
       tenantId: 'tenant-abc',
       authScopeType: 'tenant',
@@ -69,7 +51,6 @@ describe('RequireWorkspaceScopeGuard', () => {
   });
 
   it('rejects tenant scope on POST /tenants/:id/api-keys (cross-tenant key mint)', () => {
-    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(true);
     const ctx = createMockContext({
       tenantId: 'callio-tenant',
       authScopeType: 'tenant',
@@ -78,5 +59,15 @@ describe('RequireWorkspaceScopeGuard', () => {
       url: '/tenants/some-lb-tenant/api-keys',
     });
     expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
+  });
+
+  it('allows service-key workspace scope', () => {
+    const ctx = createMockContext({
+      authScopeType: 'workspace',
+      workspaceId: 'ws-1',
+      method: 'POST',
+      url: '/tenants',
+    });
+    expect(guard.canActivate(ctx)).toBe(true);
   });
 });
