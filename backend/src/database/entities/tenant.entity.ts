@@ -45,6 +45,18 @@ export class Tenant {
   @Column({ name: 'webhook_secret', type: 'text', nullable: true })
   webhookSecret?: string;
 
+  /**
+   * Wave-2 Voice Foundation Phase 1 (PR 2, 2026-07-12) — customer-configured
+   * inbound voice endpoint. When populated, PR 3 will forward inbound Twilio
+   * voice webhooks to this URL and relay the TwiML response back to Twilio.
+   *
+   * PR 2 only stores/reads via the tenant voice-webhook management API; no
+   * runtime code path consumes this value until PR 3 lands. Do not conflate
+   * with `webhookUrl` which continues to serve outbound event notifications.
+   */
+  @Column({ name: 'voice_inbound_url', type: 'text', nullable: true })
+  voiceInboundUrl?: string | null;
+
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 

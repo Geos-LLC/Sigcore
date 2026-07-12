@@ -415,6 +415,57 @@ export class TenantsService {
   }
 
   /**
+   * Wave-2 Voice Foundation Phase 1 (PR 2) — set or clear the tenant's
+   * inbound voice endpoint URL.
+   *
+   * Callers pass either a validated URL string (see
+   * `validateVoiceInboundUrl`) or `null` to clear. Persistence writes null
+   * on clear so no stale value survives.
+   *
+   * Status/deletion checks:
+   *   - `getTenant(workspaceId, tenantId, callerTenantId)` — already enforces
+   *     workspace scope + caller-tenant scope + not-found → 404.
+   *   - INACTIVE or SUSPENDED tenants reject with 403. Callers cannot flip
+   *     voice routing on a disabled tenant.
+   */
+  async setVoiceInboundUrl(
+    workspaceId: string,
+    tenantId: string,
+    callerTenantId: string | null,
+    voiceInboundUrl: string | null,
+  ): Promise<Tenant> {
+    const tenant = await this.getTenant(workspaceId, tenantId, callerTenantId);
+    if (tenant.status !== TenantStatus.ACTIVE) {
+      throw new ForbiddenException(
+        `Tenant ${tenantId} is ${tenant.status}; voice endpoint cannot be modified.`,
+      );
+    }
+    tenant.voiceInboundUrl = voiceInboundUrl;
+    await this.tenantRepo.save(tenant);
+    this.logger.log(
+      `setVoiceInboundUrl tenant=${tenantId} configured=${!!voiceInboundUrl}`,
+    );
+    return tenant;
+  }
+
+  /**
+   * PR 2 read path — returns the tenant's currently-configured voice inbound
+   * URL. This is the ONLY runtime consumer of `tenant.voice_inbound_url` in
+   * PR 2. Any additional runtime read is by definition PR 3 or later scope.
+   */
+  async getVoiceInboundConfig(
+    workspaceId: string,
+    tenantId: string,
+    callerTenantId: string | null,
+  ): Promise<{ voiceInboundUrl: string | null; configured: boolean }> {
+    const tenant = await this.getTenant(workspaceId, tenantId, callerTenantId);
+    return {
+      voiceInboundUrl: tenant.voiceInboundUrl ?? null,
+      configured: !!tenant.voiceInboundUrl,
+    };
+  }
+
+  /**
    * Delete a tenant
    */
   async deleteTenant(workspaceId: string, tenantId: string): Promise<void> {
