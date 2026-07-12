@@ -16,6 +16,9 @@ import {
 } from '@nestjs/common';
 import { TenantsService, CreateTenantDto, AllocatePhoneNumberDto, ConnectTenantIntegrationDto } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
+import { SetVoiceWebhookDto } from './dto/voice-webhook.dto';
+import { validateVoiceInboundUrl } from './voice-webhook-url.validator';
+import { ConfigService } from '@nestjs/config';
 import { ApiKeysService } from '../api/api-keys.service';
 import { CommunicationService } from '../communication/communication.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
@@ -903,6 +906,7 @@ export class TenantsV1Controller {
   constructor(
     private readonly tenantsService: TenantsService,
     private readonly provisioningService: PhoneNumberProvisioningService,
+    private readonly configService: ConfigService,
   ) {}
 
   private assertCanAccessTenant = assertCanAccessTenant;
@@ -1246,4 +1250,86 @@ export class TenantsV1Controller {
     };
   }
 
+  // ==================== TENANT VOICE INBOUND ENDPOINT (Wave-2 PR 2) ====================
+  //
+  // Manage the tenant-configured inbound voice endpoint. PR 2 is
+  // configuration-only — nothing consumes `voice_inbound_url` at runtime until
+  // PR 3 wires it into the inbound Twilio voice router behind the
+  // SIGCORE_VOICE_INBOUND_FORWARD_ENABLED flag.
+
+  /**
+   * Get the tenant's configured inbound voice endpoint.
+   * GET /api/v1/tenants/:tenantId/voice-webhook
+   *
+   * Auth: SigcoreAuthGuard + assertCanAccessTenant — same model as the
+   * outbound-events webhook read (:tenantId/webhook).
+   */
+  @Get(':tenantId/voice-webhook')
+  async getVoiceWebhook(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+    @Param('tenantId') tenantId: string,
+  ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
+    const config = await this.tenantsService.getVoiceInboundConfig(
+      workspaceId,
+      tenantId,
+      callerTenantId,
+    );
+    return { data: config };
+  }
+
+  /**
+   * Set or clear the tenant's inbound voice endpoint URL.
+   * PUT /api/v1/tenants/:tenantId/voice-webhook
+   *
+   * Body:
+   *   { voiceInboundUrl: "https://..." }  → set
+   *   { voiceInboundUrl: null }          → clear
+   *   {}                                  → clear (omitted field)
+   *
+   * URL validation lives in `validateVoiceInboundUrl`:
+   *   - accepts https:// (any host, any path)
+   *   - accepts http:// to localhost / 127.0.0.1 only when NODE_ENV is
+   *     'development' or 'test'
+   *   - rejects ftp, ws, wss, file, javascript, data, gopher, etc.
+   *   - rejects empty strings (use null to clear)
+   *   - rejects malformed URLs
+   *
+   * The service rejects INACTIVE or SUSPENDED tenants (403).
+   */
+  @Put(':tenantId/voice-webhook')
+  async setVoiceWebhook(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+    @Param('tenantId') tenantId: string,
+    @Body() dto: SetVoiceWebhookDto,
+  ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
+    let toStore: string | null;
+    if (dto?.voiceInboundUrl === undefined || dto?.voiceInboundUrl === null) {
+      toStore = null;
+    } else {
+      const nodeEnv = (
+        this.configService.get<string>('NODE_ENV') ?? 'production'
+      ).toLowerCase();
+      const allowInsecureLocalhost =
+        nodeEnv === 'development' || nodeEnv === 'test';
+      toStore = validateVoiceInboundUrl(dto.voiceInboundUrl, {
+        allowInsecureLocalhost,
+      });
+    }
+    const tenant = await this.tenantsService.setVoiceInboundUrl(
+      workspaceId,
+      tenantId,
+      callerTenantId,
+      toStore,
+    );
+    return {
+      data: {
+        voiceInboundUrl: tenant.voiceInboundUrl ?? null,
+        configured: !!tenant.voiceInboundUrl,
+      },
+    };
+  }
 }
