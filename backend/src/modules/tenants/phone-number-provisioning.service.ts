@@ -390,6 +390,62 @@ export class PhoneNumberProvisioningService {
   }
 
   /**
+   * Wave-2 Task 4 (PR-1 correction, 2026-07-12) — apply a partial webhook
+   * override to a purchased Twilio number. Used after `purchaseNumber` when
+   * the caller supplied custom voice/fallback/status URLs that must override
+   * the default workspace-scoped webhook URLs configured at purchase time.
+   *
+   * Only fields present in `urls` are sent to Twilio; every other webhook
+   * attribute is preserved per Twilio's REST update semantics. Wraps
+   * `TwilioProvider.updateNumberWebhooks`.
+   *
+   * Returns the provider result. Never throws — caller decides how to react
+   * to a partial failure (e.g. the forVoice metadata still gets persisted so
+   * operators can see the intent).
+   */
+  async applyPhoneNumberWebhookOverrides(
+    workspaceId: string,
+    phoneNumberSid: string,
+    urls: {
+      smsUrl?: string;
+      voiceUrl?: string;
+      voiceFallbackUrl?: string;
+      statusCallbackUrl?: string;
+    },
+  ): Promise<{ success: boolean; applied: string[]; error?: string }> {
+    if (
+      urls.smsUrl === undefined &&
+      urls.voiceUrl === undefined &&
+      urls.voiceFallbackUrl === undefined &&
+      urls.statusCallbackUrl === undefined
+    ) {
+      return { success: true, applied: [] };
+    }
+    const integration = await this.integrationRepo.findOne({
+      where: {
+        workspaceId,
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+    if (!integration) {
+      return {
+        success: false,
+        applied: [],
+        error: `No active Twilio integration in workspace ${workspaceId}`,
+      };
+    }
+    const credentials = this.encryptionService.decrypt(
+      integration.credentialsEncrypted,
+    );
+    return this.twilioProvider.updateNumberWebhooks(
+      credentials,
+      phoneNumberSid,
+      urls,
+    );
+  }
+
+  /**
    * Release a phone number from a tenant
    */
   async releaseNumber(

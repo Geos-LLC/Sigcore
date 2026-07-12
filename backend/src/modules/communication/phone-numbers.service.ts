@@ -1,10 +1,11 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, BadGatewayException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
   CommunicationIntegration,
   Sender,
 } from '../../database/entities';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { ChannelType, SenderMode, SenderStatus } from '../../database/entities/sender.entity';
 import { IntegrationStatus, ProviderType } from '../../database/entities/communication-integration.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
@@ -16,6 +17,7 @@ import {
   ListPhoneNumbersQueryDto,
   PhoneNumberResponse,
 } from './dto/phone-number.dto';
+import { WebhookConfigDto, WebhookConfigResult } from './dto/webhook-config.dto';
 
 @Injectable()
 export class PhoneNumbersService {
@@ -26,6 +28,8 @@ export class PhoneNumbersService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(Sender)
     private senderRepo: Repository<Sender>,
+    @InjectRepository(TenantPhoneNumber)
+    private tpnRepo: Repository<TenantPhoneNumber>,
     private encryptionService: EncryptionService,
     private twilioProvider: TwilioProvider,
   ) {}
@@ -246,5 +250,115 @@ export class PhoneNumbersService {
 
     const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
     return this.twilioProvider.searchAvailableNumbers(credentials, country, areaCode);
+  }
+
+  /**
+   * Wave-2 Task 4 — configure provider-side webhook URLs on an existing TPN.
+   *
+   * Called from `POST /v1/phone-numbers/:tpnId/webhook-config` after
+   * IntegrationResourceGuard verified (workspaceId, tenantId, integrationId,
+   * tpnId) all line up. This method never re-authorizes — the guard is the
+   * only place authorization lives.
+   *
+   * Behaviour:
+   *   - Every URL field present in the DTO is applied to Twilio in a single
+   *     PATCH-style call via `TwilioProvider.updateNumberWebhooks`. Twilio's
+   *     REST update semantics preserve unlisted attributes, so voice-only
+   *     updates never touch SMS config and vice versa.
+   *   - Empty body (no URL fields) → 400 (`boundary_empty_body_returns_400`).
+   *   - Provider errors surface as 502 (BadGateway), not 500 — same policy
+   *     as TwilioVoiceService ops.
+   *   - Persists the applied URLs on `TenantPhoneNumber.metadata.webhookConfig`
+   *     so subsequent reads can inspect the last-known state without another
+   *     Twilio round-trip.
+   *   - Wave-2 Task 4 PR-1 correction (2026-07-12): voiceFallbackUrl and
+   *     statusCallbackUrl are now applied to Twilio (previously only
+   *     persisted to metadata).
+   */
+  async configureWebhooks(
+    tpnId: string,
+    dto: WebhookConfigDto,
+  ): Promise<WebhookConfigResult> {
+    if (
+      dto.voiceUrl === undefined &&
+      dto.voiceFallbackUrl === undefined &&
+      dto.smsUrl === undefined &&
+      dto.statusCallbackUrl === undefined
+    ) {
+      throw new BadRequestException(
+        'At least one webhook URL (voiceUrl, voiceFallbackUrl, smsUrl, statusCallbackUrl) is required',
+      );
+    }
+
+    const tpn = await this.tpnRepo.findOne({ where: { id: tpnId } });
+    if (!tpn) {
+      throw new NotFoundException(`TenantPhoneNumber ${tpnId} not found`);
+    }
+    if (!tpn.providerId) {
+      throw new BadRequestException(
+        `TenantPhoneNumber ${tpnId} has no providerId (Twilio SID) — cannot configure webhooks`,
+      );
+    }
+
+    const integration = await this.integrationRepo.findOne({
+      where: {
+        id: dto.integrationId,
+        workspaceId: tpn.workspaceId,
+      },
+    });
+    if (!integration) {
+      throw new NotFoundException(
+        `Integration ${dto.integrationId} not found in workspace ${tpn.workspaceId}`,
+      );
+    }
+
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+
+    // Only fields supplied in the DTO reach Twilio. The provider method
+    // relies on Twilio's REST preserve-unlisted-fields semantic so we never
+    // clobber SMS state during a voice-only update, and never clobber voice
+    // state during an SMS-only update.
+    const applied: WebhookConfigResult['applied'] = {};
+    try {
+      const res = await this.twilioProvider.updateNumberWebhooks(
+        credentials,
+        tpn.providerId,
+        {
+          smsUrl: dto.smsUrl,
+          voiceUrl: dto.voiceUrl,
+          voiceFallbackUrl: dto.voiceFallbackUrl,
+          statusCallbackUrl: dto.statusCallbackUrl,
+        },
+      );
+      if (!res.success) {
+        throw new BadGatewayException(
+          `Twilio updateNumberWebhooks failed: ${res.error ?? 'unknown error'}`,
+        );
+      }
+      if (dto.smsUrl !== undefined) applied.smsUrl = dto.smsUrl;
+      if (dto.voiceUrl !== undefined) applied.voiceUrl = dto.voiceUrl;
+      if (dto.voiceFallbackUrl !== undefined) applied.voiceFallbackUrl = dto.voiceFallbackUrl;
+      if (dto.statusCallbackUrl !== undefined) applied.statusCallbackUrl = dto.statusCallbackUrl;
+    } catch (err: any) {
+      if (err instanceof BadGatewayException) throw err;
+      this.logger.error(
+        `[configureWebhooks] unexpected error for tpn=${tpnId}: ${err?.message}`,
+      );
+      throw new BadGatewayException(
+        `Twilio webhook configuration failed: ${err?.message ?? 'unknown error'}`,
+      );
+    }
+
+    const metadata = (tpn.metadata as Record<string, unknown>) || {};
+    metadata.webhookConfig = {
+      ...(metadata.webhookConfig as Record<string, unknown> | undefined),
+      ...applied,
+      configuredAt: new Date().toISOString(),
+      configuredVia: 'v1/phone-numbers/:tpnId/webhook-config',
+    };
+    tpn.metadata = metadata;
+    await this.tpnRepo.save(tpn);
+
+    return { tpnId, applied };
   }
 }

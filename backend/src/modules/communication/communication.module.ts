@@ -10,7 +10,11 @@ import { CallsController, CallsV1Controller } from './calls.controller';
 import { AnalyticsController } from './analytics.controller';
 import { SendersController } from './senders.controller';
 import { MessagesController } from './messages.controller';
-import { PhoneNumbersController, PhoneNumbersV1Controller } from './phone-numbers.controller';
+import {
+  PhoneNumbersController,
+  PhoneNumbersV1Controller,
+  PhoneNumbersWebhookConfigController,
+} from './phone-numbers.controller';
 import { CommunicationService } from './communication.service';
 import { SendersService } from './senders.service';
 import { PhoneNumbersService } from './phone-numbers.service';
@@ -70,6 +74,11 @@ import {
     MessagesController,
     PhoneNumbersController,
     PhoneNumbersV1Controller,
+    // Wave-2 Task 4 (2026-07-12): dedicated controller for
+    // POST /v1/phone-numbers/:tpnId/webhook-config so we can stack
+    // @UseIntegrationResourceGuard('tpnId') without disturbing the
+    // pre-existing v1 phone-number routes which have different auth.
+    PhoneNumbersWebhookConfigController,
   ],
   providers: [
     CommunicationService,

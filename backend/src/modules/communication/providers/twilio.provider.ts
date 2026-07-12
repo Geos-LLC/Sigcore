@@ -577,6 +577,71 @@ export class TwilioProvider implements CommunicationProvider {
   }
 
   /**
+   * Partial update of a Twilio phone number's webhook fields. Only the fields
+   * present in `urls` are sent to Twilio; every unset field is preserved on the
+   * Twilio side. Twilio's REST update semantics preserve unlisted attributes,
+   * so this is safe to use for voice-only, sms-only, or partial updates
+   * without clobbering unrelated legs.
+   *
+   * Introduced for the Wave-2 Task 4 webhook-config endpoint so operators can
+   * supply any combination of {smsUrl, voiceUrl, voiceFallbackUrl,
+   * statusCallbackUrl} and get exactly those fields applied. The prior
+   * `configureWebhooks` (both legs at once) and `updateSmsWebhook` (sms only)
+   * remain for existing callers who explicitly want that shape.
+   */
+  async updateNumberWebhooks(
+    credentialsString: string,
+    phoneNumberSid: string,
+    urls: {
+      smsUrl?: string;
+      voiceUrl?: string;
+      voiceFallbackUrl?: string;
+      statusCallbackUrl?: string;
+    },
+  ): Promise<{ success: boolean; applied: string[]; error?: string }> {
+    try {
+      const credentials = JSON.parse(credentialsString) as TwilioCredentials;
+      const client = this.createClient(credentials);
+      const params: Record<string, unknown> = {};
+      const applied: string[] = [];
+      if (urls.smsUrl !== undefined) {
+        params.smsUrl = urls.smsUrl;
+        params.smsMethod = 'POST';
+        applied.push('smsUrl');
+      }
+      if (urls.voiceUrl !== undefined) {
+        params.voiceUrl = urls.voiceUrl;
+        params.voiceMethod = 'POST';
+        applied.push('voiceUrl');
+      }
+      if (urls.voiceFallbackUrl !== undefined) {
+        params.voiceFallbackUrl = urls.voiceFallbackUrl;
+        params.voiceFallbackMethod = 'POST';
+        applied.push('voiceFallbackUrl');
+      }
+      if (urls.statusCallbackUrl !== undefined) {
+        params.statusCallback = urls.statusCallbackUrl;
+        params.statusCallbackMethod = 'POST';
+        applied.push('statusCallbackUrl');
+      }
+      if (applied.length === 0) {
+        return { success: true, applied: [] };
+      }
+      await client.incomingPhoneNumbers(phoneNumberSid).update(params);
+      this.logger.log(
+        `updateNumberWebhooks sid=${phoneNumberSid} applied=${applied.join(',')}`,
+      );
+      return { success: true, applied };
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error(
+        `updateNumberWebhooks sid=${phoneNumberSid} failed: ${err.message}`,
+      );
+      return { success: false, applied: [], error: err.message };
+    }
+  }
+
+  /**
    * Update only the SMS webhook URL on a Twilio number — leaves voice config untouched.
    * Idempotent: calling repeatedly with the same URL is safe.
    */

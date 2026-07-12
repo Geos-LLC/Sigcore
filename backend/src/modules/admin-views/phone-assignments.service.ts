@@ -65,6 +65,22 @@ export interface ProvisionAndAssignDto {
   capabilities?: Array<'sms' | 'voice'>;
   makeDefault?: boolean;
   orderedBy?: string;
+
+  // Wave-2 Task 4 — voice-friendly provisioning. Backward compatible: when
+  // omitted or false, behaviour is exactly as before this PR. When true, we
+  // (1) tag the new TenantPhoneNumber.metadata.voice=true so subsequent code
+  // can distinguish voice-provisioned numbers from SMS-only, and (2) forward
+  // the voice-friendly webhook URLs to the provider config layer.
+  //
+  // The provider-side webhook plumbing is a follow-up: for now the URLs are
+  // recorded on the TPN metadata so operators can inspect intent. When the
+  // downstream provisioner grows a voice webhook path (or the caller uses
+  // POST /v1/phone-numbers/:tpnId/webhook-config), these values are the
+  // source of truth for the first configuration.
+  forVoice?: boolean;
+  voiceUrl?: string;
+  voiceFallbackUrl?: string;
+  statusCallbackUrl?: string;
 }
 
 export interface ProvisionAndAssignResult {
@@ -307,6 +323,62 @@ export class PhoneAssignmentsService {
       );
     }
     const tpn = purchaseResult.allocation;
+
+    // Wave-2 Task 4 — voice tagging + Twilio webhook overrides. When forVoice
+    // is set with any of {voiceUrl, voiceFallbackUrl, statusCallbackUrl}, we
+    // apply those to Twilio BEFORE persisting the PPA so any failure at least
+    // leaves the number configured. `purchaseNumber` already set a default
+    // voiceUrl to the workspace-scoped inbound handler; supplied URLs
+    // override or supplement those. Backward-compatible: forVoice=false skips
+    // this block entirely — existing paths unchanged.
+    //
+    // PR-1 correction (2026-07-12): the previous version only persisted the
+    // URLs to metadata without touching Twilio. voiceFallbackUrl and
+    // statusCallbackUrl were never delivered to the provider. Now they are.
+    if (dto.forVoice) {
+      const overrides: {
+        voiceUrl?: string;
+        voiceFallbackUrl?: string;
+        statusCallbackUrl?: string;
+      } = {};
+      if (dto.voiceUrl !== undefined) overrides.voiceUrl = dto.voiceUrl;
+      if (dto.voiceFallbackUrl !== undefined) overrides.voiceFallbackUrl = dto.voiceFallbackUrl;
+      if (dto.statusCallbackUrl !== undefined) overrides.statusCallbackUrl = dto.statusCallbackUrl;
+
+      const applyRes = await this.provisioning.applyPhoneNumberWebhookOverrides(
+        workspaceId,
+        tpn.providerId!,
+        overrides,
+      );
+      if (!applyRes.success) {
+        this.logger.warn(
+          `[provisionAndAssign] forVoice Twilio override failed for TPN ${tpn.id}: ${applyRes.error} — continuing with metadata tag only`,
+        );
+      } else if (applyRes.applied.length > 0) {
+        this.logger.log(
+          `[provisionAndAssign] forVoice Twilio override applied for TPN ${tpn.id}: ${applyRes.applied.join(',')}`,
+        );
+      }
+
+      const md = (tpn.metadata as Record<string, unknown>) || {};
+      md.voice = true;
+      md.voiceWebhooks = {
+        voiceUrl: dto.voiceUrl ?? null,
+        voiceFallbackUrl: dto.voiceFallbackUrl ?? null,
+        statusCallbackUrl: dto.statusCallbackUrl ?? null,
+        appliedToProvider: applyRes.success ? applyRes.applied : [],
+        providerError: applyRes.success ? null : applyRes.error ?? 'unknown',
+        recordedAt: new Date().toISOString(),
+      };
+      tpn.metadata = md;
+      try {
+        await this.tpnRepo.save(tpn);
+      } catch (e: any) {
+        this.logger.warn(
+          `[provisionAndAssign] forVoice metadata save failed for TPN ${tpn.id}: ${e?.message} — continuing (not fatal)`,
+        );
+      }
+    }
 
     let assignedRow: AssignedRow;
     try {
