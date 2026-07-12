@@ -297,6 +297,20 @@ export class TenantVoiceForwarderService {
     if (looksAxiosLike) {
       const axErr = err as AxiosError;
       const code = axErr.code;
+      // Response-body size exceeded `maxContentLength`. Axios aborts the
+      // download and rejects with `ERR_BAD_RESPONSE` + a message string
+      // containing "maxContentLength" — stable across axios 0.x and 1.x.
+      // Detect explicitly so the classifier reports `oversized_response`
+      // rather than falling through to the ambiguous `network_reset`
+      // default. The `validateTwimlShape` size guard is unreachable in
+      // production because axios rejects before the body is buffered;
+      // this branch is what makes `oversized_response` observable.
+      if (
+        typeof axErr.message === 'string' &&
+        /maxContentLength/i.test(axErr.message)
+      ) {
+        return { reason: 'oversized_response', category: 'ambiguous' };
+      }
       if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
         return { reason: 'timeout', category: 'ambiguous' };
       }

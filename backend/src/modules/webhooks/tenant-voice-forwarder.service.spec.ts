@@ -203,6 +203,25 @@ describe('TenantVoiceForwarderService.forward', () => {
       expect(result.reason).toBe(reason);
     });
 
+    it('axios maxContentLength violation → oversized_response (ambiguous)', async () => {
+      // Regression for Stage 1 finding: axios aborts mid-download when the
+      // response exceeds `maxContentLength`, so validateTwimlShape's size
+      // guard never fires in production. Prior to the classifier fix this
+      // was reported as `network_reset`. It must be `oversized_response`.
+      const svc = build();
+      mockedAxios.request.mockRejectedValueOnce(
+        Object.assign(
+          new Error('maxContentLength size of 65536 exceeded'),
+          { isAxiosError: true, code: 'ERR_BAD_RESPONSE' },
+        ),
+      );
+      const result = await svc.forward(baseInput());
+      expect(result.outcome).toBe('fallback');
+      if (result.outcome !== 'fallback') return;
+      expect(result.category).toBe('ambiguous');
+      expect(result.reason).toBe('oversized_response');
+    });
+
     it('HTTP 500 → ambiguous fallback', async () => {
       const svc = build();
       mockedAxios.request.mockRejectedValueOnce(
