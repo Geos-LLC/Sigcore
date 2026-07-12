@@ -29,6 +29,19 @@ export class SearchPhoneNumbersDto {
   voiceCapable?: boolean;
 }
 
+/**
+ * Wave-2 Voice Foundation Phase 1 (PR 4) — purchase channel selector.
+ *
+ *   sms   — SMS-only allocation (backward-compatible default when field
+ *           omitted). Twilio number gets an SMS webhook URL. A2P
+ *           attachment runs.
+ *   voice — Voice-only allocation. Twilio number gets a Voice URL +
+ *           StatusCallback. A2P attachment is skipped.
+ *   both  — SMS + voice. Both URL sets are configured. A2P attachment
+ *           runs.
+ */
+export type PurchaseChannel = 'sms' | 'voice' | 'both';
+
 export class PurchasePhoneNumberDto {
   @IsString()
   phoneNumber: string;
@@ -36,6 +49,14 @@ export class PurchasePhoneNumberDto {
   @IsString()
   @IsOptional()
   friendlyName?: string;
+
+  /**
+   * Requested channel for this allocation. Defaults to 'sms' when omitted
+   * so existing callers get byte-identical behaviour vs pre-PR-4.
+   */
+  @IsEnum(['sms', 'voice', 'both'] as const)
+  @IsOptional()
+  channel?: PurchaseChannel;
 }
 
 export class UpdatePricingConfigDto {

@@ -545,6 +545,7 @@ export class TenantsController {
       dto.phoneNumber,
       undefined, // orderedBy - could be extracted from JWT
       dto.friendlyName,
+      dto.channel,
     );
     return { data: result };
   }
@@ -1113,6 +1114,7 @@ export class TenantsV1Controller {
       tenantId,
       dto.phoneNumber,
       dto.friendlyName,
+      dto.channel,
     );
     return { data: result };
   }
