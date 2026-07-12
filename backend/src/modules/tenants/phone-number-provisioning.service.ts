@@ -223,6 +223,10 @@ export class PhoneNumberProvisioningService {
     phoneNumber: string,
     orderedBy?: string,
     friendlyName?: string,
+    // Wave-2 Voice Foundation PR 4: purchase channel selector. Optional; when
+    // omitted defaults to 'sms' so all pre-PR-4 callers see byte-identical
+    // behaviour. See PurchasePhoneNumberDto for the semantics of each value.
+    channel: 'sms' | 'voice' | 'both' = 'sms',
   ): Promise<PurchaseResult> {
     this.logger.log(`Purchasing number: workspace=${workspaceId}, tenant=${tenantId}, number=${phoneNumber}`);
 
@@ -277,20 +281,46 @@ export class PhoneNumberProvisioningService {
         ...order.metadata,
         capabilities: purchased.capabilities,
         friendlyName: purchased.friendlyName,
+        requestedChannel: channel,
       };
 
-      // Configure webhooks on the new number
+      // Wave-2 Voice Foundation PR 4: verify Twilio-reported capabilities
+      // support the requested channel BEFORE we commit further state. If the
+      // caller asked for voice on an SMS-only number, or SMS on a voice-only
+      // number, fail loud rather than allocate silently-broken routing.
+      this.assertPurchaseChannelMatchesCapabilities(
+        channel,
+        purchased.capabilities ?? [],
+        phoneNumber,
+      );
+
+      // Configure webhooks on the new number — channel-scoped. Twilio's REST
+      // update preserves unlisted fields (per `updateNumberWebhooks`'s
+      // contract from PR 1), so voice-only purchases never touch SMS state
+      // and vice versa.
       const baseUrl = this.configService.get('BASE_URL') || process.env.BASE_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
       if (baseUrl) {
         // Use workspaceId as the webhookId for Twilio webhooks
         const smsWebhookUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`;
         const voiceWebhookUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`;
+        const voiceStatusCallbackUrl = `${baseUrl}/api/webhooks/twilio/voice/status`;
 
-        await this.twilioProvider.configureWebhooks(
+        const urls: {
+          smsUrl?: string;
+          voiceUrl?: string;
+          statusCallbackUrl?: string;
+        } = {};
+        if (channel === 'sms' || channel === 'both') {
+          urls.smsUrl = smsWebhookUrl;
+        }
+        if (channel === 'voice' || channel === 'both') {
+          urls.voiceUrl = voiceWebhookUrl;
+          urls.statusCallbackUrl = voiceStatusCallbackUrl;
+        }
+        await this.twilioProvider.updateNumberWebhooks(
           credentials,
           purchased.sid,
-          smsWebhookUrl,
-          voiceWebhookUrl,
+          urls,
         );
       }
 
@@ -299,7 +329,12 @@ export class PhoneNumberProvisioningService {
       let a2pMessagingServiceSid: string | undefined;
       let a2pAttachedAt: Date | undefined;
 
-      if (purchased.capabilities?.includes('sms')) {
+      // Wave-2 PR 4 — A2P attachment only when the allocation is SMS-capable
+      // by request. Voice-only allocations skip this entirely so we don't
+      // accidentally consume A2P registrations on numbers that will never
+      // send SMS.
+      const requestIncludesSms = channel === 'sms' || channel === 'both';
+      if (requestIncludesSms && purchased.capabilities?.includes('sms')) {
         const a2pResult = await this.attachToMessagingService(
           credentials,
           purchased.sid,
@@ -326,7 +361,20 @@ export class PhoneNumberProvisioningService {
         a2pMessagingServiceSid,
       };
 
-      // Allocate to tenant
+      // Allocate to tenant.
+      //
+      // Wave-2 Voice Foundation PR 4 — TPN.channel mapping:
+      //   requested 'sms'   → ChannelType.SMS
+      //   requested 'voice' → ChannelType.VOICE
+      //   requested 'both'  → ChannelType.SMS (single enum slot; the
+      //                       full request intent lives in
+      //                       metadata.activeChannels, which existing
+      //                       outbound resolution can ignore safely and
+      //                       future consumers can consult)
+      const persistedChannel =
+        channel === 'voice' ? ChannelType.VOICE : ChannelType.SMS;
+      const activeChannels =
+        channel === 'both' ? ['sms', 'voice'] : [channel];
       const allocation = this.tenantPhoneRepo.create({
         workspaceId,
         tenantId,
@@ -334,7 +382,7 @@ export class PhoneNumberProvisioningService {
         friendlyName: friendlyName || purchased.friendlyName,
         provider: PhoneNumberProvider.TWILIO,
         providerId: purchased.sid,
-        channel: ChannelType.SMS,
+        channel: persistedChannel,
         status: PhoneNumberAllocationStatus.ACTIVE,
         isDefault: false,
         provisionedViaCallio: true,
@@ -346,6 +394,8 @@ export class PhoneNumberProvisioningService {
         a2pAttachedAt,
         metadata: {
           capabilities: purchased.capabilities,
+          requestedChannel: channel,
+          activeChannels,
         },
       });
       await this.tenantPhoneRepo.save(allocation);
@@ -381,11 +431,50 @@ export class PhoneNumberProvisioningService {
 
       this.logger.error(`Failed to purchase ${phoneNumber}: ${error.message}`);
 
+      // Wave-2 PR 4: client-input validation errors (BadRequest) propagate
+      // instead of getting swallowed as a soft-fail — the caller supplied a
+      // channel that mismatches Twilio-reported capabilities and needs a
+      // 400, not `{success: false}`. Every other error keeps its historical
+      // soft-fail return so downstream orchestration (recovery, retries)
+      // doesn't have to shift.
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
       return {
         success: false,
         order,
         error: error.message,
       };
+    }
+  }
+
+  /**
+   * Wave-2 Voice Foundation PR 4 — assert Twilio-reported capabilities
+   * cover the requested purchase channel. Throws BadRequestException if
+   * SMS was requested but the number is voice-only, or voice was
+   * requested but the number is SMS-only. `both` requires both.
+   *
+   * The purpose is to fail loudly at purchase time so callers don't end
+   * up with an allocation that can't route the traffic they asked for.
+   */
+  private assertPurchaseChannelMatchesCapabilities(
+    channel: 'sms' | 'voice' | 'both',
+    capabilities: string[],
+    phoneNumber: string,
+  ): void {
+    const caps = new Set(capabilities.map((c) => c.toLowerCase()));
+    const wantsSms = channel === 'sms' || channel === 'both';
+    const wantsVoice = channel === 'voice' || channel === 'both';
+    if (wantsSms && !caps.has('sms')) {
+      throw new BadRequestException(
+        `Number ${phoneNumber} is not SMS-capable but channel=${channel} was requested (Twilio capabilities: ${[...caps].join(',') || 'none'})`,
+      );
+    }
+    if (wantsVoice && !caps.has('voice')) {
+      throw new BadRequestException(
+        `Number ${phoneNumber} is not voice-capable but channel=${channel} was requested (Twilio capabilities: ${[...caps].join(',') || 'none'})`,
+      );
     }
   }
 
@@ -721,13 +810,14 @@ export class PhoneNumberProvisioningService {
     tenantId: string,
     phoneNumber: string,
     friendlyName?: string,
+    channel?: 'sms' | 'voice' | 'both',
   ): Promise<PurchaseResult> {
     const canPurchase = await this.canTenantPurchase(workspaceId);
     if (!canPurchase) {
       throw new ForbiddenException('Tenant self-service phone number purchase is not enabled for this workspace');
     }
 
-    return this.purchaseNumber(workspaceId, tenantId, phoneNumber, undefined, friendlyName);
+    return this.purchaseNumber(workspaceId, tenantId, phoneNumber, undefined, friendlyName, channel);
   }
 
   /**

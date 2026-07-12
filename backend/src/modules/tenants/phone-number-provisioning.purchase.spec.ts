@@ -82,9 +82,17 @@ function buildService(opts: { tenantSeed?: any[]; purchaseSucceeds?: boolean } =
     purchasePhoneNumber: jest.fn(async () =>
       opts.purchaseSucceeds === false
         ? Promise.reject(new Error('twilio failed'))
-        : { phoneNumber: '+19998887777', sid: 'PNxxx', capabilities: ['sms'], friendlyName: 'LB' },
+        : {
+            phoneNumber: '+19998887777',
+            sid: 'PNxxx',
+            capabilities: (opts as any).twilioCapabilities ?? ['sms', 'voice'],
+            friendlyName: 'LB',
+          },
     ),
     configureWebhooks: jest.fn(async () => undefined),
+    // Wave-2 PR 4: purchase now uses the partial-update method from PR 1
+    // for channel-scoped webhook configuration.
+    updateNumberWebhooks: jest.fn(async () => ({ success: true, applied: [] })),
   };
   const configService: any = {
     get: jest.fn((key: string) => {
@@ -222,5 +230,180 @@ describe('PhoneNumberProvisioningService.purchaseNumber — ensureOutboundReady 
     expect(ctx.profilePhoneAssignmentRepo.rows).toHaveLength(2);
     const defaults = ctx.profilePhoneAssignmentRepo.rows.filter((p: any) => p.isDefault);
     expect(defaults).toHaveLength(1);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Wave-2 Voice Foundation PR 4 — purchase channel selector.
+// -----------------------------------------------------------------------
+
+import { ChannelType } from '../../database/entities/sender.entity';
+
+describe('PhoneNumberProvisioningService.purchaseNumber — channel selector (PR 4)', () => {
+  it("omitted channel defaults to 'sms' (backward-compatible)", async () => {
+    const ctx = buildService();
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+    );
+    expect(result.success).toBe(true);
+    expect(result.allocation!.channel).toBe(ChannelType.SMS);
+    // updateNumberWebhooks called with SMS URL only, no voice
+    expect(ctx.twilioProvider.updateNumberWebhooks).toHaveBeenCalledTimes(1);
+    const urls = (ctx.twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    expect(urls.smsUrl).toBeDefined();
+    expect(urls.voiceUrl).toBeUndefined();
+    expect(urls.statusCallbackUrl).toBeUndefined();
+    // metadata reflects requested channel + activeChannels
+    const meta = result.allocation!.metadata as Record<string, unknown>;
+    expect(meta.requestedChannel).toBe('sms');
+    expect(meta.activeChannels).toEqual(['sms']);
+  });
+
+  it("channel='sms' explicit — SMS-only webhook, TPN.channel=SMS, A2P attempted", async () => {
+    const ctx = buildService();
+    const attach = (ctx.svc as any).attachToMessagingService as jest.Mock;
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+      'sms',
+    );
+    expect(result.success).toBe(true);
+    expect(result.allocation!.channel).toBe(ChannelType.SMS);
+    const urls = (ctx.twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    expect(urls.smsUrl).toBeDefined();
+    expect(urls.voiceUrl).toBeUndefined();
+    expect(attach).toHaveBeenCalledTimes(1); // A2P attempted for SMS
+  });
+
+  it("channel='voice' — voice URL + status callback set, SMS untouched, A2P skipped, TPN.channel=VOICE", async () => {
+    const ctx = buildService();
+    const attach = (ctx.svc as any).attachToMessagingService as jest.Mock;
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+      'voice',
+    );
+    expect(result.success).toBe(true);
+    expect(result.allocation!.channel).toBe(ChannelType.VOICE);
+    const urls = (ctx.twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    expect(urls.voiceUrl).toBeDefined();
+    expect(urls.statusCallbackUrl).toBeDefined();
+    expect(urls.smsUrl).toBeUndefined();
+    // A2P skipped for voice-only allocations
+    expect(attach).not.toHaveBeenCalled();
+    // metadata reflects intent
+    const meta = result.allocation!.metadata as Record<string, unknown>;
+    expect(meta.requestedChannel).toBe('voice');
+    expect(meta.activeChannels).toEqual(['voice']);
+  });
+
+  it("channel='both' — SMS URL + voice URL + status callback all set, A2P attempted, TPN.channel=SMS, metadata.activeChannels=['sms','voice']", async () => {
+    const ctx = buildService();
+    const attach = (ctx.svc as any).attachToMessagingService as jest.Mock;
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+      'both',
+    );
+    expect(result.success).toBe(true);
+    expect(result.allocation!.channel).toBe(ChannelType.SMS);
+    const urls = (ctx.twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    expect(urls.smsUrl).toBeDefined();
+    expect(urls.voiceUrl).toBeDefined();
+    expect(urls.statusCallbackUrl).toBeDefined();
+    expect(attach).toHaveBeenCalledTimes(1);
+    const meta = result.allocation!.metadata as Record<string, unknown>;
+    expect(meta.requestedChannel).toBe('both');
+    expect(meta.activeChannels).toEqual(['sms', 'voice']);
+  });
+
+  it("voice requested but Twilio number is SMS-only → BadRequestException", async () => {
+    const ctx = buildService({ twilioCapabilities: ['sms'] } as any);
+    await expect(
+      ctx.svc.purchaseNumber(
+        WS,
+        TENANT_ID,
+        '+19998887777',
+        undefined,
+        'LB',
+        'voice',
+      ),
+    ).rejects.toThrow(/not voice-capable/i);
+  });
+
+  it("sms requested but Twilio number is voice-only → BadRequestException", async () => {
+    const ctx = buildService({ twilioCapabilities: ['voice'] } as any);
+    await expect(
+      ctx.svc.purchaseNumber(
+        WS,
+        TENANT_ID,
+        '+19998887777',
+        undefined,
+        'LB',
+        'sms',
+      ),
+    ).rejects.toThrow(/not SMS-capable/i);
+  });
+
+  it("both requested but Twilio number is SMS-only → BadRequestException", async () => {
+    const ctx = buildService({ twilioCapabilities: ['sms'] } as any);
+    await expect(
+      ctx.svc.purchaseNumber(
+        WS,
+        TENANT_ID,
+        '+19998887777',
+        undefined,
+        'LB',
+        'both',
+      ),
+    ).rejects.toThrow(/not voice-capable/i);
+  });
+
+  it("purchase order metadata records requestedChannel and Twilio-reported capabilities", async () => {
+    const ctx = buildService();
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+      'both',
+    );
+    const order = ctx.orderRepo.rows.find(
+      (r) => r.id === (result.allocation as any).orderId,
+    ) as any;
+    expect(order.metadata.requestedChannel).toBe('both');
+    expect(order.metadata.capabilities).toEqual(['sms', 'voice']);
+  });
+
+  it("release/rollback path remains functional — a purchase that fails still marks order FAILED regardless of channel", async () => {
+    const ctx = buildService({ purchaseSucceeds: false });
+    const result = await ctx.svc.purchaseNumber(
+      WS,
+      TENANT_ID,
+      '+19998887777',
+      undefined,
+      'LB',
+      'voice',
+    );
+    expect(result.success).toBe(false);
+    const failedOrder = ctx.orderRepo.rows.find(
+      (r) => r.status === PhoneNumberOrderStatus.FAILED,
+    );
+    expect(failedOrder).toBeDefined();
+    expect(ctx.tenantPhoneRepo.rows).toHaveLength(0); // no TPN persisted
   });
 });
