@@ -9,6 +9,8 @@ import { TwilioProvider } from './providers/twilio.provider';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { IntegrationResourceGuard } from '../../common/guards/integration-resource.guard';
 import { IntegrationResourceGuardService } from '../../common/guards/integration-resource-guard.service';
+import { INTEGRATION_RESOURCE_KEY } from '../../common/guards/use-integration-resource-guard.decorator';
+import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { Tenant } from '../../database/entities/tenant.entity';
 import {
   ApiKey,
@@ -96,5 +98,52 @@ describe('PR-1 phone-numbers webhook-config DI graph (real bootstrap)', () => {
     expect(guard).toBeDefined();
 
     await moduleRef.close();
+  });
+
+  // Ownership-chain assertions per Georgi's PR-1 approval memo. These verify
+  // the guards are wired to the route so credential resolution flows through
+  // the authoritative chain (TPN → tenant/workspace → integration).
+  //
+  // The actual guard *behavior* (cross-workspace rejection, cross-tenant
+  // rejection, provider-mismatch rejection) is covered by
+  // integration-resource-guard.service.spec.ts — most notably:
+  //   * "rejects when tpn not found (check=4)" at spec line 204 — covers
+  //     both cross-workspace and cross-tenant because the guard's TPN lookup
+  //     is scoped `{id: tpnId, workspaceId, tenantId}`;
+  //   * "rejects when tpn provider does not match integration provider
+  //     (check=4)" at spec line 220 — the exact provider-mismatch case.
+  // This spec confirms those enforcements apply to the new endpoint, not
+  // just to /v1/calls/*.
+  describe('ownership-chain wiring on POST /v1/phone-numbers/:tpnId/webhook-config', () => {
+    const handler = (
+      PhoneNumbersWebhookConfigController.prototype as unknown as {
+        configureWebhooks: unknown;
+      }
+    ).configureWebhooks;
+
+    it('@UseIntegrationResourceGuard("tpnId") is applied to the route handler', () => {
+      // The decorator sets INTEGRATION_RESOURCE_KEY metadata to 'tpnId'.
+      // Missing decorator would mean the guard never fires and cross-workspace
+      // calls could reach the service; the assertion below fails loudly if the
+      // decorator is dropped by a future refactor.
+      const kind = Reflect.getMetadata(INTEGRATION_RESOURCE_KEY, handler as any);
+      expect(kind).toBe('tpnId');
+
+      // The decorator also attaches IntegrationResourceGuard via @UseGuards().
+      // Nest stores that under the '__guards__' metadata key.
+      const guards: unknown[] =
+        Reflect.getMetadata('__guards__', handler as any) ?? [];
+      expect(guards).toContain(IntegrationResourceGuard);
+    });
+
+    it('@UseGuards(SigcoreAuthGuard) is applied at the controller class level', () => {
+      // Controller-level guards run first and populate request.workspaceId /
+      // request.tenantId. Without this guard, IntegrationResourceGuard would
+      // have no auth context to compare against.
+      const guards: unknown[] =
+        Reflect.getMetadata('__guards__', PhoneNumbersWebhookConfigController) ??
+        [];
+      expect(guards).toContain(SigcoreAuthGuard);
+    });
   });
 });
