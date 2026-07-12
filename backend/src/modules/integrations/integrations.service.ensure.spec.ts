@@ -173,6 +173,42 @@ describe('IntegrationsService.ensureIntegration', () => {
     expect(integrationRepo.save).not.toHaveBeenCalled();
   });
 
+  it('ensure_probe_returns_404_when_no_credentials_and_no_existing_row', async () => {
+    // Wave-2 Task 2 transition contract refinement (2026-07-11):
+    // ensure without credentials is probe-mode. If no row exists, it must
+    // NotFound instead of creating an empty-credentials row.
+    const { service, integrationRepo, tenantRepo, encryptionService } = buildService();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    integrationRepo.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.ensureIntegration(WS, {
+        tenantId: TENANT,
+        provider: ProviderType.TWILIO,
+      }),
+    ).rejects.toThrow(/probe returned nothing/);
+
+    expect(integrationRepo.create).not.toHaveBeenCalled();
+    expect(integrationRepo.save).not.toHaveBeenCalled();
+    expect(encryptionService.encrypt).not.toHaveBeenCalled();
+  });
+
+  it('ensure_probe_returns_404_when_credentials_is_empty_object', async () => {
+    const { service, integrationRepo, tenantRepo } = buildService();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    integrationRepo.findOne.mockResolvedValue(null);
+
+    await expect(
+      service.ensureIntegration(WS, {
+        tenantId: TENANT,
+        provider: ProviderType.TWILIO,
+        credentials: {},
+      }),
+    ).rejects.toThrow(/probe returned nothing/);
+
+    expect(integrationRepo.create).not.toHaveBeenCalled();
+  });
+
   it('ensure_rejects_when_tenant_not_in_workspace', async () => {
     const { service, tenantRepo } = buildService();
     tenantRepo.findOne.mockResolvedValue(null);
