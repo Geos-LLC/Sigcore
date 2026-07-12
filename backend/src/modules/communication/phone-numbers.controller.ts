@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Body,
+  Param,
   Query,
   UseGuards,
   HttpCode,
@@ -16,8 +17,10 @@ import {
   ReleasePhoneNumberDto,
   ListPhoneNumbersQueryDto,
 } from './dto/phone-number.dto';
+import { WebhookConfigDto } from './dto/webhook-config.dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
 import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
+import { UseIntegrationResourceGuard } from '../../common/guards/use-integration-resource-guard.decorator';
 
 /**
  * Phone Number Management API
@@ -168,6 +171,35 @@ export class PhoneNumbersV1Controller {
     @Body() dto: ReleasePhoneNumberDto,
   ) {
     const result = await this.phoneNumbersService.releasePhoneNumber(workspaceId, dto);
+    return { data: result };
+  }
+}
+
+/**
+ * Wave-2 Task 4 — webhook-config endpoint.
+ *
+ * Split into its own controller so we can stack SigcoreAuthGuard +
+ * @UseIntegrationResourceGuard('tpnId') without disturbing the existing
+ * v1/phone-numbers routes (list / provision / assign / release) which use a
+ * different auth expectation (no per-route resource guard, no integrationId
+ * body requirement).
+ *
+ * Route:
+ *   POST /v1/phone-numbers/:tpnId/webhook-config
+ */
+@Controller('v1/phone-numbers')
+@UseGuards(SigcoreAuthGuard)
+export class PhoneNumbersWebhookConfigController {
+  constructor(private readonly phoneNumbersService: PhoneNumbersService) {}
+
+  @Post(':tpnId/webhook-config')
+  @HttpCode(HttpStatus.OK)
+  @UseIntegrationResourceGuard('tpnId')
+  async configureWebhooks(
+    @Param('tpnId') tpnId: string,
+    @Body() dto: WebhookConfigDto,
+  ) {
+    const result = await this.phoneNumbersService.configureWebhooks(tpnId, dto);
     return { data: result };
   }
 }

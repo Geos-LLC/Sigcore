@@ -45,6 +45,13 @@ export class PhoneAssignmentsController {
     return { data };
   }
 
+  /**
+   * Wave-2 Task 4: `ProvisionAndAssignDto` now accepts optional
+   * `forVoice`, `voiceUrl`, `voiceFallbackUrl`, `statusCallbackUrl`.
+   * All are additive — when omitted the flow is byte-identical to the
+   * pre-Wave-2 body shape. See phone-assignments.service.ts for
+   * semantics.
+   */
   @Post('phone-numbers/provision-and-assign')
   @HttpCode(HttpStatus.CREATED)
   async provisionAndAssign(
