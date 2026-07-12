@@ -1,8 +1,16 @@
+# Legacy AWS ECS deployment workflow.
+# Sigcore currently deploys via Railway.
+# Kept for future AWS migration.
+#
+# Push triggers were removed on 2026-07-12 because the ECR repo
+# `sigcore-prod-backend` was never created in AWS account 094396338769,
+# causing every push to main/staging to surface a red "Deploy Sigcore"
+# check with no operational impact (Railway serves production traffic).
+# When/if the AWS migration resumes, re-add the `push` trigger and
+# provision the missing ECR repo + ECS cluster + service.
 name: Deploy Sigcore
 
 on:
-  push:
-    branches: [main, staging]
   workflow_dispatch:
 
 env:
