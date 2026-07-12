@@ -13,6 +13,8 @@ import { OpenPhoneProvider } from '../communication/providers/openphone.provider
 import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
 import { InternalTwilioProxyController } from './internal-twilio-proxy.controller';
+import { TenantVoiceForwarderService } from './tenant-voice-forwarder.service';
+import { EmailModule } from '../email/email.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
 import { RoutingModule } from '../routing/routing.module';
@@ -38,6 +40,7 @@ import {
     MessagingModule,
     forwardRef(() => IntegrationsModule),
     RoutingModule,
+    EmailModule,
     TypeOrmModule.forFeature([
       CommunicationIntegration,
       CommunicationConversation,
@@ -73,6 +76,7 @@ import {
     EncryptionService,
     OpenPhoneProvider,
     CallConnectService,
+    TenantVoiceForwarderService,
   ],
   exports: [TwilioWebhooksService, TenantWebhooksService, IdempotencyService, OutboundWebhooksService],
 })
