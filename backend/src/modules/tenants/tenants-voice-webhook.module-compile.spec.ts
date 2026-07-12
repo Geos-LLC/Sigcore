@@ -121,17 +121,20 @@ describe('PR 2 tenant voice-webhook DI graph (real bootstrap)', () => {
   });
 });
 
-// Runtime-search proof (per PR 2 spec requirement).
+// Runtime-search proof.
 //
-// Walks every .ts file under backend/src (excluding *.spec.ts, migrations,
-// and the entity definition) and asserts there is exactly ONE runtime read
-// path referencing `voiceInboundUrl` — the TenantsService.getVoiceInboundConfig
-// method that services the GET endpoint. Zero other runtime code touches it.
+// PR 2 (2026-07-12): exactly 2 runtime files referenced tenant.voiceInboundUrl
+//   — tenants.service.ts (setter/getter) and tenants.controller.ts (response
+//     shape).
 //
-// If PR 3 ever lands this test WILL start failing — that's intentional. The
-// failure prompts an operator to update the invariant comment here and
-// change the expected count.
-describe('PR 2 invariant: voice_inbound_url has exactly one runtime read', () => {
+// PR 3 (2026-07-12): the twilio inbound webhook router (twilio-webhooks.service
+//   .ts) now also reads tenant.voiceInboundUrl to decide whether to fire the
+//   tenant-forward step. Expected count updated to 3.
+//
+// If a future PR adds a 4th consumer this test starts failing — intentional.
+// The failure forces the operator to update the invariant list below and
+// verify the new consumer is where they think it is.
+describe('voice_inbound_url runtime-read invariant', () => {
   const SRC_ROOT = path.resolve(__dirname, '..', '..');
   const IGNORE_DIRS = new Set(['node_modules', 'dist', 'migrations']);
 
@@ -184,27 +187,38 @@ describe('PR 2 invariant: voice_inbound_url has exactly one runtime read', () =>
       return consumerRegex.test(content);
     });
 
-    // PR 2's intentional consumers: exactly the tenants.service (both
-    // methods write and read `.voiceInboundUrl` off a Tenant instance) and
-    // the tenants.controller (response body pulls `tenant.voiceInboundUrl`).
-    // No other runtime file should reference `tenant.voiceInboundUrl`.
+    // PR 2's intentional consumers: tenants.service (setter/getter),
+    // tenants.controller (response mapping). PR 3 adds twilio-webhooks.service
+    // (routing decision to fire the tenant-forward step).
+    //
+    // Any 4th name here means an unreviewed consumer landed — either the
+    // list needs updating (with justification) or the consumer is a bug.
     const runtimeConsumerNames = runtimeConsumers
       .map((f) => path.basename(f))
       .sort();
     expect(runtimeConsumerNames).toEqual(
-      ['tenants.controller.ts', 'tenants.service.ts'].sort(),
+      [
+        'tenants.controller.ts',
+        'tenants.service.ts',
+        'twilio-webhooks.service.ts',
+      ].sort(),
     );
   });
 
-  it('no webhook / inbound-routing file reads voiceInboundUrl (PR 3 has not shipped)', () => {
+  it('only twilio-webhooks.service.ts under webhooks/ reads tenant.voiceInboundUrl (PR 3 boundary)', () => {
     const files: string[] = [];
     walk(SRC_ROOT, files);
     const routingModuleFiles = files.filter((f) =>
-      /webhooks|inbound|routing|twilio-webhooks/i.test(f),
+      /webhooks|inbound|routing/i.test(f),
     );
-    const consumers = routingModuleFiles.filter((f) =>
-      fs.readFileSync(f, 'utf8').includes('voiceInboundUrl'),
-    );
-    expect(consumers).toEqual([]);
+    // Same filter as the primary invariant test above — files that access
+    // `.voiceInboundUrl` on a Tenant instance, not files that merely take a
+    // `voiceInboundUrl` string in their input DTOs (which the forwarder does
+    // but which is not a Tenant read).
+    const consumerRegex = /tenant(?:s)?\.voiceInboundUrl|tenant\.voiceInboundUrl/;
+    const consumers = routingModuleFiles
+      .filter((f) => consumerRegex.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.basename(f));
+    expect(consumers).toEqual(['twilio-webhooks.service.ts']);
   });
 });

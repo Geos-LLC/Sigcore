@@ -524,7 +524,40 @@ export class WebhooksController {
     if (payload.Direction !== 'inbound') {
       twiml = await this.twilioWebhooksService.handleOutgoingCall(workspace.id, payload);
     } else {
-      twiml = await this.twilioWebhooksService.handleIncomingCall(workspace.id, payload);
+      // Wave-2 Voice Foundation PR 3 — pass the forward context so the tenant
+      // voice-forward step (guarded by SIGCORE_VOICE_INBOUND_FORWARD_ENABLED)
+      // can proxy Twilio's request verbatim to the tenant. Uses `req.rawBody`
+      // (main.ts already enables `rawBody: true` on NestFactory) so what
+      // Twilio POSTed is what the tenant receives — no re-encoding, no field
+      // reordering. Falls back to a URLSearchParams re-encoding of the
+      // parsed payload if rawBody isn't populated for some reason (defensive
+      // — should not happen in production).
+      const rawReq = req as unknown as {
+        rawBody?: Buffer;
+        headers: Record<string, string | string[] | undefined>;
+      };
+      const rawBody: Buffer | string =
+        rawReq.rawBody ?? new URLSearchParams(payload as unknown as Record<string, string>).toString();
+      const contentType =
+        typeof rawReq.headers['content-type'] === 'string'
+          ? (rawReq.headers['content-type'] as string)
+          : 'application/x-www-form-urlencoded';
+      const forwardedHeaders: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rawReq.headers)) {
+        if (k.toLowerCase().startsWith('x-forwarded-') && typeof v === 'string') {
+          forwardedHeaders[k] = v;
+        }
+      }
+      twiml = await this.twilioWebhooksService.handleIncomingCall(
+        workspace.id,
+        payload,
+        {
+          rawBody,
+          contentType,
+          twilioSignature: signature,
+          forwardedHeaders,
+        },
+      );
     }
 
     // Return TwiML response

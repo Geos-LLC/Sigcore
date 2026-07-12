@@ -28,6 +28,10 @@ import { CallConnectSettings } from '../../database/entities/call-connect-settin
 import { EncryptionService } from '../../common/services/encryption.service';
 import { EventsGateway } from '../events/events.gateway';
 import { IdempotencyService } from './idempotency.service';
+import {
+  TenantVoiceForwarderService,
+  ForwardInput,
+} from './tenant-voice-forwarder.service';
 import { TenantWebhooksService } from './tenant-webhooks.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
@@ -144,6 +148,12 @@ export class TwilioWebhooksService {
     private callConnectService?: CallConnectService,
     @Optional()
     private inboundResolver?: ResolveProfileForInboundService,
+    // Wave-2 Voice Foundation PR 3 — optional so unit specs that construct
+    // this service directly don't have to build a full forwarder. When
+    // undefined the new step [3a] is skipped and behaviour is byte-identical
+    // to pre-PR-3.
+    @Optional()
+    private voiceForwarder?: TenantVoiceForwarderService,
   ) {}
 
   /**
@@ -556,6 +566,12 @@ export class TwilioWebhooksService {
   async handleIncomingCall(
     workspaceId: string,
     payload: TwilioVoiceWebhookPayload,
+    forwardCtx?: {
+      rawBody: Buffer | string;
+      contentType: string;
+      twilioSignature: string | undefined;
+      forwardedHeaders: Record<string, string>;
+    },
   ): Promise<string> {
     this.logger.log(`Processing Twilio voice webhook: CallSid=${payload.CallSid}, From=${payload.From}, To=${payload.To}`);
 
@@ -729,6 +745,57 @@ export class TwilioWebhooksService {
       if (forwardTo) {
         this.logger.log(`[ROUTING] → Legacy path: forwarding to callForwardingNumber=${forwardTo} (tenantId=${tenant!.id})`);
         return this.generateForwardTwiML(forwardTo, ourNumber);
+      }
+
+      // ── Wave-2 Voice Foundation PR 3 — step [3a] tenant voice forwarding.
+      //
+      // Insertion point: after CallConnect (line 704) and legacy metadata
+      // forwarding (line 731), before voicemail fallback. Preserves both
+      // pre-existing forwarding paths — they still terminate before we get
+      // here. Voicemail below is the fallback of last resort.
+      //
+      // Gates (ALL must be true, else skip and voicemail):
+      //   * SIGCORE_VOICE_INBOUND_FORWARD_ENABLED === 'true'
+      //   * TenantVoiceForwarderService is injected (module-level wiring)
+      //   * The forwarder input context (rawBody + headers) was passed in
+      //   * The tenant has voice_inbound_url set (persisted by PR 2 API)
+      //
+      // On success: return the tenant's TwiML byte-for-byte. Sigcore does
+      // not rewrite, re-encode, or generate TwiML in this path.
+      //
+      // On any failure (definite 4xx OR ambiguous 5xx/timeout/DNS/TLS/etc):
+      // fall through to voicemail below. The forwarder handles alerting.
+      const forwardFlag =
+        (this.configService.get<string>('SIGCORE_VOICE_INBOUND_FORWARD_ENABLED') ??
+          '').toLowerCase() === 'true';
+      if (
+        forwardFlag &&
+        this.voiceForwarder &&
+        forwardCtx &&
+        tenant?.voiceInboundUrl
+      ) {
+        const forwardInput: ForwardInput = {
+          voiceInboundUrl: tenant.voiceInboundUrl,
+          rawBody: forwardCtx.rawBody,
+          contentType: forwardCtx.contentType,
+          twilioSignature: forwardCtx.twilioSignature,
+          forwardedHeaders: forwardCtx.forwardedHeaders,
+          correlation: {
+            workspaceId,
+            tenantId: tenant.id,
+            providerCallSid: payload.CallSid,
+            environment:
+              this.configService.get<string>('RAILWAY_ENVIRONMENT_NAME') ??
+              this.configService.get<string>('NODE_ENV') ??
+              'unknown',
+          },
+        };
+        const result = await this.voiceForwarder.forward(forwardInput);
+        if (result.outcome === 'success') {
+          return result.twiml;
+        }
+        // Any failure — flow to voicemail. Forwarder already logged +
+        // alerted; nothing more to do here.
       }
     }
     this.logger.log(`[ROUTING] → No forwarding configured — returning voicemail`);
