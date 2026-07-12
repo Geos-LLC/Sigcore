@@ -298,9 +298,12 @@ export class IntegrationsService {
    *     JSON is merged with the new fields ("new wins" per key) and the
    *     result is re-encrypted. This lets Callio pass just accountSid+authToken
    *     without wiping out webhook secrets already in place.
-   *   - If credentials absent: pure lookup or create-with-empty. Existing
-   *     row returned unchanged. A fresh row is created with an empty
-   *     credentials blob so the id is stable for reference.
+   *   - If credentials absent: **probe mode.** Existing row returned
+   *     unchanged. If no row exists, throw NotFoundException — DO NOT
+   *     create an empty-credentials row. This lets Callio's Task 2
+   *     registrar distinguish "already registered" from "needs migration
+   *     mode" without polluting Sigcore state on ordinary boots.
+   *     Refinement 2026-07-11 per Wave-2 Task 2 transition contract.
    *   - Returns { id, created, workspaceId, tenantId, provider }.
    *   - Concurrent calls: race on the (workspaceId, provider) unique index —
    *     the loser retries the find so exactly one row ends up in the table.
@@ -381,9 +384,16 @@ export class IntegrationsService {
         };
       }
 
-      const credsBlob = dto.credentials
-        ? JSON.stringify(dto.credentials)
-        : JSON.stringify({});
+      // Probe mode — refuse to create an empty-credentials row.
+      // Callers on ordinary boots (no migration mode) MUST get a 404 here
+      // so they don't accidentally register an unusable integration.
+      if (!dto.credentials || Object.keys(dto.credentials).length === 0) {
+        throw new NotFoundException(
+          `No integration exists for workspace ${workspaceId} provider ${dto.provider} — probe returned nothing. To create, resubmit with credentials.`,
+        );
+      }
+
+      const credsBlob = JSON.stringify(dto.credentials);
       const created = this.integrationRepo.create({
         workspaceId,
         provider: dto.provider,
