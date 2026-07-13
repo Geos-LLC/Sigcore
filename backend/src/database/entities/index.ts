@@ -29,3 +29,4 @@ export * from './communication-profile.entity';
 export * from './profile-phone-assignment.entity';
 export * from './telegram-subscriber.entity';
 export * from './telegram-placement.entity';
+export * from './communication-identity.entity';
