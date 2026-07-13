@@ -281,11 +281,15 @@ export class TenantVoiceForwarderService {
       const timestamp = Math.floor(Date.now() / 1000).toString();
       const path = this.extractSignedPath(input.voiceInboundUrl);
       headers[SIGCORE_FORWARD_HEADERS.timestamp] = timestamp;
+      // Task 6B.5C — pin eventType so a valid inbound-voice envelope cannot
+      // be replayed against a callback route on Callio.
+      headers[SIGCORE_FORWARD_HEADERS.eventType] = 'voice_inbound';
       headers[SIGCORE_FORWARD_HEADERS.signature] = signForwardEnvelope(
         this.forwardHmacSecret,
         {
           method: 'POST',
           path,
+          eventType: 'voice_inbound',
           timestamp,
           workspaceId: input.correlation.workspaceId,
           tenantId: input.correlation.tenantId,

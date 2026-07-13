@@ -14,6 +14,7 @@ import {
 import { Request, Response } from 'express';
 import { createReadStream, existsSync, statSync } from 'fs';
 import { extname } from 'path';
+import { ConfigService } from '@nestjs/config';
 import { CommunicationService } from './communication.service';
 import { TwilioVoiceService } from './twilio-voice.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
@@ -22,6 +23,7 @@ import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.dec
 import { UseIntegrationResourceGuard } from '../../common/guards/use-integration-resource-guard.decorator';
 import { IntegrationResourceGuardResult } from '../../common/guards/integration-resource-guard.service';
 import { RecordingStartDto, HangupDto } from './dto/call-ops.dto';
+import { CallbackForwarderService } from '../webhooks/callback-forwarder.service';
 
 // Map file extensions to MIME types
 const AUDIO_MIME_TYPES: Record<string, string> = {
@@ -237,7 +239,11 @@ export class CallsController {
 @Controller('v1/calls')
 @UseGuards(SigcoreAuthGuard)
 export class CallsV1Controller {
-  constructor(private readonly twilioVoiceService: TwilioVoiceService) {}
+  constructor(
+    private readonly twilioVoiceService: TwilioVoiceService,
+    private readonly callbackForwarder: CallbackForwarderService,
+    private readonly configService: ConfigService,
+  ) {}
 
   @Post(':providerCallSid/recording/start')
   @HttpCode(HttpStatus.OK)
@@ -245,15 +251,59 @@ export class CallsV1Controller {
   async startRecording(
     @Param('providerCallSid') providerCallSid: string,
     @Body() dto: RecordingStartDto,
-    @Req() req: Request & { resource?: IntegrationResourceGuardResult },
+    @Req() req: Request & {
+      resource?: IntegrationResourceGuardResult;
+      body?: { tenantId?: string };
+    },
   ) {
     const resource = req.resource!;
+    // Task 6B.5C — wrap the Callio-side statusCallbackUrl in a Sigcore-owned
+    // token URL BEFORE handing it to Twilio. Twilio then calls Sigcore's
+    // /webhooks/twilio/recording-status/:token route; Sigcore verifies
+    // Twilio's signature against the subaccount, HMAC-signs the envelope,
+    // and forwards to Callio (dto.statusCallbackUrl, embedded in the token).
+    //
+    // If the caller did not provide statusCallbackUrl, or Sigcore's HMAC
+    // secret is not configured, we pass the URL through unchanged — the
+    // pre-6B.5C direct-Twilio path is preserved.
+    let statusCallbackUrl = dto.statusCallbackUrl;
+    if (statusCallbackUrl && this.callbackForwarder.isArmed()) {
+      const bodyTenantId =
+        (req.body && req.body.tenantId) || undefined;
+      const sigcoreTenantId =
+        bodyTenantId ??
+        ((resource.integration.metadata as Record<string, unknown> | null)?.[
+          'ensure'
+        ] as Record<string, unknown> | undefined)?.['tenantId'] as string | undefined;
+      if (sigcoreTenantId) {
+        const token = this.callbackForwarder.mintToken({
+          kind: 'recording_status',
+          sigcoreWorkspaceId: resource.integration.workspaceId,
+          sigcoreTenantId,
+          callioDestUrl: statusCallbackUrl,
+          // The recording callback route on Callio embeds a callId in the
+          // URL path; that path is preserved verbatim inside the token so
+          // Callio's own routing works unchanged.
+        });
+        if (token) {
+          const publicBase: string | undefined =
+            this.configService.get<string>('PUBLIC_BASE_URL') ||
+            (process.env.RAILWAY_PUBLIC_DOMAIN
+              ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+              : undefined);
+          if (publicBase) {
+            statusCallbackUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/recording-status/${token}`;
+          }
+        }
+      }
+    }
+
     const result = await this.twilioVoiceService.startRecording(
       resource.integration,
       providerCallSid,
       {
         recordingChannels: dto.recordingChannels,
-        statusCallbackUrl: dto.statusCallbackUrl,
+        statusCallbackUrl: statusCallbackUrl as string | undefined,
         statusCallbackEvents: dto.statusCallbackEvents,
       },
     );

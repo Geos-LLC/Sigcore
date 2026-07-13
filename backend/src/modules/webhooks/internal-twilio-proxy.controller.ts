@@ -1,6 +1,6 @@
 /**
  * Internal service-to-service endpoint for streaming Twilio recordings on
- * behalf of downstream products (LeadBridge, dashboards, etc.).
+ * behalf of downstream products (LeadBridge, dashboards, Callio voice).
  *
  * Why this exists:
  * Sigcore stores Twilio Account SID + Auth Token per workspace/tenant, encrypted
@@ -11,12 +11,30 @@
  * streams the audio to the caller.
  *
  * Auth: `x-sigcore-key` header must equal env `SIGCORE_SERVICE_KEY`.
- * Unlike `SigcoreAuthGuard` we do NOT require `x-workspace-id` — the workspace
- * is resolved from the Account SID embedded in the Twilio URL, so callers only
- * need the URL itself.
+ *
+ * Two resolution modes:
+ *
+ *  1. **URL-scan mode (legacy)** — used by LeadBridge and dashboards. The
+ *     caller supplies only `?url=`; Sigcore scans every TWILIO integration,
+ *     decrypts creds until one whose accountSid matches the URL's Account
+ *     SID is found. Backwards-compatible with pre-Task-6B.5D callers.
+ *
+ *  2. **Scoped mode (Task 6B.5D)** — used by Callio for voice recordings.
+ *     The caller also supplies `x-sigcore-integration-id` +
+ *     `x-sigcore-tenant-id` headers. Sigcore verifies the full ownership
+ *     chain — workspace-owns-tenant, integration-belongs-to-workspace,
+ *     integration.provider=TWILIO, integration.accountSid=URL-accountSid —
+ *     BEFORE using the integration's stored credentials. Rejects with 403
+ *     on any mismatch.
+ *
+ * Range: an incoming `Range` header is forwarded verbatim to Twilio. The
+ * upstream status (200 full or 206 partial), `Content-Range`, and
+ * `Accept-Ranges` are propagated ONLY if Twilio actually returns them —
+ * never fabricated (Twilio's Recording resource does not currently support
+ * range).
  *
  * Request:  GET /api/internal/twilio/recording-proxy?url=<url-encoded twilio recording url>
- * Response: audio/mpeg stream, or 4xx JSON.
+ * Response: audio/mpeg stream (200 or 206), or 4xx JSON.
  */
 import {
   Controller,
@@ -27,6 +45,7 @@ import {
   BadRequestException,
   UnauthorizedException,
   NotFoundException,
+  ForbiddenException,
   Logger,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -35,7 +54,11 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import axios, { AxiosError } from 'axios';
-import { CommunicationIntegration, ProviderType } from '../../database/entities';
+import {
+  CommunicationIntegration,
+  ProviderType,
+  Tenant,
+} from '../../database/entities';
 import { EncryptionService } from '../../common/services/encryption.service';
 
 const TWILIO_URL_ACCOUNT_SID = /\/Accounts\/(AC[a-f0-9]{32})\//i;
@@ -53,6 +76,8 @@ export class InternalTwilioProxyController {
   constructor(
     @InjectRepository(CommunicationIntegration)
     private readonly integrationRepo: Repository<CommunicationIntegration>,
+    @InjectRepository(Tenant)
+    private readonly tenantRepo: Repository<Tenant>,
     private readonly encryptionService: EncryptionService,
     private readonly configService: ConfigService,
   ) {}
@@ -75,44 +100,154 @@ export class InternalTwilioProxyController {
     }
     const acctMatch = TWILIO_URL_ACCOUNT_SID.exec(url);
     if (!acctMatch) throw new BadRequestException('URL does not contain a Twilio Account SID');
-    const accountSid = acctMatch[1];
+    const urlAccountSid = acctMatch[1];
 
-    const creds = await this.resolveCredsForAccount(accountSid);
-    if (!creds) {
-      this.logger.warn(`[recording-proxy] No integration found for accountSid=${accountSid}`);
-      throw new NotFoundException(`No Twilio integration for account ${accountSid}`);
+    const integrationId = this.headerStr(req, 'x-sigcore-integration-id');
+    const tenantId = this.headerStr(req, 'x-sigcore-tenant-id');
+
+    let creds: TwilioCreds | null;
+    if (integrationId && tenantId) {
+      creds = await this.resolveCredsScoped({
+        integrationId,
+        tenantId,
+        urlAccountSid,
+      });
+    } else {
+      creds = await this.resolveCredsForAccount(urlAccountSid);
+      if (!creds) {
+        this.logger.warn(
+          `[recording-proxy] URL-scan miss accountSid=${urlAccountSid}`,
+        );
+        throw new NotFoundException(
+          `No Twilio integration for account ${urlAccountSid}`,
+        );
+      }
     }
 
+    // Range: forward verbatim to Twilio. Don't fabricate anything.
+    const forwardedHeaders: Record<string, string> = {};
+    const range = req.headers.range;
+    if (typeof range === 'string' && range.length > 0) {
+      forwardedHeaders['Range'] = range;
+    }
+
+    let upstream;
     try {
-      const upstream = await axios.get(url, {
+      upstream = await axios.get(url, {
         responseType: 'stream',
         auth: { username: creds.accountSid, password: creds.authToken },
         // Follow Twilio's occasional 302 redirects to the media host
         maxRedirects: 5,
-        // Don't blow up on 4xx — pass through the status code so LB can render
-        // a sensible error instead of 500ing on a stale URL.
+        // Don't blow up on 4xx — pass through the status code so callers can
+        // render a sensible error instead of 500ing on a stale URL.
         validateStatus: () => true,
         timeout: 30_000,
+        headers: forwardedHeaders,
       });
-
-      const contentType = upstream.headers['content-type'] || 'audio/mpeg';
-      const contentLength = upstream.headers['content-length'];
-
-      res.status(upstream.status);
-      res.setHeader('Content-Type', contentType);
-      if (contentLength) res.setHeader('Content-Length', contentLength);
-      res.setHeader('Cache-Control', 'private, max-age=3600');
-      res.setHeader('Accept-Ranges', 'bytes');
-
-      upstream.data.pipe(res);
     } catch (err) {
       const axiosErr = err as AxiosError;
       this.logger.error(
-        `[recording-proxy] Twilio fetch failed for account ${accountSid}: ` +
+        `[recording-proxy] Twilio fetch failed for account ${urlAccountSid}: ` +
           `${axiosErr.response?.status ?? '?'} ${axiosErr.message}`,
       );
       throw new InternalServerErrorException('Failed to fetch recording from Twilio');
     }
+
+    // Propagate the upstream status verbatim. 200 for full audio, 206 for
+    // partial (when Twilio ever supports Range). 401/404 pass through so the
+    // browser sees the real Twilio error class.
+    res.status(upstream.status);
+    const contentType = upstream.headers['content-type'] || 'audio/mpeg';
+    res.setHeader('Content-Type', contentType);
+    const contentLength = upstream.headers['content-length'];
+    if (contentLength) res.setHeader('Content-Length', String(contentLength));
+    const contentRange = upstream.headers['content-range'];
+    if (contentRange) res.setHeader('Content-Range', String(contentRange));
+    const acceptRanges = upstream.headers['accept-ranges'];
+    if (acceptRanges) res.setHeader('Accept-Ranges', String(acceptRanges));
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+
+    upstream.data.pipe(res);
+  }
+
+  private headerStr(req: Request, name: string): string | undefined {
+    const v = req.headers[name];
+    if (typeof v === 'string') return v;
+    if (Array.isArray(v) && typeof v[0] === 'string') return v[0];
+    return undefined;
+  }
+
+  /**
+   * Task 6B.5D scoped mode. Verifies the full ownership chain and returns
+   * the integration's decrypted Twilio credentials. Any mismatch → 403.
+   *
+   * Guard chain (in order — earliest possible rejection wins):
+   *
+   *   1. integration exists
+   *   2. tenant exists
+   *   3. integration.provider === TWILIO
+   *   4. tenant.workspaceId === integration.workspaceId (workspace-owns-tenant
+   *      AND integration-belongs-to-workspace collapse into this equality)
+   *   5. integration.credentials decrypt → accountSid === url.accountSid
+   *      (recording physically belongs to this integration's subaccount)
+   *
+   * Never surfaces the decrypted secret or Twilio auth token in errors/logs.
+   */
+  private async resolveCredsScoped(input: {
+    integrationId: string;
+    tenantId: string;
+    urlAccountSid: string;
+  }): Promise<TwilioCreds> {
+    const [integration, tenant] = await Promise.all([
+      this.integrationRepo.findOne({ where: { id: input.integrationId } }),
+      this.tenantRepo.findOne({ where: { id: input.tenantId } }),
+    ]);
+    if (!integration) {
+      throw new NotFoundException('integration not found');
+    }
+    if (!tenant) {
+      throw new NotFoundException('tenant not found');
+    }
+    if (integration.provider !== ProviderType.TWILIO) {
+      throw new BadRequestException(
+        `integration provider is ${integration.provider}, not twilio`,
+      );
+    }
+    if (tenant.workspaceId !== integration.workspaceId) {
+      this.logger.warn(
+        `[recording-proxy] scope_denied reason=workspace_tenant_mismatch ` +
+          `integrationId=${input.integrationId} tenantId=${input.tenantId} ` +
+          `integrationWs=${integration.workspaceId} tenantWs=${tenant.workspaceId}`,
+      );
+      throw new ForbiddenException('workspace does not own tenant');
+    }
+    if (!integration.credentialsEncrypted) {
+      throw new NotFoundException('integration has no stored credentials');
+    }
+    let creds: Partial<TwilioCreds>;
+    try {
+      creds = JSON.parse(
+        this.encryptionService.decrypt(integration.credentialsEncrypted),
+      ) as Partial<TwilioCreds>;
+    } catch {
+      // corrupt / mis-keyed row — surface as generic not-found so the caller
+      // can't distinguish decrypt failure from missing row (info leak defense).
+      throw new NotFoundException('integration credentials not readable');
+    }
+    if (!creds?.accountSid || !creds.authToken) {
+      throw new NotFoundException('integration credentials incomplete');
+    }
+    if (creds.accountSid !== input.urlAccountSid) {
+      this.logger.warn(
+        `[recording-proxy] scope_denied reason=account_sid_mismatch ` +
+          `integrationId=${input.integrationId} ` +
+          `integrationAccount=${creds.accountSid} urlAccount=${input.urlAccountSid}`,
+      );
+      throw new ForbiddenException(
+        'recording accountSid does not match integration',
+      );
+    }
+    return { accountSid: creds.accountSid, authToken: creds.authToken };
   }
 
   /**

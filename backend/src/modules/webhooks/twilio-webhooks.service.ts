@@ -281,6 +281,52 @@ export class TwilioWebhooksService {
   }
 
   /**
+   * Task 6B.5C — verify a Twilio callback signature against whichever
+   * subaccount the AccountSid in the payload identifies. Used by the
+   * token-carrying callback routes (recording-status, call-status) so
+   * Sigcore can attribute the callback to the correct subaccount before
+   * forwarding to Callio. Returns false on any lookup or verify failure.
+   */
+  async verifyRecordingCallbackSignature(
+    payload: { AccountSid?: string; [k: string]: string | undefined },
+    signature: string | undefined,
+    url: string,
+  ): Promise<boolean> {
+    if (!signature || !payload.AccountSid) return false;
+    // Look up the integration row that owns this subaccount SID.
+    // `external_workspace_id` is populated with the subaccount SID by the
+    // Task 6B.5A subaccount provisioner.
+    const integration = await this.integrationRepo.findOne({
+      where: {
+        externalWorkspaceId: payload.AccountSid,
+        provider: ProviderType.TWILIO,
+      },
+    });
+    if (!integration?.credentialsEncrypted) return false;
+    try {
+      const creds = JSON.parse(
+        this.encryptionService.decrypt(integration.credentialsEncrypted),
+      );
+      if (!creds.authToken) return false;
+      const params: Record<string, string> = {};
+      for (const [k, v] of Object.entries(payload)) {
+        if (typeof v === 'string') params[k] = v;
+      }
+      return this.verifyTwilioSignature(
+        creds.authToken as string,
+        signature,
+        url,
+        params,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `verifyRecordingCallbackSignature decode/verify failed for AccountSid=${payload.AccountSid}: ${(err as Error).message.slice(0, 200)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * Handle incoming SMS webhook from Twilio.
    */
   async handleIncomingSms(

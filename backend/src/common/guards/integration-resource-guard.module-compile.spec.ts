@@ -6,6 +6,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { CallsV1Controller } from '../../modules/communication/calls.controller';
 import { TwilioVoiceService } from '../../modules/communication/twilio-voice.service';
 import { EncryptionService } from '../services/encryption.service';
+import { CallbackForwarderService } from '../../modules/webhooks/callback-forwarder.service';
 import { IntegrationResourceGuard } from './integration-resource.guard';
 import { IntegrationResourceGuardService } from './integration-resource-guard.service';
 import { Tenant } from '../../database/entities/tenant.entity';
@@ -63,6 +64,8 @@ describe('Task 3 DI graph (real bootstrap)', () => {
         IntegrationResourceGuardService,
         IntegrationResourceGuard,
         ConfigService,
+        // Task 6B.5C — CallsV1Controller now takes CallbackForwarderService.
+        CallbackForwarderService,
         // Infrastructure overrides only — external state Nest can't
         // reach in a test process.
         { provide: getRepositoryToken(Tenant), useValue: stubRepo },
