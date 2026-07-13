@@ -101,6 +101,16 @@ function buildService(opts: { tenantSeed?: any[]; purchaseSucceeds?: boolean } =
     }),
   };
 
+  // Task 6B.5A: subaccount provisioner stub. Default: workspace already
+  // has usable credentials (returns the integration unchanged). Test-
+  // specific overrides can replace this on `opts` to simulate provisioning.
+  const subaccountProvisioner: any = {
+    ensureReady: jest.fn(async (integrationId: string) => {
+      const row = await (integrationRepo as any).findOne({ where: { id: integrationId } });
+      return row ?? { credentialsEncrypted: 'stub-creds' };
+    }),
+  };
+
   const svc = new PhoneNumberProvisioningService(
     orderRepo as any,
     pricingRepo as any,
@@ -116,6 +126,7 @@ function buildService(opts: { tenantSeed?: any[]; purchaseSucceeds?: boolean } =
     encryptionService,
     twilioProvider,
     configService,
+    subaccountProvisioner,
   );
 
   // Skip A2P side-effects to keep the test focused on the new

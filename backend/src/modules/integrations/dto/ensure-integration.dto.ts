@@ -60,4 +60,11 @@ export interface EnsureIntegrationResult {
   workspaceId: string;
   tenantId: string;
   provider: ProviderType;
+  /**
+   * Wave-2 Task 6B.5A — operational readiness. See ProvisionedIntegration
+   * for enum semantics. Legacy consumers that ignore this field see the
+   * pre-6B.5A shape unchanged.
+   */
+  operationalStatus: string;
+  operationalReason: string | null;
 }

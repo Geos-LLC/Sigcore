@@ -80,7 +80,31 @@ export class ProvisionCommunicationIdentityDto {
 export interface ProvisionedIntegration {
   provider: string;
   integrationId: string;
+  /** Lifecycle status: `active | inactive | error`. Reflects Sigcore's own
+   * bookkeeping — does NOT imply the integration can service provider
+   * operations. Consumers must consult `operationalStatus` for that. */
   status: string;
+  /**
+   * Wave-2 Task 6B.5A — operational readiness. Reflects whether the
+   * provider integration can actually service operations end-to-end.
+   *
+   *   `pending_credentials`  provider setup not yet initiated
+   *   `provisioning`         provider setup in flight (transient)
+   *   `ready`                Sigcore has verified end-to-end; safe to use
+   *   `error`                setup failed; retry allowed
+   *
+   * A newly provisioned identity starts at `pending_credentials`; a
+   * Sigcore-owned lazy flow transitions it on the first voice-number
+   * purchase. Grandfathered pre-6B.5A rows report `ready`.
+   */
+  operationalStatus: string;
+  /**
+   * Machine-readable reason accompanying `operationalStatus`. Null when
+   * operationalStatus is `ready`. Values are stable code strings like
+   * `TWILIO_CREDENTIALS_NOT_CONFIGURED`; unknown values should be treated
+   * as opaque.
+   */
+  operationalReason: string | null;
 }
 
 export interface CommunicationIdentityResponse {

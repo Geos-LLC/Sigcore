@@ -2,6 +2,25 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Twilio } from 'twilio';
 import axios from 'axios';
+
+/**
+ * Extract a compact, log-safe description of a Twilio SDK error without
+ * ever leaking auth material. Twilio errors typically expose `status`,
+ * `code`, and `message` — that's exactly the surface we want to record.
+ */
+function describeTwilioError(err: unknown): string {
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as {
+    status?: number;
+    code?: number | string;
+    message?: string;
+  };
+  const parts: string[] = [];
+  if (e.status !== undefined) parts.push(`status=${e.status}`);
+  if (e.code !== undefined) parts.push(`code=${e.code}`);
+  if (e.message) parts.push(`msg=${e.message.slice(0, 200)}`);
+  return parts.length ? parts.join(' ') : 'unknown';
+}
 import {
   CommunicationProvider,
   SendMessageInput,
@@ -535,6 +554,168 @@ export class TwilioProvider implements CommunicationProvider {
       this.logger.error('Failed to validate Twilio credentials', error);
       return false;
     }
+  }
+
+  /**
+   * Wave-2 Task 6B.5A — Twilio subaccount creation under a master account.
+   *
+   * Called by TwilioSubaccountProvisioner when a Sigcore communication
+   * identity's Twilio integration transitions out of `pending_credentials`
+   * on first voice-number purchase. Uses the master account's credentials
+   * (from env / SigcoreMasterTwilioCredentials) to create a subaccount
+   * whose SID + auth token are then stored on the integration row.
+   *
+   * Idempotency: Twilio's `accounts.create` is NOT idempotent by
+   * friendlyName — repeated calls create distinct subaccounts. Callers MUST
+   * hold a lock (application-level or DB-level) so that this method is
+   * only invoked once per (workspaceId) at a time. The provisioner service
+   * enforces this via `SELECT … FOR UPDATE` on the integration row.
+   *
+   * Twilio caveat: subaccounts cannot be deleted. Cleanup uses
+   * `.update({status: 'closed'})` — irreversible — via `closeSubaccount`.
+   */
+  async createSubaccount(
+    masterCredentials: TwilioCredentials,
+    friendlyName: string,
+  ): Promise<{
+    subaccountSid: string;
+    subaccountAuthToken: string;
+    friendlyName: string;
+    status: string;
+  }> {
+    const client = this.createClient(masterCredentials);
+    // Twilio's subaccount API returns the auth token ONLY on creation —
+    // subsequent GETs never expose it. Store it immediately.
+    const subaccount = await client.api.v2010.accounts.create({
+      friendlyName,
+    });
+    if (!subaccount.authToken) {
+      // Should be impossible per Twilio API docs, but guard defensively so
+      // we never persist a partial credential blob.
+      throw new Error(
+        `Twilio subaccount create returned no authToken for friendlyName=${friendlyName}`,
+      );
+    }
+    this.logger.log(
+      `twilio_subaccount_created sid=${subaccount.sid} friendlyName=${subaccount.friendlyName} status=${subaccount.status}`,
+    );
+    return {
+      subaccountSid: subaccount.sid,
+      subaccountAuthToken: subaccount.authToken,
+      friendlyName: subaccount.friendlyName ?? friendlyName,
+      status: subaccount.status,
+    };
+  }
+
+  /**
+   * Fetch a subaccount's current record from the master account.
+   * Used by preflight to verify status=active before marking `ready`.
+   */
+  async fetchSubaccount(
+    masterCredentials: TwilioCredentials,
+    subaccountSid: string,
+  ): Promise<{ sid: string; friendlyName: string; status: string }> {
+    const client = this.createClient(masterCredentials);
+    const account = await client.api.v2010.accounts(subaccountSid).fetch();
+    return {
+      sid: account.sid,
+      friendlyName: account.friendlyName ?? '',
+      status: account.status,
+    };
+  }
+
+  /**
+   * Close a subaccount — Twilio's terminology; irreversibly retires the
+   * subaccount and releases any resources still attached to it. Used by
+   * administrative cleanup only. Twilio does not support deletion of
+   * subaccounts; `closed` is the terminal state.
+   */
+  async closeSubaccount(
+    masterCredentials: TwilioCredentials,
+    subaccountSid: string,
+  ): Promise<{ sid: string; status: string }> {
+    const client = this.createClient(masterCredentials);
+    const account = await client.api.v2010.accounts(subaccountSid).update({
+      status: 'closed',
+    });
+    this.logger.warn(
+      `twilio_subaccount_closed sid=${account.sid} status=${account.status} — IRREVERSIBLE, all numbers released`,
+    );
+    return { sid: account.sid, status: account.status };
+  }
+
+  /**
+   * Wave-2 Task 6B.5A — subaccount preflight.
+   *
+   * Verifies that a set of subaccount credentials can service provider
+   * operations end-to-end, without making a billable resource change:
+   *
+   *   1. Credentials decrypt to a well-formed pair (caller's responsibility;
+   *      this method assumes the input JSON parses).
+   *   2. Twilio authentication succeeds — `.api.accounts(sid).fetch()`.
+   *   3. Subaccount is in `active` status (not `closed` / `suspended`).
+   *   4. Phone-number search API is reachable — `.availablePhoneNumbers()`
+   *      list with limit=1. This is a free read that proves API access to
+   *      the resources voice provisioning actually needs.
+   *
+   * Never places a billable call. Returns a structured result so the
+   * provisioner can transition to `ready` / `error` with the right
+   * machine-readable reason code.
+   */
+  async preflightSubaccount(
+    subaccountCredentials: TwilioCredentials,
+  ): Promise<
+    | { ok: true; accountStatus: string; friendlyName: string }
+    | { ok: false; reason: string; detail: string }
+  > {
+    let client: Twilio;
+    try {
+      client = this.createClient(subaccountCredentials);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'TWILIO_CREDENTIALS_NOT_CONFIGURED',
+        detail: (err as Error).message,
+      };
+    }
+    // Step 2 — auth
+    let account: { status: string; friendlyName: string | null };
+    try {
+      account = await client.api
+        .accounts(subaccountCredentials.accountSid)
+        .fetch();
+    } catch (err) {
+      const detail = describeTwilioError(err);
+      return {
+        ok: false,
+        reason: 'TWILIO_AUTH_FAILED',
+        detail,
+      };
+    }
+    // Step 3 — status
+    if (account.status !== 'active') {
+      return {
+        ok: false,
+        reason: 'TWILIO_SUBACCOUNT_INACTIVE',
+        detail: `subaccount status=${account.status}`,
+      };
+    }
+    // Step 4 — read-only search reachability (no billing)
+    try {
+      await client.availablePhoneNumbers('US').local.list({ limit: 1 });
+    } catch (err) {
+      const detail = describeTwilioError(err);
+      return {
+        ok: false,
+        reason: 'TWILIO_PREFLIGHT_LIST_FAILED',
+        detail,
+      };
+    }
+    return {
+      ok: true,
+      accountStatus: account.status,
+      friendlyName: account.friendlyName ?? '',
+    };
   }
 
   /**

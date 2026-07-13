@@ -30,6 +30,7 @@ import { IntegrationStatus, ProviderType } from '../../database/entities/communi
 import { ChannelType } from '../../database/entities/sender.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
+import { TwilioSubaccountProvisionerService } from '../integrations/twilio-subaccount-provisioner.service';
 import { ensureOutboundReadyForTenantPhone } from './ensure-outbound-ready.helpers';
 
 export interface AvailableNumberWithPricing {
@@ -102,6 +103,10 @@ export class PhoneNumberProvisioningService {
     private encryptionService: EncryptionService,
     private twilioProvider: TwilioProvider,
     private configService: ConfigService,
+    // Task 6B.5A: lazy Twilio-subaccount provisioning on first purchase.
+    // Injected here rather than at construction of TwilioProvider so the
+    // preflight + state-machine logic is testable in isolation.
+    private twilioSubaccountProvisioner: TwilioSubaccountProvisionerService,
   ) {}
 
   /**
@@ -272,8 +277,28 @@ export class PhoneNumberProvisioningService {
       order.status = PhoneNumberOrderStatus.PROVISIONING;
       await this.orderRepo.save(order);
 
-      // Purchase from Twilio
-      const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+      // Wave-2 Task 6B.5A — lazy Twilio subaccount provisioning.
+      //
+      // For workspaces provisioned via the Task 6B.2 identity API, the
+      // integration row starts with `operational_status = 'pending_credentials'`
+      // and empty encrypted credentials. Before we can make any Twilio API
+      // call on behalf of this workspace, we need Sigcore to mint a
+      // subaccount under its master account, encrypt the subaccount's
+      // credentials onto this row, and confirm preflight succeeds.
+      //
+      // The provisioner is idempotent (short-circuits on `ready`) and
+      // safe under concurrency (holds a SELECT … FOR UPDATE lock on the
+      // integration row). Repeated calls will reuse the existing
+      // subaccount rather than mint duplicates.
+      //
+      // Grandfathered rows (pilot workspace: NULL operational_status +
+      // populated credentials) short-circuit inside ensureReady.
+      const readyIntegration = await this.twilioSubaccountProvisioner.ensureReady(
+        integration.id,
+      );
+
+      // Purchase from Twilio using the (now guaranteed operational) row's credentials.
+      const credentials = this.encryptionService.decrypt(readyIntegration.credentialsEncrypted);
       const purchased = await this.twilioProvider.purchasePhoneNumber(credentials, phoneNumber);
 
       order.phoneNumberSid = purchased.sid;
