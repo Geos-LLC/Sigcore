@@ -59,6 +59,50 @@ export interface ReleaseResult {
   error?: string;
 }
 
+export type VerifyReason =
+  | 'ok'
+  | 'INVALID_PROFILE_PHONE'
+  | 'AMBIGUOUS_FROM_NUMBER'
+  | 'TPN_NOT_FOUND';
+
+export interface VerifyPhoneNumberOutboundResult {
+  ok: boolean;
+  phoneNumber: string;
+  tenantId: string;
+  workspaceId: string;
+  tpn:
+    | { exists: false }
+    | {
+        exists: true;
+        id: string;
+        ownerTenantId: string;
+        status: string;
+        a2pStatus: string | null;
+      };
+  business:
+    | { exists: false }
+    | { exists: true; id: string; slug: string; status: string };
+  profile:
+    | { exists: false }
+    | {
+        exists: true;
+        id: string;
+        slug: string;
+        isDefault: boolean;
+        status: string;
+      };
+  ppa:
+    | { exists: false }
+    | {
+        exists: true;
+        id: string;
+        active: boolean;
+        isDefault: boolean;
+      };
+  resolver: { matches: number; reason: VerifyReason };
+  missing: string[];
+}
+
 export interface PricingConfig {
   pricingType: PricingType;
   monthlyBasePrice?: number;
@@ -167,6 +211,126 @@ export class PhoneNumberProvisioningService {
         `[ensureOutboundReady] Failed to materialize outbound chain for ${allocation.phoneNumber} (tenant=${allocation.tenantId}): ${err?.message ?? err}. Re-running the helper or calling /admin/phone-numbers/assign will heal it.`,
       );
     }
+  }
+
+  /**
+   * Diagnostic probe that mirrors the exact Step-B query
+   * `ResolveProfileForOutboundService.resolve` runs for a `fromNumber`-only
+   * outbound send. Returns which link in the
+   * (TPN -> business -> profile -> PPA) chain is missing so LB / ops can
+   * decide whether to heal via /admin/phone-numbers/assign or re-provision.
+   *
+   * Not tenant-scoped auth here — the controller decides caller scope.
+   */
+  async verifyPhoneNumberOutbound(
+    workspaceId: string,
+    tenantId: string,
+    phoneNumber: string,
+  ): Promise<VerifyPhoneNumberOutboundResult> {
+    const normalized = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
+
+    // 1. TPN in this workspace
+    const tpn = await this.tenantPhoneRepo.findOne({
+      where: { workspaceId, phoneNumber: normalized },
+    });
+    if (!tpn) {
+      return {
+        ok: false,
+        phoneNumber: normalized,
+        tenantId,
+        workspaceId,
+        tpn: { exists: false },
+        business: { exists: false },
+        profile: { exists: false },
+        ppa: { exists: false },
+        resolver: { matches: 0, reason: 'TPN_NOT_FOUND' },
+        missing: ['tpn'],
+      };
+    }
+
+    // 2. Any businesses for this tenant
+    const businesses = await this.communicationBusinessRepo.find({
+      where: { tenantId },
+    });
+    // 3. Any active profiles under those businesses
+    let profiles: CommunicationProfile[] = [];
+    if (businesses.length > 0) {
+      profiles = await this.communicationProfileRepo
+        .createQueryBuilder('p')
+        .where('p.communication_business_id IN (:...bids)', { bids: businesses.map((b) => b.id) })
+        .getMany();
+    }
+    // 4. Any PPAs linking one of those profiles to this TPN
+    let ppas: ProfilePhoneAssignment[] = [];
+    if (profiles.length > 0) {
+      ppas = await this.profilePhoneAssignmentRepo
+        .createQueryBuilder('ppa')
+        .where('ppa.profile_id IN (:...pids)', { pids: profiles.map((p) => p.id) })
+        .andWhere('ppa.tenant_phone_number_id = :tpnId', { tpnId: tpn.id })
+        .getMany();
+    }
+
+    // 5. EXACT Step-B outbound resolver query (see
+    // resolve-profile-for-outbound.service.ts:106-124). Uses the same JOIN
+    // + WHERE + AND clauses so a match here is a match at send time.
+    const resolverMatches = await this.profilePhoneAssignmentRepo
+      .createQueryBuilder('ppa')
+      .innerJoin(TenantPhoneNumber, 'tpn', 'tpn.id = ppa.tenant_phone_number_id')
+      .innerJoin(CommunicationProfile, 'p', 'p.id = ppa.profile_id')
+      .where('tpn.phone_number = :phone', { phone: normalized })
+      .andWhere('p.tenant_id = :tenantId', { tenantId })
+      .andWhere('ppa.active = TRUE')
+      .getCount();
+
+    const missing: string[] = [];
+    if (businesses.length === 0) missing.push('business');
+    if (profiles.length === 0) missing.push('profile');
+    if (ppas.length === 0 || !ppas.some((p) => p.active)) missing.push('ppa');
+
+    let reason: VerifyReason;
+    if (resolverMatches === 1) reason = 'ok';
+    else if (resolverMatches === 0) reason = 'INVALID_PROFILE_PHONE';
+    else reason = 'AMBIGUOUS_FROM_NUMBER';
+
+    const activePpa = ppas.find((p) => p.active);
+    const firstBiz = businesses[0];
+    const firstProfile = profiles[0];
+
+    return {
+      ok: resolverMatches === 1,
+      phoneNumber: normalized,
+      tenantId,
+      workspaceId,
+      tpn: {
+        exists: true,
+        id: tpn.id,
+        ownerTenantId: tpn.tenantId,
+        status: tpn.status,
+        a2pStatus: tpn.a2pStatus ?? null,
+      },
+      business: firstBiz
+        ? { exists: true, id: firstBiz.id, slug: firstBiz.slug, status: firstBiz.status }
+        : { exists: false },
+      profile: firstProfile
+        ? {
+            exists: true,
+            id: firstProfile.id,
+            slug: firstProfile.slug,
+            isDefault: firstProfile.isDefault,
+            status: firstProfile.status,
+          }
+        : { exists: false },
+      ppa: activePpa
+        ? {
+            exists: true,
+            id: activePpa.id,
+            active: activePpa.active,
+            isDefault: activePpa.isDefault,
+          }
+        : { exists: false },
+      resolver: { matches: resolverMatches, reason },
+      missing,
+    };
   }
 
   /**
@@ -1143,6 +1307,15 @@ export class PhoneNumberProvisioningService {
     this.logger.log(
       `[reallocatePhoneNumber] ${phoneNumber} re-homed to tenant ${newTenantId} (workspace: ${workspaceId})`,
     );
+
+    // The chain the outbound resolver requires
+    // (communication_businesses -> communication_profiles ->
+    // profile_phone_assignments) is scoped by tenant. After a re-home to
+    // newTenantId the chain doesn't exist for that tenant yet, so outbound
+    // resolution would 422 INVALID_PROFILE_PHONE — same failure mode as a
+    // fresh purchase before ensureOutboundReady was wired into purchaseNumber.
+    // Failure here is logged; the caller's re-home succeeds either way.
+    await this.ensureOutboundReady(allocation);
 
     // Configure Twilio webhooks immediately so inbound calls/SMS route correctly.
     if (allocation.providerId) {

@@ -469,6 +469,35 @@ export class TenantsController {
   }
 
   /**
+   * Verify a (tenant, fromNumber) pair is ready for outbound send.
+   * Runs the exact Step-B query from ResolveProfileForOutboundService so a
+   * pass here guarantees `POST /api/v1/messages` won't 422 with
+   * INVALID_PROFILE_PHONE. Returns diagnostic breakdown of the
+   * TPN -> business -> profile -> PPA chain so callers (LB, admin UI) know
+   * exactly which link is missing.
+   *
+   * Tenant-scoped callers may verify their own tenant. Workspace-scoped
+   * callers may verify any tenant in the workspace.
+   *
+   * GET /api/tenants/:id/phone-numbers/:phoneNumber/verify
+   */
+  @Get(':id/phone-numbers/:phoneNumber/verify')
+  async verifyPhoneNumberOutbound(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+    @Param('id') tenantId: string,
+    @Param('phoneNumber') phoneNumber: string,
+  ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
+    const result = await this.provisioningService.verifyPhoneNumberOutbound(
+      workspaceId,
+      tenantId,
+      phoneNumber,
+    );
+    return { data: result };
+  }
+
+  /**
    * Deallocate a phone number from a tenant (admin action).
    * DELETE /api/tenants/:id/phone-numbers/:allocationId
    */
