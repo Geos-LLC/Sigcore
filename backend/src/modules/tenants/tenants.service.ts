@@ -466,12 +466,102 @@ export class TenantsService {
   }
 
   /**
-   * Delete a tenant
+   * Delete a tenant.
+   *
+   * Guards against wiping shared-sender TPNs: if this tenant owns any
+   * `tenant_phone_numbers` referenced by active `profile_phone_assignments`
+   * from profiles under OTHER tenants in the same workspace (the PR15
+   * shared-sender pattern), reparent those TPNs to a referencing active
+   * tenant BEFORE the cascade delete runs. Otherwise the FK cascade on
+   * tenants → tenant_phone_numbers → profile_phone_assignments would kill
+   * the load-bearing PPAs and turn every affected tenant's outbound send
+   * into a 422 `INVALID_PROFILE_PHONE`.
+   *
+   * If a load-bearing TPN has no active referencing tenant to reparent to,
+   * throw ConflictException — operator must resolve manually (either
+   * deactivate the PPAs or reassign to another workspace tenant) rather
+   * than silently break sends.
+   *
+   * See 2026-07-13 Spotless incident writeup in
+   * `LeadBridge` Obsidian notes for the failure signature this guards against.
    */
   async deleteTenant(workspaceId: string, tenantId: string): Promise<void> {
     const tenant = await this.getTenant(workspaceId, tenantId);
+    await this.reparentSharedSenderTpnsBeforeDelete(workspaceId, tenantId);
     await this.tenantRepo.remove(tenant);
     this.logger.log(`Deleted tenant: ${tenantId}`);
+  }
+
+  /**
+   * Reparent every TPN owned by `tenantId` that is referenced by an active
+   * PPA from a profile under a different tenant. Picks the earliest-created
+   * active referencing tenant in the same workspace as the new owner.
+   *
+   * Uses `tenantRepo.manager.query` for raw SQL — cheaper than loading the
+   * TPN entity graph, and the join across `profile_phone_assignments` +
+   * `communication_profiles` is naturally raw. Runs outside an explicit
+   * transaction: partial-reparent-then-throw is a safe retry state.
+   */
+  private async reparentSharedSenderTpnsBeforeDelete(
+    workspaceId: string,
+    tenantId: string,
+  ): Promise<void> {
+    const mgr = this.tenantRepo.manager;
+
+    const loadBearing: Array<{ tpn_id: string; phone_number: string }> =
+      await mgr.query(
+        `SELECT tpn.id AS tpn_id, tpn.phone_number
+         FROM tenant_phone_numbers tpn
+         WHERE tpn.tenant_id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM profile_phone_assignments ppa
+             JOIN communication_profiles p ON p.id = ppa.profile_id
+             WHERE ppa.tenant_phone_number_id = tpn.id
+               AND ppa.active = TRUE
+               AND p.tenant_id <> tpn.tenant_id
+           )`,
+        [tenantId],
+      );
+
+    if (loadBearing.length === 0) return;
+
+    for (const tpn of loadBearing) {
+      const candidates: Array<{ tenant_id: string }> = await mgr.query(
+        `SELECT p.tenant_id
+         FROM profile_phone_assignments ppa
+         JOIN communication_profiles p ON p.id = ppa.profile_id
+         JOIN tenants ct ON ct.id = p.tenant_id
+         WHERE ppa.tenant_phone_number_id = $1
+           AND ppa.active = TRUE
+           AND ct.workspace_id = $2
+           AND ct.status = 'active'
+           AND ct.id <> $3
+         GROUP BY p.tenant_id, ct.created_at
+         ORDER BY ct.created_at ASC, p.tenant_id ASC
+         LIMIT 1`,
+        [tpn.tpn_id, workspaceId, tenantId],
+      );
+
+      if (candidates.length === 0) {
+        throw new ConflictException(
+          `Cannot delete tenant ${tenantId}: TPN ${tpn.tpn_id} (${tpn.phone_number}) ` +
+            `is referenced by active PPAs from profiles under other tenants, but no ` +
+            `active tenant in workspace ${workspaceId} is available to reparent it to. ` +
+            `Deactivate the referencing PPAs or reassign them to a target tenant first.`,
+        );
+      }
+
+      const newOwnerId = candidates[0].tenant_id;
+      await mgr.query(
+        `UPDATE tenant_phone_numbers SET tenant_id = $1, updated_at = now() WHERE id = $2`,
+        [newOwnerId, tpn.tpn_id],
+      );
+      this.logger.log(
+        `[deleteTenant] Reparented shared-sender TPN ${tpn.tpn_id} (${tpn.phone_number}) ` +
+          `from ${tenantId} → ${newOwnerId} to preserve cross-tenant PPAs`,
+      );
+    }
   }
 
   /**
