@@ -40,12 +40,18 @@ import {
  *     rows are inserted inside a single transaction. Any step failing
  *     rolls back all rows, leaving Sigcore's state unchanged.
  *
- *   * Products never supply Twilio credentials via this endpoint. The
+ *   * Products never supply provider credentials via this endpoint. The
  *     integration is created with an encrypted-empty credentials blob and
  *     marked `active`; a follow-up Sigcore-owned flow supplies real
  *     credentials before the integration is used for outbound provider
  *     calls. This preserves the ownership principle (Sigcore is the
  *     credential owner) without letting products mint the row.
+ *
+ *   * The default provider today is Twilio. Additional providers
+ *     (OpenPhone, WhatsApp, Telegram, future ones) may be provisioned in
+ *     the same call once multi-provider provisioning is on the table —
+ *     the response shape is already an integration list. Twilio-only is
+ *     a defaulting decision, not a contract shape.
  */
 @Injectable()
 export class ProvisioningService {
@@ -69,7 +75,7 @@ export class ProvisioningService {
     );
     if (existing) {
       this.logger.log(
-        `provision_communication_identity_idempotent product=${dto.product} externalWorkspaceId=${maskId(dto.externalWorkspaceId)} identityId=${existing.communicationIdentityId}`,
+        `provision_communication_identity_idempotent product=${dto.product} externalWorkspaceId=${maskId(dto.externalWorkspaceId)} workspaceId=${existing.workspaceId} tenantId=${existing.tenantId}`,
       );
       return existing;
     }
@@ -142,11 +148,13 @@ export class ProvisioningService {
           }),
         );
 
-        // 3) Default Twilio integration. Credentials are Sigcore-owned;
-        //    products never supply them here. We seed an encrypted-empty
-        //    blob and mark active per the API contract; a later Sigcore
-        //    flow injects real credentials before the integration is
-        //    exercised end-to-end.
+        // 3) Default provider integration. Twilio is the default today;
+        //    additional providers may be included by future work — the
+        //    response shape is already a list. Credentials are Sigcore-
+        //    owned; products never supply them here. We seed an
+        //    encrypted-empty blob and mark active per the API contract; a
+        //    later Sigcore flow injects real credentials before the
+        //    integration is exercised end-to-end.
         const integrationRepo = mgr.getRepository(CommunicationIntegration);
         const integration = await integrationRepo.save(
           integrationRepo.create({
@@ -207,12 +215,18 @@ export class ProvisioningService {
     }
   }
 
+  /**
+   * Shape the persisted identity + its integrations into the public
+   * response. `identity.id` is NOT surfaced — it is a Sigcore-internal
+   * bookkeeping handle. Consumers rely on `workspaceId` + `tenantId` +
+   * `integrations[]` today; any future opaque handle will be an additive
+   * change on this shape.
+   */
   private toResponse(
     identity: CommunicationIdentity,
     integrations: CommunicationIntegration[],
   ): CommunicationIdentityResponse {
     return {
-      communicationIdentityId: identity.id,
       workspaceId: identity.workspaceId,
       tenantId: identity.tenantId,
       integrations: integrations.map((i) => ({

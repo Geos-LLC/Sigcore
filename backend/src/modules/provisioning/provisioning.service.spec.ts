@@ -114,9 +114,10 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       expect(integration.save).toHaveBeenCalledTimes(1);
       expect(identity.save).toHaveBeenCalledTimes(1);
 
-      // Response shape
+      // Response shape — communicationIdentityId is intentionally NOT
+      // returned (kept internal per Task 6B.2 refinements). Consumers
+      // rely on workspaceId + tenantId + integrations[].
       expect(result).toEqual({
-        communicationIdentityId: expect.any(String),
         workspaceId: expect.any(String),
         tenantId: expect.any(String),
         integrations: [
@@ -204,7 +205,6 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       const result = await service.provisionCommunicationIdentity(DTO());
 
       expect(dataSource.transaction).not.toHaveBeenCalled();
-      expect(result.communicationIdentityId).toBe('id-existing');
       expect(result.workspaceId).toBe('ws-existing');
       expect(result.tenantId).toBe('tenant-existing');
       expect(result.integrations).toEqual([
@@ -230,7 +230,9 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       const { service, workspace, tenant } = buildDataSource({ identity, integration });
       const result = await service.provisionCommunicationIdentity(DTO());
 
-      expect(result.communicationIdentityId).toBe('id-race-winner');
+      // In-txn re-check surfaced the winner's workspace + tenant.
+      expect(result.workspaceId).toBe('ws-winner');
+      expect(result.tenantId).toBe('tenant-winner');
       // Race lost — we must NOT have inserted anything.
       expect(workspace.save).not.toHaveBeenCalled();
       expect(tenant.save).not.toHaveBeenCalled();
@@ -265,7 +267,9 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       ]);
 
       const result = await service.provisionCommunicationIdentity(DTO());
-      expect(result.communicationIdentityId).toBe('id-post-race');
+      // Winner's identifiers, resolved via post-race re-read.
+      expect(result.workspaceId).toBe('ws-post-race');
+      expect(result.tenantId).toBe('tenant-post-race');
     });
   });
 
@@ -318,9 +322,10 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       const { service, identity } = buildDataSource();
       identity.findOne.mockResolvedValue(null);
       const result = await service.provisionCommunicationIdentity(DTO());
-      // Top-level keys — no extras.
+      // Top-level keys — no extras. communicationIdentityId is deliberately
+      // absent from the public shape (Task 6B.2 refinement — kept internal).
       expect(Object.keys(result).sort()).toEqual(
-        ['communicationIdentityId', 'integrations', 'tenantId', 'workspaceId'].sort(),
+        ['integrations', 'tenantId', 'workspaceId'].sort(),
       );
       // Per-integration keys — no extras.
       for (const int of result.integrations) {

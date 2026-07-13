@@ -28,7 +28,7 @@ No public / anonymous access.
 {
   "product":              "callio",         // required · enum (currently: "callio")
   "workspaceName":        "Acme Voice",     // required · 1–255 chars
-  "externalWorkspaceId":  "cal-ws-abc123",  // required · 1–255 chars · caller's own workspace ID
+  "externalWorkspaceId":  "cal-ws-abc123",  // required · 1–255 chars · caller's own workspace ID (immutable — see below)
   "metadata": {                             // optional · opaque · Sigcore does not interpret
     "any": "shape"
   }
@@ -37,22 +37,21 @@ No public / anonymous access.
 
 Field notes:
 
-- `product` — the consuming product. Currently only `"callio"` is accepted; new products must be added to `KNOWN_PRODUCTS` in a deliberate PR before they can call this endpoint.
-- `externalWorkspaceId` — the caller's own workspace identifier. Sigcore treats it as opaque. It is one half of the idempotency key.
-- `workspaceName` — a human-friendly name attached to the Sigcore-owned workspace + tenant rows created. Used only for operator observability.
-- `metadata` — free-form JSON, stored verbatim on the identity row. Not read by Sigcore.
+- **`product`** — the consuming product. Currently only `"callio"` is accepted; new products must be added to `KNOWN_PRODUCTS` in a deliberate PR before they can call this endpoint.
+- **`externalWorkspaceId`** — the caller's own workspace identifier. **Owned by the consuming product** — Sigcore never generates, mutates, or interprets it; it is stored verbatim and used only as half of the idempotency key. **Immutable** — once a Communication Identity exists for a given `(product, externalWorkspaceId)` pair, any change to the consumer's own workspace identifier requires the consumer to request a new Communication Identity. Sigcore does not offer a "rename" or "reassign" operation. Repeated calls with the same pair return the same Sigcore-side identity; a call with a different pair provisions a fresh identity even if the consumer considers it "the same workspace."
+- **`workspaceName`** — a human-friendly name attached to the Sigcore-owned workspace + tenant rows created. Used only for operator observability.
+- **`metadata`** — free-form JSON, stored verbatim on the identity row. Not read by Sigcore.
 
 ### Response — 201 Created
 
 ```jsonc
 {
   "data": {
-    "communicationIdentityId": "8f2b9a…-…-…",       // opaque · use as-is
     "workspaceId":              "1bcbb4e0-…",       // Sigcore-owned workspace UUID
     "tenantId":                 "3c74068e-…",       // Sigcore-owned tenant UUID
     "integrations": [
       {
-        "provider":       "twilio",
+        "provider":       "twilio",                 // default provider today
         "integrationId":  "a537cc3a-…",             // Sigcore-owned integration UUID
         "status":         "active"
       }
@@ -63,10 +62,12 @@ Field notes:
 
 Response invariants:
 
-- `communicationIdentityId` — treat as opaque. Do not decompose or map to internal Sigcore rows.
-- `workspaceId` + `tenantId` — returned today so Callio's `workspaces.sigcore_workspace_id` cache can populate. They are **not contract-stable** and may be removed once consumers stop referencing them.
-- `integrations[].integrationId` — used by Task 6B provider clients when calling `/v1/calls/*` endpoints. Opaque.
-- `integrations[].status` — always `"active"` on creation. A future flow that supplies real Twilio credentials may transition this. Consumers must handle any `IntegrationStatus` value.
+- **`workspaceId`** + **`tenantId`** — Sigcore-side UUIDs the consumer should cache locally (Callio stores in `workspaces.sigcore_workspace_id` today). Treat as opaque.
+- **`integrations`** — a list, not a fixed record. The default provider today is Twilio, and Twilio is the only entry the endpoint returns for this milestone. Additional providers (OpenPhone, WhatsApp, Telegram, future ones) may appear in the same list once multi-provider provisioning is on the table. **Consumers must iterate `integrations[]` and dispatch on `provider`** rather than assuming a fixed length or Twilio-only shape.
+- **`integrations[].integrationId`** — used by Task 6B provider clients when calling `/v1/calls/*` endpoints. Opaque.
+- **`integrations[].status`** — always `"active"` on creation. A future flow that supplies real provider credentials may transition this. Consumers must handle any `IntegrationStatus` value.
+
+An internal `communication_identities` row is created for every provisioned identity and its primary key serves as an internal bookkeeping handle for Sigcore. **That handle is intentionally not returned in this response.** Any future revision that surfaces a stable opaque handle will be additive; consumers should not depend on internals of Sigcore's schema.
 
 ---
 
@@ -80,7 +81,7 @@ Enforcement layers, ordered from cheapest to most robust:
 2. **In-transaction re-read:** if the fast lookup misses, a re-read runs under the transaction just before inserts. Catches races between the fast path and the transaction start.
 3. **DB unique index:** `CREATE UNIQUE INDEX uq_communication_identities_product_external ON communication_identities (product, external_workspace_id)`. The final correctness boundary. Any concurrent insert that gets past step 2 produces exactly one winning row; the loser hits Postgres error code `23505`, at which point the service re-reads and returns the winning identity.
 
-Consumers therefore can safely retry this endpoint on network errors without accidentally creating a second identity.
+Consumers can safely retry this endpoint on network errors without accidentally creating a second identity.
 
 ---
 
@@ -93,9 +94,9 @@ workspaces      ← Sigcore workspace row
    ↓
 tenants         ← tenant scoped to that workspace
    ↓
-communication_integrations   ← default Twilio integration (encrypted-empty credentials, status=active)
+communication_integrations   ← default provider integration (Twilio today, encrypted-empty credentials, status=active)
    ↓
-communication_identities     ← the opaque public handle
+communication_identities     ← internal Sigcore-owned handle (not returned to consumer)
 ```
 
 If **any** step throws, the transaction rolls back and no rows persist. Sigcore's state before and after a failed call is identical. This means the endpoint is safe to retry after any transient failure — no orphaned workspace, tenant, or integration is left behind.
@@ -104,7 +105,7 @@ If **any** step throws, the transaction rolls back and no rows persist. Sigcore'
 
 ## Credential ownership
 
-The consuming product **must not supply Twilio credentials** in this call. Communication infrastructure — including the credentials used to speak with providers like Twilio — is Sigcore-owned.
+The consuming product **must not supply provider credentials** in this call. Communication infrastructure — including the credentials used to speak with providers like Twilio — is Sigcore-owned.
 
 Today the endpoint stores an encrypted-empty credentials blob (`enc("{}")`) with `status = active` per the API contract. A separate Sigcore-owned flow (out of scope for Task 6B.2) will supply real credentials before the integration is used for outbound provider calls. Consumers depend only on the returned `integrationId`; when they invoke `/v1/calls/*` endpoints later, `IntegrationResourceGuard` on Sigcore's side will read the credentials at that point.
 
@@ -137,4 +138,4 @@ Concurrent `23505` unique-violations are handled internally and do NOT surface a
 
 ## Change log
 
-- **2026-07-13 · Task 6B.2** — endpoint created. Introduces `communication_identities` table (migration `1772000000000-AddCommunicationIdentities`). Callio-only `product` enum.
+- **2026-07-13 · Task 6B.2** — endpoint created. Introduces `communication_identities` table (migration `1772000000000-AddCommunicationIdentities`). Callio-only `product` enum. Default provider is Twilio. `communicationIdentityId` intentionally kept internal.
