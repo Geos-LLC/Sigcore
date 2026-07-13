@@ -125,6 +125,11 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
             provider: ProviderType.TWILIO,
             integrationId: expect.any(String),
             status: IntegrationStatus.ACTIVE,
+            // Task 6B.5A: response now includes operational readiness.
+            // Freshly created rows report pending_credentials until the
+            // Sigcore-owned subaccount provisioner runs on first purchase.
+            operationalStatus: 'pending_credentials',
+            operationalReason: 'TWILIO_CREDENTIALS_NOT_CONFIGURED',
           },
         ],
       });
@@ -208,7 +213,15 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       expect(result.workspaceId).toBe('ws-existing');
       expect(result.tenantId).toBe('tenant-existing');
       expect(result.integrations).toEqual([
-        { provider: 'twilio', integrationId: 'int-existing', status: 'active' },
+        {
+          provider: 'twilio',
+          integrationId: 'int-existing',
+          status: 'active',
+          // Task 6B.5A: grandfathered rows (NULL operationalStatus) surface
+          // as `ready` for backward compat with pre-6B.5A pilot workspaces.
+          operationalStatus: 'ready',
+          operationalReason: null,
+        },
       ]);
     });
 
@@ -327,10 +340,17 @@ describe('ProvisioningService.provisionCommunicationIdentity', () => {
       expect(Object.keys(result).sort()).toEqual(
         ['integrations', 'tenantId', 'workspaceId'].sort(),
       );
-      // Per-integration keys — no extras.
+      // Per-integration keys — no extras. Task 6B.5A adds
+      // operationalStatus + operationalReason to the contract.
       for (const int of result.integrations) {
         expect(Object.keys(int).sort()).toEqual(
-          ['integrationId', 'provider', 'status'].sort(),
+          [
+            'integrationId',
+            'operationalReason',
+            'operationalStatus',
+            'provider',
+            'status',
+          ].sort(),
         );
       }
     });

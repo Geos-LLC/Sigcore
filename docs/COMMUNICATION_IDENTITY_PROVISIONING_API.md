@@ -107,7 +107,9 @@ If **any** step throws, the transaction rolls back and no rows persist. Sigcore'
 
 The consuming product **must not supply provider credentials** in this call. Communication infrastructure — including the credentials used to speak with providers like Twilio — is Sigcore-owned.
 
-Today the endpoint stores an encrypted-empty credentials blob (`enc("{}")`) with `status = active` per the API contract. A separate Sigcore-owned flow (out of scope for Task 6B.2) will supply real credentials before the integration is used for outbound provider calls. Consumers depend only on the returned `integrationId`; when they invoke `/v1/calls/*` endpoints later, `IntegrationResourceGuard` on Sigcore's side will read the credentials at that point.
+Today the endpoint stores an encrypted-empty credentials blob (`enc("{}")`) with `status = active` and `operationalStatus = pending_credentials`. A separate Sigcore-owned flow — lazy Twilio subaccount provisioning triggered by the first `/tenants/:tenantId/phone-numbers/purchase` call — mints a per-workspace Twilio subaccount, encrypts its credentials onto the row, and transitions `operationalStatus` to `ready` after a Twilio preflight. See [OPERATIONAL_READINESS.md](./OPERATIONAL_READINESS.md) for the full state machine, reason codes, retry semantics, and cleanup notes.
+
+Consumers should read `operationalStatus` alongside `status` when deciding whether to route provider operations. `status: active` reflects Sigcore's own row bookkeeping; `operationalStatus: ready` reflects whether Twilio can actually service calls for this integration.
 
 Any future proposal to accept credentials in this endpoint's body should be rejected — it would let a compromised product downgrade the trust model.
 

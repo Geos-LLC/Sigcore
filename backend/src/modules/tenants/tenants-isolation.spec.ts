@@ -64,6 +64,10 @@ function newProvisioningService() {
     {} as any,
     {} as any,
     {} as any,
+    // Task 6B.5A: subaccount provisioner stub. Isolation tests don't
+    // exercise the readiness path — this stub returns the integration
+    // unchanged so the code path under test (cross-tenant guards) runs.
+    { ensureReady: jest.fn(async () => ({ credentialsEncrypted: '{}' })) } as any,
   );
   return { service, orderRepo };
 }

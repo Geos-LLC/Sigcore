@@ -12,6 +12,8 @@ import { ProviderRegistry } from '../communication/providers/provider-registry.s
 import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { WhatsAppWebProvider } from '../communication/providers/whatsapp-web.provider';
+import { TwilioSubaccountProvisionerService } from '../integrations/twilio-subaccount-provisioner.service';
+import { DataSource } from 'typeorm';
 import {
   ApiKey,
   CommunicationBusiness,
@@ -104,6 +106,18 @@ describe('PR 2 tenant voice-webhook DI graph (real bootstrap)', () => {
         },
         { provide: getRepositoryToken(Workspace), useValue: stubRepo },
         { provide: getRepositoryToken(ApiKey), useValue: stubRepo },
+        // Task 6B.5A: PhoneNumberProvisioningService now injects the
+        // TwilioSubaccountProvisioner + DataSource (used by the provisioner
+        // for transactional row-locking). Stubbed here so the DI graph
+        // resolves without opening a real DB connection.
+        TwilioSubaccountProvisionerService,
+        {
+          provide: DataSource,
+          useValue: {
+            transaction: jest.fn(),
+            getRepository: jest.fn(),
+          },
+        },
       ],
     }).compile();
 

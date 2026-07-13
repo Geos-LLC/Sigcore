@@ -21,6 +21,7 @@ import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-as
 import { EncryptionService } from '../../common/services/encryption.service';
 import { CommunicationModule } from '../communication/communication.module';
 import { ApiModule } from '../api/api.module';
+import { IntegrationsModule } from '../integrations/integrations.module';
 
 @Module({
   imports: [
@@ -40,6 +41,10 @@ import { ApiModule } from '../api/api.module';
     ]),
     forwardRef(() => CommunicationModule),
     forwardRef(() => ApiModule),
+    // Task 6B.5A: PhoneNumberProvisioningService injects the lazy Twilio
+    // subaccount provisioner (fires on first purchase for pending_credentials
+    // integrations). forwardRef guards against import cycles.
+    forwardRef(() => IntegrationsModule),
   ],
   controllers: [TenantsController, TenantsV1Controller, TenantPortalController],
   providers: [TenantsService, PhoneNumberProvisioningService, EncryptionService],

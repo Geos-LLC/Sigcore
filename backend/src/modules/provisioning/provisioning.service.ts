@@ -7,6 +7,8 @@ import { CommunicationIdentity } from '../../database/entities/communication-ide
 import {
   CommunicationIntegration,
   IntegrationStatus,
+  OperationalStatus,
+  OperationalReasonCode,
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
 import { Tenant, TenantStatus } from '../../database/entities/tenant.entity';
@@ -152,9 +154,16 @@ export class ProvisioningService {
         //    additional providers may be included by future work — the
         //    response shape is already a list. Credentials are Sigcore-
         //    owned; products never supply them here. We seed an
-        //    encrypted-empty blob and mark active per the API contract; a
-        //    later Sigcore flow injects real credentials before the
-        //    integration is exercised end-to-end.
+        //    encrypted-empty blob and mark active per the API contract.
+        //
+        //    Wave-2 Task 6B.5A: `operational_status` is set to
+        //    `pending_credentials` so consumers can distinguish "row
+        //    exists" from "row can service ops". The Sigcore-owned lazy
+        //    provisioning flow (TwilioSubaccountProvisioner) transitions
+        //    this to `ready` on first voice-number purchase. Callio's
+        //    registrar continues to see `provisioned` (its own status
+        //    dimension) because Sigcore's lifecycle `status` is still
+        //    `active`; operational readiness is the new orthogonal signal.
         const integrationRepo = mgr.getRepository(CommunicationIntegration);
         const integration = await integrationRepo.save(
           integrationRepo.create({
@@ -162,6 +171,9 @@ export class ProvisioningService {
             provider: ProviderType.TWILIO,
             credentialsEncrypted: this.encryptionService.encrypt('{}'),
             status: IntegrationStatus.ACTIVE,
+            operationalStatus: OperationalStatus.PENDING_CREDENTIALS,
+            operationalReason:
+              OperationalReasonCode.TWILIO_CREDENTIALS_NOT_CONFIGURED,
             metadata: {
               ensure: {
                 tenantId: tenant.id,
@@ -221,6 +233,11 @@ export class ProvisioningService {
    * bookkeeping handle. Consumers rely on `workspaceId` + `tenantId` +
    * `integrations[]` today; any future opaque handle will be an additive
    * change on this shape.
+   *
+   * Task 6B.5A: also surfaces `operationalStatus` + `operationalReason` on
+   * each integration so consumers can distinguish a `pending_credentials`
+   * row (present but not usable) from a `ready` row (safe to route ops).
+   * Consumers that don't consume the new fields see the pre-6B.5A shape.
    */
   private toResponse(
     identity: CommunicationIdentity,
@@ -233,6 +250,9 @@ export class ProvisioningService {
         provider: i.provider,
         integrationId: i.id,
         status: i.status,
+        operationalStatus:
+          i.operationalStatus ?? OperationalStatus.READY /* NULL → grandfathered */,
+        operationalReason: i.operationalReason ?? null,
       })),
     };
   }

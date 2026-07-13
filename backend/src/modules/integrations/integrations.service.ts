@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import {
   CommunicationIntegration,
+  OperationalStatus,
   ProviderType,
   IntegrationStatus,
 } from '../../database/entities/communication-integration.entity';
@@ -375,13 +376,7 @@ export class IntegrationsService {
             `[ensureIntegration] returning existing row for workspace=${workspaceId} tenant=${dto.tenantId} provider=${dto.provider} id=${existing.id} (no credentials supplied)`,
           );
         }
-        return {
-          id: existing.id,
-          created: false,
-          workspaceId,
-          tenantId: dto.tenantId,
-          provider: dto.provider,
-        };
+        return toEnsureResult(existing, false, workspaceId, dto.tenantId);
       }
 
       // Probe mode — refuse to create an empty-credentials row.
@@ -400,6 +395,13 @@ export class IntegrationsService {
         credentialsEncrypted: this.encryptionService.encrypt(credsBlob),
         externalWorkspaceId: dto.providerAccountId,
         status: IntegrationStatus.ACTIVE,
+        // Task 6B.5A: rows created via ensure with credentials are treated
+        // as grandfathered ready — the caller (pilot registrar, admin
+        // migration script) is asserting these credentials work. The lazy
+        // subaccount provisioner is only invoked for rows in
+        // `pending_credentials`, which is the state Task 6B.2 provisioning
+        // sets. Legacy ensure creations leave operationalStatus NULL so
+        // the response reports `ready`.
         metadata: {
           ensure: {
             tenantId: dto.tenantId,
@@ -412,13 +414,7 @@ export class IntegrationsService {
       this.logger.log(
         `[ensureIntegration] created workspace=${workspaceId} tenant=${dto.tenantId} provider=${dto.provider} id=${saved.id}`,
       );
-      return {
-        id: saved.id,
-        created: true,
-        workspaceId,
-        tenantId: dto.tenantId,
-        provider: dto.provider,
-      };
+      return toEnsureResult(saved, true, workspaceId, dto.tenantId);
     };
 
     try {
@@ -436,13 +432,7 @@ export class IntegrationsService {
           where: { workspaceId, provider: dto.provider },
         });
         if (existing) {
-          return {
-            id: existing.id,
-            created: false,
-            workspaceId,
-            tenantId: dto.tenantId,
-            provider: dto.provider,
-          };
+          return toEnsureResult(existing, false, workspaceId, dto.tenantId);
         }
       }
       throw err;
@@ -1609,4 +1599,26 @@ export class IntegrationsService {
       webhookUrl: voiceWebhookUrl,
     };
   }
+}
+
+/**
+ * Wave-2 Task 6B.5A — shape an integration row into the ensure response,
+ * mapping NULL operational_status to `ready` for grandfathered pre-6B.5A
+ * rows so the pilot continues to report unchanged.
+ */
+function toEnsureResult(
+  row: CommunicationIntegration,
+  created: boolean,
+  workspaceId: string,
+  tenantId: string,
+): EnsureIntegrationResult {
+  return {
+    id: row.id,
+    created,
+    workspaceId,
+    tenantId,
+    provider: row.provider,
+    operationalStatus: row.operationalStatus ?? OperationalStatus.READY,
+    operationalReason: row.operationalReason ?? null,
+  };
 }
