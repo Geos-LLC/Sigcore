@@ -91,6 +91,71 @@ describe('TenantVoiceForwarderService.forward', () => {
     expect(args.url).toBe(input.voiceInboundUrl);
   });
 
+  describe('Wave-2 forwarded HMAC envelope', () => {
+    it('adds x-sigcore-forwarded-signature + timestamp when the secret is set', async () => {
+      const svc = build({ SIGCORE_VOICE_FORWARD_HMAC_SECRET: 'shared-secret-32chars-yay-hmac!!!!' });
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      await svc.forward(baseInput());
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      expect(args.headers['x-sigcore-forwarded-signature']).toMatch(/^v1=[0-9a-f]{64}$/);
+      const ts = Number(args.headers['x-sigcore-forwarded-timestamp']);
+      expect(Number.isFinite(ts)).toBe(true);
+      expect(Math.abs(Date.now() / 1000 - ts)).toBeLessThan(5);
+    });
+
+    it('omits signature + timestamp headers when the secret is unset', async () => {
+      const svc = build();
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      await svc.forward(baseInput());
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      expect(args.headers['x-sigcore-forwarded-signature']).toBeUndefined();
+      expect(args.headers['x-sigcore-forwarded-timestamp']).toBeUndefined();
+      // Correlation headers still forwarded regardless of secret state.
+      expect(args.headers['x-sigcore-forwarded-workspace-id']).toBe('ws-1');
+      expect(args.headers['x-sigcore-forwarded-tenant-id']).toBe('tenant-1');
+      expect(args.headers['x-sigcore-forwarded-call-sid']).toBe('CA_test');
+    });
+
+    it('signature validates against a manually-computed HMAC over the canonical string', async () => {
+      const secret = 'shared-secret-32chars-yay-hmac!!!!';
+      const svc = build({ SIGCORE_VOICE_FORWARD_HMAC_SECRET: secret });
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      const input = baseInput();
+      await svc.forward(input);
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      const ts = args.headers['x-sigcore-forwarded-timestamp'];
+      const receivedSig = args.headers['x-sigcore-forwarded-signature'];
+
+      // Independent recomputation — proves interop with any verifier that
+      // follows the documented 7-line canonical form.
+      const crypto = require('crypto');
+      const bodyHash = crypto.createHash('sha256').update(input.rawBody as string, 'utf8').digest('hex');
+      const canonical = [
+        'POST',
+        '/twilio/inbound', // pathname of https://tenant.example/twilio/inbound
+        ts,
+        'ws-1',
+        'tenant-1',
+        'CA_test',
+        bodyHash,
+      ].join('\n');
+      const expected = 'v1=' + crypto.createHmac('sha256', secret).update(canonical, 'utf8').digest('hex');
+      expect(receivedSig).toBe(expected);
+    });
+  });
+
   it('preserves x-twilio-signature and only x-forwarded-* headers', async () => {
     const svc = build();
     mockedAxios.request.mockResolvedValueOnce({

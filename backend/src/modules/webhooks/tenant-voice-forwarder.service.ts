@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosResponse } from 'axios';
 import { EmailService } from '../email/email.service';
+import {
+  SIGCORE_FORWARD_HEADERS,
+  sign as signForwardEnvelope,
+} from './sigcore-forward-signature.util';
 
 /**
  * Correlation fields injected into every log line so failed forwards can be
@@ -97,6 +101,7 @@ export class TenantVoiceForwarderService {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private readonly alertEmail: string | undefined;
+  private readonly forwardHmacSecret: string | undefined;
 
   constructor(
     private readonly configService: ConfigService,
@@ -118,6 +123,18 @@ export class TenantVoiceForwarderService {
         : 65536;
     this.alertEmail =
       this.configService.get<string>('VOICE_FORWARD_ALERT_EMAIL') || undefined;
+    // Wave-2 B.5 — HMAC shared secret used to sign the forwarded envelope.
+    // When unset, forwarded requests carry only the diagnostic correlation
+    // headers (no signature). Receivers such as Callio Wave-2 will reject
+    // unsigned forwards. This is intentional: a rollout that intends to
+    // forward to Callio must set the secret first.
+    this.forwardHmacSecret =
+      this.configService.get<string>('SIGCORE_VOICE_FORWARD_HMAC_SECRET') || undefined;
+    if (!this.forwardHmacSecret) {
+      this.logger.warn(
+        'SIGCORE_VOICE_FORWARD_HMAC_SECRET not set — forwarded envelopes will NOT include x-sigcore-forwarded-signature. Set this before pointing any tenant voiceInboundUrl at an authenticated receiver (Callio Wave-2).',
+      );
+    }
   }
 
   /**
@@ -239,11 +256,13 @@ export class TenantVoiceForwarderService {
       'user-agent': 'Sigcore-Voice-Forwarder/1.0',
       // Correlation headers so the tenant can attribute the request to a
       // Sigcore workspace + tenant + call without parsing the body.
-      'x-sigcore-forwarded-workspace-id': input.correlation.workspaceId,
-      'x-sigcore-forwarded-tenant-id': input.correlation.tenantId,
-      'x-sigcore-forwarded-call-sid': input.correlation.providerCallSid,
+      [SIGCORE_FORWARD_HEADERS.workspaceId]: input.correlation.workspaceId,
+      [SIGCORE_FORWARD_HEADERS.tenantId]: input.correlation.tenantId,
+      [SIGCORE_FORWARD_HEADERS.callSid]: input.correlation.providerCallSid,
     };
     if (input.twilioSignature) {
+      // Kept for diagnostics + downstream correlation. Callio Wave-2 does NOT
+      // validate against it — it validates the HMAC envelope below.
       headers['x-twilio-signature'] = input.twilioSignature;
     }
     for (const [k, v] of Object.entries(input.forwardedHeaders)) {
@@ -253,7 +272,41 @@ export class TenantVoiceForwarderService {
         headers[k.toLowerCase()] = v;
       }
     }
+    // Wave-2 B.5 — sign the envelope so an authenticated receiver (Callio)
+    // can trust this hop without needing to re-verify Twilio's signature
+    // against Sigcore's URL/token. Path is `pathname + search` of the
+    // configured voiceInboundUrl; Callio uses `req.originalUrl` for the
+    // same value.
+    if (this.forwardHmacSecret) {
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const path = this.extractSignedPath(input.voiceInboundUrl);
+      headers[SIGCORE_FORWARD_HEADERS.timestamp] = timestamp;
+      headers[SIGCORE_FORWARD_HEADERS.signature] = signForwardEnvelope(
+        this.forwardHmacSecret,
+        {
+          method: 'POST',
+          path,
+          timestamp,
+          workspaceId: input.correlation.workspaceId,
+          tenantId: input.correlation.tenantId,
+          callSid: input.correlation.providerCallSid,
+          rawBody: input.rawBody,
+        },
+      );
+    }
     return headers;
+  }
+
+  private extractSignedPath(rawUrl: string): string {
+    try {
+      const u = new URL(rawUrl);
+      return `${u.pathname}${u.search}`;
+    } catch {
+      // If the URL is unparseable the forwarder will fail immediately at
+      // axios level; return the raw value so any signed path we do produce
+      // still deterministically matches what Callio would see.
+      return rawUrl;
+    }
   }
 
   private validateTwimlShape(body: string): ForwardFailureReason | null {
