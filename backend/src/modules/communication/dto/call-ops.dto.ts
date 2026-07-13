@@ -15,6 +15,16 @@ export class RecordingStartDto {
   @IsNotEmpty()
   integrationId: string;
 
+  /**
+   * Task 6B.5B — tenantId is now required for IntegrationResourceGuard's
+   * check 2. Callio populates from `workspace.sigcore_tenant_id`.
+   * Task 6B.5C uses it as the tenantId that ends up in the forwarded
+   * callback HMAC envelope.
+   */
+  @IsString()
+  @IsOptional()
+  tenantId?: string;
+
   @IsString()
   @IsOptional()
   @IsIn(['mono', 'dual'])
@@ -34,6 +44,11 @@ export class HangupDto {
   @IsString()
   @IsNotEmpty()
   integrationId: string;
+
+  /** Task 6B.5B — tenantId required for IntegrationResourceGuard check 2. */
+  @IsString()
+  @IsOptional()
+  tenantId?: string;
 
   @IsString()
   @IsOptional()

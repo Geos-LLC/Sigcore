@@ -14,6 +14,7 @@ import { CallConnectService } from './call-connect.service';
 import { CallConnectController } from './call-connect.controller';
 import { InternalTwilioProxyController } from './internal-twilio-proxy.controller';
 import { TenantVoiceForwarderService } from './tenant-voice-forwarder.service';
+import { CallbackForwarderService } from './callback-forwarder.service';
 import { EmailModule } from '../email/email.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
@@ -77,7 +78,8 @@ import {
     OpenPhoneProvider,
     CallConnectService,
     TenantVoiceForwarderService,
+    CallbackForwarderService,
   ],
-  exports: [TwilioWebhooksService, TenantWebhooksService, IdempotencyService, OutboundWebhooksService],
+  exports: [TwilioWebhooksService, TenantWebhooksService, IdempotencyService, OutboundWebhooksService, CallbackForwarderService],
 })
 export class WebhooksModule {}

@@ -139,12 +139,14 @@ describe('TenantVoiceForwarderService.forward', () => {
       const receivedSig = args.headers['x-sigcore-forwarded-signature'];
 
       // Independent recomputation — proves interop with any verifier that
-      // follows the documented 7-line canonical form.
+      // follows the documented 8-line canonical form (Task 6B.5C added the
+      // eventType line to prevent cross-route envelope replay).
       const crypto = require('crypto');
       const bodyHash = crypto.createHash('sha256').update(input.rawBody as string, 'utf8').digest('hex');
       const canonical = [
         'POST',
         '/twilio/inbound', // pathname of https://tenant.example/twilio/inbound
+        'voice_inbound',
         ts,
         'ws-1',
         'tenant-1',

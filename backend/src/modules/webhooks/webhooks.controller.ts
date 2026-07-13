@@ -29,6 +29,11 @@ import {
 import { WebhookRateLimitGuard } from './webhook-rate-limit.guard';
 import { CallConnectService } from './call-connect.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { CallbackForwarderService } from './callback-forwarder.service';
+import {
+  verifyCallbackToken,
+  CallbackTokenKind,
+} from './sigcore-callback-token.util';
 
 @Controller('webhooks')
 @UseGuards(WebhookRateLimitGuard)
@@ -40,6 +45,8 @@ export class WebhooksController {
     private readonly twilioWebhooksService: TwilioWebhooksService,
     private readonly callConnectService: CallConnectService,
     private readonly messagingService: MessagingService,
+    /** Task 6B.5C — sign + forward callbacks to Callio with HMAC envelope. */
+    private readonly callbackForwarder: CallbackForwarderService,
   ) {}
 
   @Post('openphone/:webhookId')
@@ -566,6 +573,10 @@ export class WebhooksController {
 
   /**
    * Handle recording completion callbacks from Twilio.
+   *
+   * Legacy route (used by direct-Twilio integrations with credentials on
+   * Sigcore's own account). Task 6B.5C keeps this endpoint working so
+   * existing setups don't regress.
    */
   @Post('twilio/recording-status')
   @HttpCode(HttpStatus.OK)
@@ -573,6 +584,172 @@ export class WebhooksController {
     this.logger.log(`Twilio recording status: ${payload.CallSid} -> ${payload.RecordingSid}`);
     await this.twilioWebhooksService.handleRecordingComplete(payload);
     return '';
+  }
+
+  /**
+   * Task 6B.5C — Twilio → Sigcore → Callio recording-status callback.
+   *
+   * Sigcore mints the token when Callio calls
+   * `POST /v1/calls/:sid/recording/start`; Twilio POSTs here when the
+   * recording completes. Sigcore verifies the token (proves Sigcore
+   * minted this URL), then verifies Twilio's X-Twilio-Signature against
+   * the subaccount that placed the call, then HMAC-signs the outbound
+   * envelope and forwards to the Callio URL embedded in the token.
+   *
+   * The Twilio signature check + subaccount attribution is the whole
+   * reason this callback goes through Sigcore instead of directly to
+   * Callio — Callio's Twilio auth token would not match a subaccount
+   * signature. See docs/OPERATIONAL_READINESS.md.
+   */
+  @Post('twilio/recording-status/:token')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioRecordingStatusForwarded(
+    @Param('token') token: string,
+    @Body() payload: TwilioRecordingPayload,
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-twilio-signature') twilioSignature: string,
+  ) {
+    return this.handleTwilioCallbackForwarded(
+      'recording_status',
+      token,
+      req,
+      payload as unknown as Record<string, string>,
+      twilioSignature,
+    );
+  }
+
+  /**
+   * Task 6B.5C — Twilio → Sigcore → Callio call-status callback (mirror
+   * of recording-status). The token is minted when Sigcore purchases a
+   * voice number for a Callio-owned tenant; Twilio's `statusCallback`
+   * for that number points here.
+   */
+  @Post('twilio/status/:token')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioCallStatusForwarded(
+    @Param('token') token: string,
+    @Body() payload: TwilioCallStatusPayload,
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-twilio-signature') twilioSignature: string,
+  ) {
+    return this.handleTwilioCallbackForwarded(
+      'call_status',
+      token,
+      req,
+      payload as unknown as Record<string, string>,
+      twilioSignature,
+    );
+  }
+
+  /**
+   * Shared handler for Task 6B.5C token-carrying callback routes. Verifies
+   * the URL token, verifies Twilio's signature via the subaccount that
+   * owns the call, then forwards to Callio under an HMAC envelope.
+   *
+   * On any verification failure returns 200 empty (Twilio doesn't need to
+   * know why, but retries would loop) plus a structured warn line so ops
+   * can spot forged / stale / mis-routed callbacks in Loki.
+   */
+  private async handleTwilioCallbackForwarded(
+    kind: CallbackTokenKind,
+    token: string,
+    req: RawBodyRequest<Request>,
+    payload: Record<string, string>,
+    twilioSignature: string,
+  ): Promise<string> {
+    const secret = process.env.SIGCORE_VOICE_FORWARD_HMAC_SECRET;
+    const verify = verifyCallbackToken({
+      secret,
+      token,
+      expectedKind: kind,
+      nowSeconds: Math.floor(Date.now() / 1000),
+    });
+    if (!verify.ok) {
+      this.logger.warn(
+        `sigcore_callback_token_denied kind=${kind} reason=${verify.reason} callSid=${payload.CallSid ?? 'null'}`,
+      );
+      // Return 200 empty so Twilio does not retry a permanently-bad URL.
+      return '';
+    }
+    const providerCallSid = payload.CallSid ?? '';
+    if (!providerCallSid) {
+      this.logger.warn(`sigcore_callback_missing_call_sid kind=${kind}`);
+      return '';
+    }
+
+    // Verify Twilio's signature via the subaccount that owns the call.
+    // This is the check Callio itself cannot perform because Sigcore holds
+    // the subaccount tokens. Reuses TwilioWebhooksService's existing
+    // signature-verification helper, keyed on the payload's AccountSid.
+    // On mismatch we still forward NOTHING — Callio never learns about
+    // the callback and Sigcore emits a security warning.
+    try {
+      const twilioOk = await this.twilioWebhooksService.verifyRecordingCallbackSignature(
+        payload as unknown as { AccountSid?: string; [k: string]: string | undefined },
+        twilioSignature,
+        this.reconstructUrl(req),
+      );
+      if (!twilioOk) {
+        this.logger.warn(
+          `sigcore_callback_twilio_sig_denied kind=${kind} callSid=${providerCallSid} sigcoreWorkspaceId=${this.maskId(verify.payload.sigcoreWorkspaceId)}`,
+        );
+        return '';
+      }
+    } catch (err) {
+      this.logger.warn(
+        `sigcore_callback_twilio_verify_error kind=${kind} err=${(err as Error).message.slice(0, 200)}`,
+      );
+      // Do NOT proceed. We prefer dropping over false forwarding.
+      return '';
+    }
+
+    // Forward to Callio with a Sigcore HMAC envelope.
+    const rawBody = req.rawBody ?? Buffer.from('');
+    const contentType = req.headers['content-type'] || 'application/x-www-form-urlencoded';
+    const forwardEventType = this.callbackForwarder.eventTypeForKind(kind);
+    if (
+      forwardEventType !== 'voice_recording_status' &&
+      forwardEventType !== 'voice_call_status'
+    ) {
+      // Unreachable — the kind→eventType mapping only ever produces the
+      // two callback event types; narrowing here keeps the compiler happy.
+      return '';
+    }
+    const result = await this.callbackForwarder.forward({
+      eventType: forwardEventType,
+      callioDestUrl: verify.payload.callioDestUrl,
+      sigcoreWorkspaceId: verify.payload.sigcoreWorkspaceId,
+      sigcoreTenantId: verify.payload.sigcoreTenantId,
+      providerCallSid,
+      rawBody: Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody)),
+      contentType: typeof contentType === 'string' ? contentType : 'application/x-www-form-urlencoded',
+      twilioSignature,
+    });
+    if (result.outcome === 'fallback') {
+      // Fallback: also persist to Sigcore's own tables so the recording
+      // metadata isn't lost. Sigcore's existing legacy handler covers the
+      // recording case; call-status has an existing local handler too.
+      if (kind === 'recording_status') {
+        await this.twilioWebhooksService.handleRecordingComplete(
+          payload as unknown as TwilioRecordingPayload,
+        ).catch((err) => {
+          this.logger.warn(`sigcore_callback_local_persist_failed kind=${kind} err=${(err as Error).message.slice(0, 200)}`);
+        });
+      }
+    }
+    return '';
+  }
+
+  private reconstructUrl(req: Request): string {
+    const proto = (req.headers['x-forwarded-proto'] as string) ?? req.protocol ?? 'https';
+    const host = (req.headers['x-forwarded-host'] as string) ?? req.headers.host ?? '';
+    return `${proto}://${host}${req.originalUrl}`;
+  }
+
+  private maskId(id: string | undefined): string {
+    if (!id) return 'null';
+    if (id.length <= 8) return '***';
+    return `${id.slice(0, 4)}***${id.slice(-4)}`;
   }
 
   // ==================== WHATSAPP WEBHOOKS ====================
