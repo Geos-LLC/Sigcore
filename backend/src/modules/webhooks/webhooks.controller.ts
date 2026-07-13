@@ -703,8 +703,19 @@ export class WebhooksController {
       return '';
     }
 
-    // Forward to Callio with a Sigcore HMAC envelope.
-    const rawBody = req.rawBody ?? Buffer.from('');
+    // Forward to Callio with a Sigcore HMAC envelope. Mirror the inbound
+    // handler's fallback: express bodyParser may have consumed the raw
+    // stream before Nest's rawBody capture ran, so `req.rawBody` can be
+    // empty even for a form-encoded Twilio POST. In that case reconstruct
+    // the canonical form-urlencoded body from the parsed payload — Callio
+    // sees the same fields Twilio sent, in the same encoding.
+    const rawBody: Buffer =
+      req.rawBody && req.rawBody.length > 0
+        ? req.rawBody
+        : Buffer.from(
+            new URLSearchParams(payload as Record<string, string>).toString(),
+            'utf8',
+          );
     const contentType = req.headers['content-type'] || 'application/x-www-form-urlencoded';
     const forwardEventType = this.callbackForwarder.eventTypeForKind(kind);
     if (
