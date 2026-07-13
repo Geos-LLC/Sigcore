@@ -35,6 +35,33 @@ import {
   CallbackTokenKind,
 } from './sigcore-callback-token.util';
 
+/**
+ * Task 6B.5C rawBody-fallback helper.
+ *
+ * Sigcore's `main.ts` registers `bodyParser.urlencoded` via `app.use` AFTER
+ * `NestFactory.create({ rawBody: true })`. Express body-parser reads the
+ * request stream during its middleware pass, which leaves Nest's rawBody
+ * capture with an empty buffer on form-encoded Twilio callback POSTs.
+ *
+ * The Task 6B.5C callback forwarder needs the exact bytes Twilio sent, so
+ * when `req.rawBody` is empty we reconstruct the canonical
+ * `application/x-www-form-urlencoded` body from the parsed payload — the
+ * fields survived the parse even though the byte stream did not. Mirrors
+ * the fallback the inbound-voice handler has always used.
+ *
+ * Exported for direct unit-testing without an Express request harness.
+ */
+export function deriveForwardBody(
+  rawBody: Buffer | undefined,
+  parsedPayload: Record<string, string>,
+): Buffer {
+  if (rawBody && rawBody.length > 0) return rawBody;
+  return Buffer.from(
+    new URLSearchParams(parsedPayload ?? {}).toString(),
+    'utf8',
+  );
+}
+
 @Controller('webhooks')
 @UseGuards(WebhookRateLimitGuard)
 export class WebhooksController {
@@ -709,13 +736,7 @@ export class WebhooksController {
     // empty even for a form-encoded Twilio POST. In that case reconstruct
     // the canonical form-urlencoded body from the parsed payload — Callio
     // sees the same fields Twilio sent, in the same encoding.
-    const rawBody: Buffer =
-      req.rawBody && req.rawBody.length > 0
-        ? req.rawBody
-        : Buffer.from(
-            new URLSearchParams(payload as Record<string, string>).toString(),
-            'utf8',
-          );
+    const rawBody: Buffer = deriveForwardBody(req.rawBody, payload);
     const contentType = req.headers['content-type'] || 'application/x-www-form-urlencoded';
     const forwardEventType = this.callbackForwarder.eventTypeForKind(kind);
     if (
