@@ -128,6 +128,16 @@ export class CallConnectSession {
   @Column({ type: 'jsonb', default: [] })
   timeline: Array<Record<string, unknown>>;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Owning Twilio integration for this Call Connect session (agent + lead
+   * legs share the same provider account). Nullable for legacy rows.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

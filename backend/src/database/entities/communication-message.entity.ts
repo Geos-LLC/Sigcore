@@ -84,6 +84,17 @@ export class CommunicationMessage {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown>;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Owning provider integration for this message. Stamped at send/receive
+   * time. Nullable for legacy rows; resolver falls back to
+   * `metadata.integrationId` when NULL.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

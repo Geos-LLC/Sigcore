@@ -1,10 +1,25 @@
-import { Injectable, Logger, ForbiddenException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ForbiddenException,
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Optional,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { CommunicationIntegration } from '../../database/entities/communication-integration.entity';
+import {
+  CommunicationIntegration,
+  ProviderType,
+} from '../../database/entities/communication-integration.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
 import { CommunicationCall } from '../../database/entities/communication-call.entity';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import {
+  PROVIDER_CONTEXT_EVENT_EMITTER,
+  ProviderContextEventEmitter,
+} from '../../modules/integrations/provider-context-events';
 
 /**
  * Wave-2 Task 3 — 4-way validator described in the Wave-2 Migration Runbook.
@@ -69,6 +84,9 @@ export class IntegrationResourceGuardService {
     private readonly callRepo: Repository<CommunicationCall>,
     @InjectRepository(TenantPhoneNumber)
     private readonly tpnRepo: Repository<TenantPhoneNumber>,
+    @Optional()
+    @Inject(PROVIDER_CONTEXT_EVENT_EMITTER)
+    private readonly events?: ProviderContextEventEmitter,
   ) {}
 
   async assert(input: IntegrationResourceGuardInput): Promise<IntegrationResourceGuardResult> {
@@ -149,22 +167,28 @@ export class IntegrationResourceGuardService {
         integrationId,
       });
     }
+    // Incident 2026-07-14 Phase 2 — prefer the new `owner_tenant_id` column
+    // over legacy `metadata.ensure.tenantId`. Grandfather case: neither
+    // present → warn + allow (Wave-2 legacy row still in use).
     const meta = (integration!.metadata as Record<string, unknown>) || {};
     const ensureMeta = (meta.ensure as Record<string, unknown>) || {};
-    const integrationTenantId = ensureMeta.tenantId as string | undefined;
+    const legacyTenantId = ensureMeta.tenantId as string | undefined;
+    const columnOwnerTenantId = integration!.ownerTenantId ?? undefined;
+    const integrationTenantId = columnOwnerTenantId ?? legacyTenantId;
     if (integrationTenantId && integrationTenantId !== effectiveTenantId) {
       this.deny(3, 'integration tenant mismatch', {
         workspaceId,
         tenantId: effectiveTenantId,
         integrationId,
         integrationTenantId,
+        source: columnOwnerTenantId ? 'owner_tenant_id' : 'metadata.ensure.tenantId',
       });
     }
     if (!integrationTenantId) {
       // Wave-2 transitional state — pre-ensure rows carry no tenant tag.
       // Allow but log so we can spot pre-Wave-2 registrations still in use.
       this.logger.warn(
-        `[IntegrationResourceGuard] integration=${integrationId} has no metadata.ensure.tenantId; permitting under Wave-2 transition (workspaceId=${workspaceId} tenantId=${effectiveTenantId})`,
+        `[IntegrationResourceGuard] integration=${integrationId} has no owner_tenant_id column nor metadata.ensure.tenantId; permitting under Wave-2 transition (workspaceId=${workspaceId} tenantId=${effectiveTenantId})`,
       );
     }
 
@@ -237,5 +261,56 @@ export class IntegrationResourceGuardService {
     throw new ForbiddenException(
       `IntegrationResourceGuard: check=${check} failed`,
     );
+  }
+
+  /**
+   * Incident 2026-07-14 Phase 2 — ambiguity check for provider integrations.
+   *
+   * Callers that supply neither `integrationId` nor `tpnId` (i.e. they lack
+   * a stronger hint than "workspace + provider") must not silently target
+   * a specific integration when the workspace has more than one row for
+   * that provider. This method fires a ConflictException in that case,
+   * emitting a `provider_context_ambiguous` event so ops can spot the
+   * regression before it becomes a data corruption bug.
+   *
+   * Callers pass through:
+   *   - workspaceId (required)
+   *   - provider    (required — must match ProviderType)
+   *   - hintIntegrationId, hintTpnId (optional — if either is supplied,
+   *     the check short-circuits allowed)
+   *
+   * Returns silently when unambiguous OR when the caller supplied a hint.
+   */
+  async assertNoAmbiguity(input: {
+    workspaceId: string;
+    provider: ProviderType | string;
+    hintIntegrationId?: string | null;
+    hintTpnId?: string | null;
+  }): Promise<void> {
+    if (input.hintIntegrationId || input.hintTpnId) {
+      return; // caller supplied a hint — ambiguity irrelevant
+    }
+    if (!input.workspaceId || !input.provider) {
+      throw new BadRequestException(
+        'IntegrationResourceGuardService.assertNoAmbiguity: workspaceId + provider required',
+      );
+    }
+    const candidates = await this.integrationRepo.find({
+      where: {
+        workspaceId: input.workspaceId,
+        provider: input.provider as ProviderType,
+      },
+      select: ['id'],
+    });
+    if (candidates.length > 1) {
+      this.events?.emit({
+        event: 'provider_context_ambiguous',
+        workspaceId: input.workspaceId,
+        provider: String(input.provider),
+        candidateCount: candidates.length,
+        reason: 'guard_ambiguity_no_hint_supplied',
+      });
+      throw new ConflictException('ambiguous_provider_integration');
+    }
   }
 }

@@ -12,6 +12,8 @@ import { ContactIdentity } from '../../database/entities/contact-identity.entity
 import { OpenPhoneContactSnapshot } from '../../database/entities/openphone-contact-snapshot.entity';
 import { CommunicationParticipant } from '../../database/entities/communication-participant.entity';
 import { CommunicationConversation } from '../../database/entities/communication-conversation.entity';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { CommunicationCall } from '../../database/entities/communication-call.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
@@ -21,6 +23,11 @@ import { WhatsAppController } from './whatsapp.controller';
 import { SfWhatsAppController } from './sf-whatsapp.controller';
 import { SfAuthGuard } from '../auth/sf-auth.guard';
 import { CommunicationModule } from '../communication/communication.module';
+import { ProviderContextResolver } from './provider-context-resolver.service';
+import {
+  LoggingProviderContextEventEmitter,
+  PROVIDER_CONTEXT_EVENT_EMITTER,
+} from './provider-context-events';
 
 @Module({
   imports: [
@@ -33,11 +40,37 @@ import { CommunicationModule } from '../communication/communication.module';
       OpenPhoneContactSnapshot,
       CommunicationParticipant,
       CommunicationConversation,
+      // Incident 2026-07-14 Phase 2 — ProviderContextResolver deps.
+      TenantPhoneNumber,
+      CommunicationCall,
     ]),
     forwardRef(() => CommunicationModule),
   ],
   controllers: [IntegrationsController, IntegrationsV1Controller, WhatsAppController, SfWhatsAppController],
-  providers: [IntegrationsService, OpenPhoneContactCacheService, EncryptionService, OpenPhoneProvider, TwilioProvider, TwilioVoiceService, WhatsAppWebProvider, SfAuthGuard, TwilioSubaccountProvisionerService],
-  exports: [IntegrationsService, OpenPhoneContactCacheService, WhatsAppWebProvider, TwilioSubaccountProvisionerService],
+  providers: [
+    IntegrationsService,
+    OpenPhoneContactCacheService,
+    EncryptionService,
+    OpenPhoneProvider,
+    TwilioProvider,
+    TwilioVoiceService,
+    WhatsAppWebProvider,
+    SfAuthGuard,
+    TwilioSubaccountProvisionerService,
+    // Incident 2026-07-14 Phase 2 — ProviderContextResolver + event emitter.
+    ProviderContextResolver,
+    {
+      provide: PROVIDER_CONTEXT_EVENT_EMITTER,
+      useClass: LoggingProviderContextEventEmitter,
+    },
+  ],
+  exports: [
+    IntegrationsService,
+    OpenPhoneContactCacheService,
+    WhatsAppWebProvider,
+    TwilioSubaccountProvisionerService,
+    ProviderContextResolver,
+    PROVIDER_CONTEXT_EVENT_EMITTER,
+  ],
 })
 export class IntegrationsModule {}

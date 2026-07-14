@@ -135,6 +135,30 @@ export class CommunicationIntegration {
   })
   operationalLastVerifiedAt?: Date | null;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Owning tenant for TENANT-scoped rows; NULL for WORKSPACE / SYSTEM. FK
+   * RESTRICT (see migration `AddOwnerScopeToCommunicationIntegrations1774000000000`).
+   */
+  @Column({ name: 'owner_tenant_id', type: 'uuid', nullable: true })
+  @Index()
+  ownerTenantId?: string | null;
+
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Application-enforced enum ('WORKSPACE' | 'TENANT' | 'SYSTEM') plus a
+   * DB CHECK constraint. Defaults to 'WORKSPACE' for legacy rows.
+   */
+  @Column({
+    name: 'scope_type',
+    type: 'varchar',
+    length: 20,
+    default: 'WORKSPACE',
+  })
+  scopeType: 'WORKSPACE' | 'TENANT' | 'SYSTEM';
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
