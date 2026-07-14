@@ -3,11 +3,13 @@ import {
   Logger,
   NotFoundException,
   UnprocessableEntityException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as twilio from 'twilio';
+import { ProviderContextResolver } from '../integrations/provider-context-resolver.service';
 import {
   CallConnectSettings,
   CallConnectMode,
@@ -96,6 +98,16 @@ export class CallConnectService {
     private encryptionService: EncryptionService,
     private outboundWebhooks: OutboundWebhooksService,
     private config: ConfigService,
+    /**
+     * Incident 2026-07-14 Phase 3a — resolves the owning Twilio integration
+     * for Call Connect Twilio client selection. Optional so existing spec
+     * builders (which construct the service manually) keep compiling; when
+     * unwired the code falls back to the pre-Phase-3a lookup so behavior is
+     * unchanged. Wave-2 telemetry (`resolveTwilioSelection`) is preserved
+     * on top of this — resolver picks the row, telemetry helpers report it.
+     */
+    @Optional()
+    private providerContextResolver?: ProviderContextResolver,
   ) {}
 
   // ──────────────────────────────────────────────────────────────
@@ -260,6 +272,33 @@ export class CallConnectService {
     const mode =
       (dto.requestedMode as CallConnectMode) || settings.mode;
 
+    // Incident 2026-07-14 Phase 3a — stamp owning integration at session
+    // creation time so downstream call rows + status forwards can be joined
+    // without a phone→TPN lookup on every event. Best-effort — a resolver
+    // NotFound falls back to null (session still starts; the Twilio client
+    // selection later will surface any real config gap). Fail closed on
+    // 403 cross-tenant / 409 ambiguous / 409 provider mismatch — those are
+    // security-critical and safer than starting an unroutable session.
+    let resolvedIntegrationIdForSession: string | null = null;
+    if (this.providerContextResolver) {
+      try {
+        const ctx = await this.providerContextResolver.resolve({
+          workspaceId,
+          tenantId: tenantId || undefined,
+          provider: ProviderType.TWILIO,
+          fromNumber,
+        });
+        resolvedIntegrationIdForSession = ctx.integration.id;
+      } catch (err) {
+        if (!(err instanceof NotFoundException)) {
+          throw err;
+        }
+        this.logger.warn(
+          `[startSession] provider_context_not_found workspace=${workspaceId} tenant=${tenantId ?? 'null'} from=${fromNumber} — creating session without integrationId stamp`,
+        );
+      }
+    }
+
     // 5. Create session row
     const session = this.sessionRepo.create({
       businessId: workspaceId,
@@ -278,6 +317,7 @@ export class CallConnectService {
       provider: CallConnectProvider.TWILIO,
       fromNumberE164: fromNumber,
       sigcoreConversationId: dto.sigcoreConversationId || undefined,
+      communicationIntegrationId: resolvedIntegrationIdForSession,
       timeline: [],
     });
 
@@ -321,7 +361,7 @@ export class CallConnectService {
     }
 
     try {
-      const client = await this.getTwilioClient(workspaceId, session.tenantId);
+      const client = await this.getTwilioClient(workspaceId, session.tenantId, session.fromNumberE164);
       if (session.agentCallSid) {
         await client.calls(session.agentCallSid).update({ status: 'canceled' }).catch(() => {});
       }
@@ -490,7 +530,7 @@ export class CallConnectService {
         // conference, then bridge the lead's voicemail leg into the same conference.
         const baseUrl = this.getBaseUrl();
         if (session.agentCallSid) {
-          this.getTwilioClient(session.businessId, session.tenantId)
+          this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164)
             .then((client) =>
               client.calls(session.agentCallSid!).update({
                 url: `${baseUrl}/api/webhooks/twilio/voice/agent/voicemail-hold?sessionId=${sessionId}`,
@@ -536,7 +576,7 @@ export class CallConnectService {
           const agentNotify = new twilio.twiml.VoiceResponse();
           agentNotify.say('We are sending a voicemail to the customer. Goodbye.');
           agentNotify.hangup();
-          this.getTwilioClient(session.businessId, session.tenantId)
+          this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164)
             .then((client) =>
               client.calls(session.agentCallSid!).update({
                 twiml: agentNotify.toString(),
@@ -837,7 +877,7 @@ export class CallConnectService {
     if (!session || TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
 
     const baseUrl = this.getBaseUrl();
-    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+    const client = await this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164);
     const response = new twilio.twiml.VoiceResponse();
 
     if (digits === '1') {
@@ -1067,7 +1107,7 @@ export class CallConnectService {
       // to avoid double-failing if machine_end fires later for the same call)
       if (answeredBy === 'machine_start') {
         try {
-          const client = await this.getTwilioClient(session.businessId, session.tenantId);
+          const client = await this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164);
           await client.calls(callSid).update({ status: 'completed' }).catch(() => {});
         } catch {}
         await this.failSession(session, `Lead voicemail detected but drop disabled (${answeredBy})`);
@@ -1076,7 +1116,7 @@ export class CallConnectService {
     }
 
     const baseUrl = this.getBaseUrl();
-    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+    const client = await this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164);
 
     if (answeredBy === 'machine_start') {
       // Early AMD detection — greeting is still playing.
@@ -1413,6 +1453,7 @@ export class CallConnectService {
     const selection = await this.resolveTwilioSelection(
       session.businessId,
       session.tenantId,
+      session.fromNumberE164,
     );
     selection.selectedPhoneIntegrationId = await this.lookupPhoneIntegrationId(
       session.businessId,
@@ -1523,7 +1564,7 @@ export class CallConnectService {
   private async hangUpLeadCall(session: CallConnectSession): Promise<void> {
     if (!session.leadCallSid) return;
     try {
-      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      const client = await this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164);
       await client.calls(session.leadCallSid).update({ status: 'completed' }).catch(() => {});
       this.logger.log(`Hung up lead call ${session.leadCallSid} for session ${session.id}`);
     } catch (err: any) {
@@ -1647,7 +1688,7 @@ export class CallConnectService {
     // Hang up any active Twilio calls so neither party is left on a dead line
     if (session.agentCallSid || session.leadCallSid) {
       try {
-        const client = await this.getTwilioClient(session.businessId, session.tenantId);
+        const client = await this.getTwilioClient(session.businessId, session.tenantId, session.fromNumberE164);
         if (session.agentCallSid) {
           await client.calls(session.agentCallSid).update({ status: 'completed' }).catch(() => {});
         }
@@ -1720,8 +1761,16 @@ export class CallConnectService {
   private async getTwilioClient(
     workspaceId: string,
     tenantId?: string,
+    /**
+     * Incident 2026-07-14 Phase 3a — E.164 caller-ID / bot number. When
+     * supplied, `ProviderContextResolver` keys off the TPN via rule 1
+     * (`by_number`) — the canonical resolution path. Left optional so the
+     * one existing tenant-scoped path above and pre-Phase-3a callers that
+     * pass workspaceId only keep working.
+     */
+    fromNumber?: string,
   ): Promise<twilio.Twilio> {
-    const sel = await this.resolveTwilioSelection(workspaceId, tenantId);
+    const sel = await this.resolveTwilioSelection(workspaceId, tenantId, fromNumber);
     return sel.client;
   }
 
@@ -1738,8 +1787,11 @@ export class CallConnectService {
   private async resolveTwilioSelection(
     workspaceId: string,
     tenantId?: string,
+    fromNumber?: string,
   ): Promise<TwilioLegSelection> {
-    // 1. Try tenant-level integration first (tenant-provisioned Twilio account)
+    // 1. Try tenant-level integration first (tenant-provisioned Twilio account).
+    // Kept as-is: tenant_integrations is the per-tenant provisioning table and
+    // this table is intentionally NOT what the resolver consults.
     if (tenantId) {
       const tenantIntegration = await this.tenantIntegrationRepo.findOne({
         where: { workspaceId, tenantId, provider: ProviderType.TWILIO },
@@ -1763,10 +1815,35 @@ export class CallConnectService {
       }
     }
 
-    // 2. Fall back to workspace-level integration
-    const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.TWILIO },
-    });
+    // 2. Workspace-level lookup — use the deterministic resolver when it's
+    // wired. Passes the session's fromNumber so rule 1 (by_number) can pick
+    // the correct integration in workspaces that host more than one Twilio
+    // account. Falls back to the pre-Phase-3a workspace lookup when the
+    // resolver isn't wired (test builders) or when the resolver reports
+    // NotFound — preserving the existing thrown-Error surface on genuine
+    // config gaps. Security-critical resolver errors (403 cross-tenant /
+    // 409 ambiguous / 409 provider mismatch) MUST propagate.
+    let integration: CommunicationIntegration | null = null;
+    if (this.providerContextResolver) {
+      try {
+        const ctx = await this.providerContextResolver.resolve({
+          workspaceId,
+          tenantId: tenantId || undefined,
+          provider: ProviderType.TWILIO,
+          fromNumber: fromNumber || undefined,
+        });
+        integration = ctx.integration;
+      } catch (err) {
+        if (!(err instanceof NotFoundException)) {
+          throw err;
+        }
+      }
+    }
+    if (!integration) {
+      integration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.TWILIO },
+      });
+    }
 
     if (!integration?.credentialsEncrypted) {
       throw new Error(
@@ -1833,6 +1910,7 @@ export class CallConnectService {
     const sel = await this.resolveTwilioSelection(
       session.businessId,
       session.tenantId,
+      session.fromNumberE164,
     );
     sel.selectedPhoneIntegrationId = await this.lookupPhoneIntegrationId(
       session.businessId,

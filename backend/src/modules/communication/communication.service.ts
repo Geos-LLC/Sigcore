@@ -31,6 +31,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { CommunicationProvider } from './interfaces/communication-provider.interface';
 import { ResolveProfileForOutboundService } from '../routing/resolve-profile-for-outbound.service';
 import { RoutingError, RoutingErrorCode } from '../routing/routing-errors';
+import { ProviderContextResolver } from '../integrations/provider-context-resolver.service';
 
 export interface SyncProgress {
   status: 'idle' | 'running' | 'completed' | 'error' | 'cancelled';
@@ -144,6 +145,14 @@ export class CommunicationService {
     @Inject(forwardRef(() => OpenPhoneContactCacheService))
     private openPhoneContactCache: OpenPhoneContactCacheService,
     private resolveOutbound?: ResolveProfileForOutboundService,
+    /**
+     * Incident 2026-07-14 Phase 3a — resolves the owning Twilio integration
+     * deterministically instead of the legacy
+     * `findOne({workspaceId, provider: TWILIO, status: ACTIVE})` that the
+     * incident exploited. Optional so pre-existing spec builders that construct
+     * the service manually continue to compile; new call sites supply it.
+     */
+    private providerContextResolver?: ProviderContextResolver,
   ) {}
 
   /**
@@ -930,9 +939,45 @@ export class CommunicationService {
         );
       }
 
-      const twilioIntegration = await this.integrationRepo.findOne({
-        where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
-      });
+      // Incident 2026-07-14 Phase 3a — Twilio outbound branch. Use the
+      // ProviderContextResolver so the integration is deterministically
+      // chosen from (workspaceId, provider, fromNumber, tenantPhoneNumberId
+      // when available, tenantId) rather than the legacy single-row lookup
+      // the incident exploited. Falls back to the legacy findOne when the
+      // resolver isn't wired (pre-existing spec builders) — same runtime
+      // behavior in that case as pre-Phase-3a.
+      let twilioIntegration: CommunicationIntegration | null = null;
+      let resolvedIntegrationId: string | null = null;
+      if (this.providerContextResolver) {
+        try {
+          const ctx = await this.providerContextResolver.resolve({
+            workspaceId,
+            tenantId: tenantId || undefined,
+            provider: ProviderType.TWILIO,
+            fromNumber: normalizedFrom,
+            // Pass tenantPhoneNumberId when we resolved a TPN row above so
+            // rule 1 (by_number) can key off the FK directly.
+            tenantPhoneNumberId: tenantPhone?.id ?? undefined,
+          });
+          twilioIntegration = ctx.integration;
+          resolvedIntegrationId = ctx.integration.id;
+        } catch (err) {
+          // Only swallow the "no integration exists" NotFound to preserve
+          // the pre-Phase-3a BadRequest surface. All other resolver errors
+          // (403 cross-tenant, 409 ambiguous / provider mismatch) propagate
+          // — those are the security-critical rejections.
+          if (err instanceof NotFoundException) {
+            twilioIntegration = null;
+          } else {
+            throw err;
+          }
+        }
+      }
+      if (!twilioIntegration) {
+        twilioIntegration = await this.integrationRepo.findOne({
+          where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+        });
+      }
       if (!twilioIntegration) {
         throw new BadRequestException(
           'No active Twilio integration found. Please ensure Twilio is configured.',
@@ -975,6 +1020,10 @@ export class CommunicationService {
         fromNumber: normalizedFrom, toNumber: normalizedTo,
         providerMessageId: result.providerMessageId, status: result.status, channel: channel as any,
         metadata: enrichedMeta3,
+        // Incident 2026-07-14 Phase 3a — stamp the owning integration at
+        // insert time so downstream rows are queryable without a phone→TPN
+        // join. Nullable when resolver was not wired (spec builders).
+        communicationIntegrationId: resolvedIntegrationId ?? twilioIntegration.id,
       });
       return this.messageRepo.save(message);
     }

@@ -21,6 +21,7 @@ function makeReq(overrides: Partial<{
   serviceKey: string | undefined;
   integrationId: string | undefined;
   tenantId: string | undefined;
+  workspaceId: string | undefined;
   range: string | undefined;
 }> = {}) {
   const headers: Record<string, string> = {};
@@ -28,6 +29,7 @@ function makeReq(overrides: Partial<{
   if (svc) headers['x-sigcore-key'] = svc;
   if (overrides.integrationId) headers['x-sigcore-integration-id'] = overrides.integrationId;
   if (overrides.tenantId) headers['x-sigcore-tenant-id'] = overrides.tenantId;
+  if (overrides.workspaceId) headers['x-sigcore-workspace-id'] = overrides.workspaceId;
   if (overrides.range) headers['range'] = overrides.range;
   return { headers } as any;
 }
@@ -68,6 +70,15 @@ function makeCtrl(state: {
   integrations: any[];
   tenants: any[];
   serviceKey?: string | undefined;
+  /**
+   * Incident 2026-07-14 Phase 3a — resolver stub. Signature mirrors the
+   * production `ProviderContextResolver.resolve` for the two axes this
+   * controller exercises: (a) hint-mismatch throws ForbiddenException,
+   * (b) success returns a ProviderContext with the resolved integration.
+   * Omit `resolveImpl` to bind the resolver to `undefined` — proves that
+   * pre-Phase-3a code paths still work when the resolver isn't wired.
+   */
+  resolveImpl?: (input: any) => Promise<any>;
 }) {
   const integrationRepo = {
     findOne: jest.fn(({ where: { id } }: any) =>
@@ -87,11 +98,15 @@ function makeCtrl(state: {
   const configService = {
     get: (k: string) => (k === 'SIGCORE_SERVICE_KEY' ? state.serviceKey ?? SERVICE_KEY : undefined),
   };
+  const providerContextResolver = state.resolveImpl
+    ? ({ resolve: jest.fn(state.resolveImpl) } as any)
+    : undefined;
   return new InternalTwilioProxyController(
     integrationRepo as any,
     tenantRepo as any,
     encryptionService as any,
     configService as any,
+    providerContextResolver,
   );
 }
 
@@ -293,6 +308,116 @@ describe('InternalTwilioProxyController', () => {
           makeRes(),
         ),
       ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // -------------------------------------------------------------------
+    // Incident 2026-07-14 Phase 3a — cross-workspace integrationId hint.
+    // -------------------------------------------------------------------
+
+    it('cross_workspace_integrationId_hint_is_rejected — inline check without resolver', async () => {
+      // Integration + tenant belong to ws_1; caller claims they belong to ws_2.
+      // Before Phase 3a, the controller had no visibility of the caller's
+      // workspace, so a caller with the shared service key could point at any
+      // (integrationId, tenantId) pair in any workspace and receive that
+      // subaccount's Twilio credentials. This test asserts the new inline
+      // check throws 403 the moment `x-sigcore-workspace-id` differs from
+      // the resolved integration's workspaceId — no resolver needed.
+      const ctrl = makeCtrl({
+        integrations: [validIntegration],
+        tenants: [validTenant],
+      });
+      await expect(
+        ctrl.streamRecording(
+          REAL_URL,
+          makeReq({
+            integrationId: 'int_1',
+            tenantId: 'tn_1',
+            workspaceId: 'ws_attacker',
+          }),
+          makeRes(),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('cross_workspace_integrationId_hint_is_rejected — resolver hint mismatch propagates', async () => {
+      // When the resolver IS wired, its hint-mismatch check runs after the
+      // inline check. Simulate the case where inline check passes (caller
+      // WS matches integration WS) but the resolver — e.g. because a newer
+      // Phase mints the integration into a different scope table — throws.
+      const ctrl = makeCtrl({
+        integrations: [validIntegration],
+        tenants: [validTenant],
+        resolveImpl: async () => {
+          throw new ForbiddenException(
+            'ProviderContextResolver: caller-supplied integrationId does not match resolved integration',
+          );
+        },
+      });
+      await expect(
+        ctrl.streamRecording(
+          REAL_URL,
+          makeReq({
+            integrationId: 'int_1',
+            tenantId: 'tn_1',
+            workspaceId: 'ws_1',
+          }),
+          makeRes(),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('same_workspace_integrationId_hint_succeeds — with resolver wired', async () => {
+      // Baseline pass: caller supplies matching workspaceId AND the resolver
+      // approves. Stream must complete and Twilio auth headers must be the
+      // integration's real creds.
+      const ctrl = makeCtrl({
+        integrations: [validIntegration],
+        tenants: [validTenant],
+        resolveImpl: async () => ({
+          integration: validIntegration,
+          rule: 'by_legacy_workspace_fallback',
+          workspaceId: 'ws_1',
+          tenantId: 'tn_1',
+          provider: 'twilio',
+          legacyFallback: true,
+        }),
+      });
+      mockedAxios.get.mockResolvedValue(upstreamStream(200));
+      const res = makeRes();
+      await ctrl.streamRecording(
+        REAL_URL,
+        makeReq({
+          integrationId: 'int_1',
+          tenantId: 'tn_1',
+          workspaceId: 'ws_1',
+        }),
+        res,
+      );
+      expect(res.__inspect().statusCode).toBe(200);
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        REAL_URL,
+        expect.objectContaining({
+          auth: { username: REAL_ACCOUNT_SID, password: 'auth-token-secret' },
+        }),
+      );
+    });
+
+    it('same_workspace_integrationId_hint_succeeds — resolver optional (back-compat)', async () => {
+      // Pre-Phase-3a callers (Callio today) don't send x-sigcore-workspace-id;
+      // the controller must still work exactly as before — the inline check
+      // is skipped, the pre-3a scoped guards fire, and the stream returns.
+      const ctrl = makeCtrl({
+        integrations: [validIntegration],
+        tenants: [validTenant],
+      });
+      mockedAxios.get.mockResolvedValue(upstreamStream(200));
+      const res = makeRes();
+      await ctrl.streamRecording(
+        REAL_URL,
+        makeReq({ integrationId: 'int_1', tenantId: 'tn_1' }),
+        res,
+      );
+      expect(res.__inspect().statusCode).toBe(200);
     });
   });
 
