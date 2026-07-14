@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional, IsString, IsObject, IsNotEmpty } from 'class-validator';
+import { IsEnum, IsOptional, IsString, IsObject, IsNotEmpty, IsBoolean } from 'class-validator';
 import { ProviderType } from '../../../database/entities/communication-integration.entity';
 
 /**
@@ -52,6 +52,24 @@ export class EnsureIntegrationDto {
   @IsString()
   @IsOptional()
   providerAccountId?: string;
+
+  /**
+   * Ownership-claim opt-in for legacy rows (Incident 2026-07-14).
+   *
+   * Legacy rows are integration rows created before Wave-2 Task 1 that
+   * lack `metadata.ensure.tenantId` — Sigcore has no record of which
+   * tenant originally provisioned them. To prevent a boot-time probe
+   * from silently claiming a load-bearing legacy row for a new tenant,
+   * rotations against legacy rows are rejected with 409 unless the
+   * caller explicitly sets `allowLegacyClaim=true`.
+   *
+   * This flag has NO effect on non-legacy rows (where
+   * `metadata.ensure.tenantId` is present) — cross-tenant rotation of
+   * those is always rejected regardless of this flag.
+   */
+  @IsBoolean()
+  @IsOptional()
+  allowLegacyClaim?: boolean;
 }
 
 export interface EnsureIntegrationResult {

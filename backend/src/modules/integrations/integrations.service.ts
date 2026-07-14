@@ -1,4 +1,11 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -341,6 +348,82 @@ export class IntegrationsService {
       });
 
       if (existing) {
+        // ------------------------------------------------------------------
+        // Ownership guard — Incident 2026-07-14.
+        //
+        // A workspace-level integration row may already be owned by a
+        // different tenant. Silently rotating its credentials (as we did
+        // pre-guard) caused a cross-tenant credential clobber that broke
+        // every LB tenant's outbound Twilio for ~7 minutes.
+        //
+        // Semantics:
+        //   1. Non-legacy row (metadata.ensure.tenantId present):
+        //        - same tenant  → fall through, rotate as normal
+        //        - other tenant + creds  → 409 IntegrationOwnershipConflict
+        //        - other tenant + probe  → 403 IntegrationAccessDenied
+        //          (body must NOT leak integrationId)
+        //   2. Legacy row (no metadata.ensure.tenantId):
+        //        - probe               → allow (unchanged)
+        //        - rotation w/o flag   → 409 IntegrationOwnershipConflict
+        //          reason=legacy_row_frozen_without_allowLegacyClaim
+        //        - rotation with flag  → allow; stamp tenantId +
+        //          claimedFromLegacyAt in metadata.ensure
+        //
+        // NEVER log credentials, auth tokens, or the accountSid values.
+        // ------------------------------------------------------------------
+        const existingMeta = (existing.metadata as Record<string, unknown>) || {};
+        const existingEnsureMeta =
+          (existingMeta.ensure as Record<string, unknown>) || {};
+        const existingTenantId =
+          typeof existingEnsureMeta.tenantId === 'string'
+            ? (existingEnsureMeta.tenantId as string)
+            : null;
+        const hasCredentials =
+          !!dto.credentials && Object.keys(dto.credentials).length > 0;
+
+        if (existingTenantId !== null) {
+          // Non-legacy row: enforce tenant match strictly.
+          if (existingTenantId !== dto.tenantId) {
+            if (hasCredentials) {
+              this.logger.warn(
+                `[IntegrationGuard] cross_tenant_rotation_rejected workspaceId=${workspaceId} existingTenantId=${existingTenantId} requestedTenantId=${dto.tenantId} integrationId=${existing.id} provider=${dto.provider}`,
+              );
+              throw new ConflictException({
+                error: 'IntegrationOwnershipConflict',
+                existingTenantId,
+                requestedTenantId: dto.tenantId,
+                integrationId: existing.id,
+                workspaceId,
+                provider: dto.provider,
+              });
+            }
+            this.logger.warn(
+              `[IntegrationGuard] cross_tenant_probe_denied workspaceId=${workspaceId} existingTenantId=${existingTenantId} requestedTenantId=${dto.tenantId} integrationId=${existing.id} provider=${dto.provider}`,
+            );
+            throw new ForbiddenException({
+              error: 'IntegrationAccessDenied',
+              existingTenantId,
+              requestedTenantId: dto.tenantId,
+              workspaceId,
+              provider: dto.provider,
+            });
+          }
+        } else if (hasCredentials && !dto.allowLegacyClaim) {
+          // Legacy row + rotation attempt without opt-in → freeze.
+          this.logger.warn(
+            `[IntegrationGuard] cross_tenant_rotation_rejected workspaceId=${workspaceId} existingTenantId=null requestedTenantId=${dto.tenantId} integrationId=${existing.id} provider=${dto.provider}`,
+          );
+          throw new ConflictException({
+            error: 'IntegrationOwnershipConflict',
+            reason: 'legacy_row_frozen_without_allowLegacyClaim',
+            existingTenantId: null,
+            requestedTenantId: dto.tenantId,
+            integrationId: existing.id,
+            workspaceId,
+            provider: dto.provider,
+          });
+        }
+
         // Rotate iff credentials supplied.
         if (dto.credentials && Object.keys(dto.credentials).length > 0) {
           let existingCreds: Record<string, unknown> = {};
@@ -360,11 +443,16 @@ export class IntegrationsService {
           }
           const metadata = (existing.metadata as Record<string, unknown>) || {};
           const ensureMeta = (metadata.ensure as Record<string, unknown>) || {};
+          const legacyClaimStamp =
+            existingTenantId === null && dto.allowLegacyClaim
+              ? { claimedFromLegacyAt: new Date().toISOString() }
+              : {};
           metadata.ensure = {
             ...ensureMeta,
             tenantId: dto.tenantId,
             lastRotatedAt: new Date().toISOString(),
             friendlyName: dto.friendlyName ?? ensureMeta.friendlyName,
+            ...legacyClaimStamp,
           };
           existing.metadata = metadata;
           await this.integrationRepo.save(existing);
