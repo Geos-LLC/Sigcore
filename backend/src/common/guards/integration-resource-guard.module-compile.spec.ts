@@ -66,6 +66,8 @@ describe('Task 3 DI graph (real bootstrap)', () => {
         ConfigService,
         // Task 6B.5C — CallsV1Controller now takes CallbackForwarderService.
         CallbackForwarderService,
+        // Phase C — CallsV1Controller.dial takes DialIdempotencyService.
+        require('../../modules/communication/dial-idempotency.service').DialIdempotencyService,
         // Infrastructure overrides only — external state Nest can't
         // reach in a test process.
         { provide: getRepositoryToken(Tenant), useValue: stubRepo },

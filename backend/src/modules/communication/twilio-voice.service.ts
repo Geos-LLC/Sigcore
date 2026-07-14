@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as twilio from 'twilio';
 import { CommunicationIntegration } from '../../database/entities/communication-integration.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
-import { RecordingStartDto, RecordingStartResult, HangupResult } from './dto/call-ops.dto';
+import { RecordingStartDto, RecordingStartResult, HangupResult, DialCallResult } from './dto/call-ops.dto';
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -51,6 +51,67 @@ export class TwilioVoiceService {
       );
       throw new BadGatewayException(
         `Twilio startRecording failed: ${err?.message ?? 'unknown error'}`,
+      );
+    }
+  }
+
+  /**
+   * Wave-2 Phase C — outbound dial.
+   *
+   * Creates an outbound Twilio call under the integration's stored
+   * credentials. Caller (v1 dial route) must have already:
+   *   1. Verified fromNumber ownership via tenant_phone_numbers lookup
+   *   2. Wrapped `statusCallbackUrl` in a Sigcore signed callback token
+   *      (so Twilio dials Sigcore first, not Callio)
+   *   3. Constructed a Sigcore-hosted `answerUrl` that returns the
+   *      appropriate TwiML when the call is answered
+   */
+  async dialOutbound(
+    integration: CommunicationIntegration,
+    input: {
+      fromNumber: string;
+      toNumber: string;
+      answerUrl: string;
+      statusCallbackUrl?: string;
+      recordingChannels?: 'mono' | 'dual';
+      timeoutSeconds?: number;
+    },
+  ): Promise<DialCallResult> {
+    const client = this.clientForIntegration(integration);
+    try {
+      const params: any = {
+        from: input.fromNumber,
+        to: input.toNumber,
+        url: input.answerUrl,
+        method: 'POST',
+        timeout: input.timeoutSeconds ?? 30,
+        record: true,
+        recordingChannels: input.recordingChannels ?? 'dual',
+      };
+      if (input.statusCallbackUrl) {
+        params.statusCallback = input.statusCallbackUrl;
+        params.statusCallbackMethod = 'POST';
+        // Ask Twilio for the full lifecycle set, not just the completed default.
+        params.statusCallbackEvent = ['initiated', 'ringing', 'answered', 'completed'];
+      }
+      const call = await client.calls.create(params);
+      this.logger.log(
+        `[dialOutbound] ok providerCallSid=${call.sid} from=${input.fromNumber} to=${input.toNumber} status=${call.status}`,
+      );
+      return {
+        providerCallSid: call.sid,
+        status: call.status ?? 'queued',
+        fromNumber: input.fromNumber,
+        toNumber: input.toNumber,
+        createdAt: call.dateCreated ? new Date(call.dateCreated).toISOString() : new Date().toISOString(),
+        integrationId: integration.id,
+      };
+    } catch (err: any) {
+      this.logger.error(
+        `[dialOutbound] Twilio error from=${input.fromNumber} to=${input.toNumber}: ${err?.message}`,
+      );
+      throw new BadGatewayException(
+        `Twilio dial failed: ${err?.message ?? 'unknown error'}`,
       );
     }
   }

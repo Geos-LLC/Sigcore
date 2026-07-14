@@ -54,7 +54,14 @@ describe('CallsV1Controller — happy paths', () => {
       startRecording: jest.fn(async () => ({ recordingSid: 'RE_x', status: 'in-progress' })),
       hangup: jest.fn(),
     };
-    const controller = new CallsV1Controller(twilioVoiceService, { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any, { get: () => undefined } as any);
+    const controller = new CallsV1Controller(
+      twilioVoiceService,
+      { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any,
+      { get: () => undefined } as any,
+      { claim: jest.fn(), remember: jest.fn(), release: jest.fn() } as any,
+      { assert: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
     };
@@ -78,7 +85,14 @@ describe('CallsV1Controller — happy paths', () => {
       startRecording: jest.fn(),
       hangup: jest.fn(async () => ({ providerCallSid: CALL_SID, status: 'completed' })),
     };
-    const controller = new CallsV1Controller(twilioVoiceService, { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any, { get: () => undefined } as any);
+    const controller = new CallsV1Controller(
+      twilioVoiceService,
+      { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any,
+      { get: () => undefined } as any,
+      { claim: jest.fn(), remember: jest.fn(), release: jest.fn() } as any,
+      { assert: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
     };
@@ -194,7 +208,14 @@ describe('TwilioVoiceService failure surface', () => {
       }),
       hangup: jest.fn(),
     };
-    const controller = new CallsV1Controller(twilioVoiceService, { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any, { get: () => undefined } as any);
+    const controller = new CallsV1Controller(
+      twilioVoiceService,
+      { isArmed: () => false, mintToken: () => null, eventTypeForKind: (k: string) => k === 'recording_status' ? 'voice_recording_status' : 'voice_call_status' } as any,
+      { get: () => undefined } as any,
+      { claim: jest.fn(), remember: jest.fn(), release: jest.fn() } as any,
+      { assert: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
     };

@@ -364,6 +364,57 @@ export class WebhooksController {
   // These must be defined BEFORE twilio/voice/:webhookId to avoid route conflicts.
 
   /**
+   * Wave-2 Phase C — outbound-dial answer TwiML.
+   *
+   * Public, stateless endpoint that Twilio hits when an outbound call
+   * placed via `POST /api/v1/calls/dial` is answered. The route derives
+   * its TwiML entirely from query params so there's no per-call server
+   * state to maintain.
+   *
+   * Modes:
+   *   ?mode=hangup            → <Response><Hangup/></Response>
+   *                             (used for connectivity canaries)
+   *   ?mode=twiml_url&url=X   → <Response><Redirect method="POST">X</Redirect></Response>
+   *                             (delegates to caller-hosted TwiML — X should
+   *                              be a URL the CALLING integration owns; this
+   *                              route does NOT verify caller ownership of X,
+   *                              so treat the URL query param as untrusted
+   *                              and don't grant it privileges based on the
+   *                              redirect landing there)
+   *
+   * Auth: none — Twilio itself is the caller. Content is fully determined
+   * by URL params, so this endpoint has no capability to leak Sigcore
+   * state.
+   *
+   * Route defined BEFORE `twilio/voice/:webhookId` to avoid wildcard match.
+   */
+  @Post('twilio/voice/outbound-answer')
+  @HttpCode(HttpStatus.OK)
+  async handleOutboundAnswerTwiml(
+    @Query('mode') mode: string | undefined,
+    @Query('url') url: string | undefined,
+    @Res() res: Response,
+  ) {
+    const safeMode = mode === 'twiml_url' ? 'twiml_url' : 'hangup';
+    let twiml: string;
+    if (safeMode === 'twiml_url' && url && /^https?:\/\//i.test(url)) {
+      // Redirect Twilio to the caller-provided URL. Escape XML metacharacters
+      // in the URL to defeat injection; the URL scheme check above rejects
+      // non-http(s) values before we quote-escape.
+      const escaped = url
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+      twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Redirect method="POST">${escaped}</Redirect></Response>`;
+    } else {
+      twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
+    }
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
    * TwiML endpoint for the agent leg of a Call Connect session.
    * Twilio calls this when the agent's phone rings.
    * Returns a whisper + Gather (AGENT_FIRST) or direct conference join (PARALLEL).

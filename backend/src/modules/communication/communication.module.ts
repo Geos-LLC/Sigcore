@@ -21,6 +21,7 @@ import { PhoneNumbersService } from './phone-numbers.service';
 import { OpenPhoneProvider } from './providers/openphone.provider';
 import { TwilioProvider } from './providers/twilio.provider';
 import { TwilioVoiceService } from './twilio-voice.service';
+import { DialIdempotencyService } from './dial-idempotency.service';
 import { WhatsAppWebProvider } from './providers/whatsapp-web.provider';
 import { ProviderRegistry } from './providers/provider-registry.service';
 import { EncryptionService } from '../../common/services/encryption.service';
@@ -92,6 +93,8 @@ import {
     EncryptionService,
     IntegrationResourceGuardService,
     IntegrationResourceGuard,
+    // Wave-2 Phase C — outbound dial idempotency store (in-process Map + TTL).
+    DialIdempotencyService,
   ],
   exports: [CommunicationService, SendersService, PhoneNumbersService, TwilioProvider, TwilioVoiceService, WhatsAppWebProvider, ProviderRegistry, IntegrationResourceGuardService],
 })

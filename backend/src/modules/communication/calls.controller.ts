@@ -4,6 +4,11 @@ import {
   Post,
   Param,
   Body,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Headers,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -15,6 +20,8 @@ import { Request, Response } from 'express';
 import { createReadStream, existsSync, statSync } from 'fs';
 import { extname } from 'path';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { CommunicationService } from './communication.service';
 import { TwilioVoiceService } from './twilio-voice.service';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
@@ -22,8 +29,13 @@ import { WorkspaceId } from '../auth/decorators/workspace-id.decorator';
 import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { UseIntegrationResourceGuard } from '../../common/guards/use-integration-resource-guard.decorator';
 import { IntegrationResourceGuardResult } from '../../common/guards/integration-resource-guard.service';
-import { RecordingStartDto, HangupDto } from './dto/call-ops.dto';
+import { IntegrationResourceGuardService } from '../../common/guards/integration-resource-guard.service';
+import { RecordingStartDto, HangupDto, DialCallDto } from './dto/call-ops.dto';
 import { CallbackForwarderService } from '../webhooks/callback-forwarder.service';
+import { DialIdempotencyService } from './dial-idempotency.service';
+import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+
+const E164_REGEX = /^\+[1-9]\d{6,14}$/;
 
 // Map file extensions to MIME types
 const AUDIO_MIME_TYPES: Record<string, string> = {
@@ -243,7 +255,166 @@ export class CallsV1Controller {
     private readonly twilioVoiceService: TwilioVoiceService,
     private readonly callbackForwarder: CallbackForwarderService,
     private readonly configService: ConfigService,
+    private readonly dialIdempotency: DialIdempotencyService,
+    private readonly integrationResourceGuard: IntegrationResourceGuardService,
+    @InjectRepository(TenantPhoneNumber)
+    private readonly tpnRepo: Repository<TenantPhoneNumber>,
   ) {}
+
+  /**
+   * Wave-2 Phase C — outbound dial.
+   *
+   * POST /api/v1/calls/dial creates a Twilio outbound call under the
+   * calling tenant's phone number. Guard: IntegrationResourceGuardService
+   * validates (workspace, tenant, integration) — 4-way check w/o the
+   * providerCallSid variant since we don't yet have a call to check. The
+   * fromNumber lookup is done inline against tenant_phone_numbers to
+   * prevent cross-workspace / cross-tenant caller-ID use.
+   *
+   * Idempotency-Key header is required. The store returns:
+   *   new       → proceed, dial, remember response
+   *   match     → return the prior response byte-for-byte
+   *   conflict  → same key + different body → 409 Conflict
+   *
+   * The statusCallbackUrl from the DTO is wrapped in a Sigcore-signed
+   * callback token so Twilio dials Sigcore first, not Callio (same
+   * pattern used by recording/start in Phase B / Task 6B.5C).
+   *
+   * The Twilio call's `url` (answer TwiML) is a Sigcore-hosted endpoint
+   * that returns TwiML based on `answerMode`:
+   *   hangup     → `<Response><Hangup/></Response>`
+   *   twiml_url  → `<Response><Redirect method="POST">{answerTwimlUrl}</Redirect></Response>`
+   */
+  @Post('dial')
+  @HttpCode(HttpStatus.OK)
+  async dial(
+    @Body() dto: DialCallDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() req: Request & { workspaceId?: string; tenantId?: string; authType?: string; authScopeType?: string },
+  ) {
+    if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128) {
+      throw new BadRequestException('Idempotency-Key header required (8-128 chars)');
+    }
+    if (!E164_REGEX.test(dto.fromNumber)) {
+      throw new BadRequestException('fromNumber must be E.164');
+    }
+    if (!E164_REGEX.test(dto.toNumber)) {
+      throw new BadRequestException('toNumber must be E.164');
+    }
+    if (dto.answerMode === 'twiml_url' && !dto.answerTwimlUrl) {
+      throw new BadRequestException('answerTwimlUrl required when answerMode=twiml_url');
+    }
+    if (dto.timeoutSeconds !== undefined) {
+      if (typeof dto.timeoutSeconds !== 'number' || dto.timeoutSeconds < 5 || dto.timeoutSeconds > 600) {
+        throw new BadRequestException('timeoutSeconds must be number between 5 and 600');
+      }
+    }
+
+    // Run the 3-of-4 guard checks (workspace, tenant, integration). Skip
+    // check-4 (resource link) since we're CREATING the call — no
+    // providerCallSid exists yet.
+    const { workspaceId, tenantId, integration } = await this.integrationResourceGuard.assert({
+      request: {
+        workspaceId: req.workspaceId,
+        tenantId: req.tenantId,
+        authType: req.authType,
+        authScopeType: req.authScopeType,
+        body: { tenantId: dto.tenantId },
+      },
+      integrationId: dto.integrationId,
+    });
+
+    // Caller-ID ownership — fromNumber must be a tenant_phone_numbers row
+    // owned by (workspaceId, tenantId) with a voice channel.
+    const tpn = await this.tpnRepo.findOne({
+      where: { workspaceId, phoneNumber: dto.fromNumber, tenantId },
+    });
+    if (!tpn) {
+      throw new ForbiddenException(
+        'fromNumber not owned by (workspace, tenant) — cross-workspace caller ID rejected',
+      );
+    }
+    if (String(tpn.channel) === 'sms') {
+      throw new BadRequestException(
+        `fromNumber ${dto.fromNumber} is channel=sms; voice/both required for outbound dial`,
+      );
+    }
+    if (String(tpn.provider) !== String(integration.provider)) {
+      throw new BadRequestException(
+        'fromNumber provider does not match integration provider',
+      );
+    }
+
+    // Idempotency claim (in-process, TTL 24h).
+    const bodyHash = DialIdempotencyService.hashBody(dto);
+    const claim = this.dialIdempotency.claim(workspaceId, idempotencyKey, bodyHash);
+    if (claim.status === 'match') {
+      return { data: claim.response };
+    }
+    if (claim.status === 'conflict') {
+      throw new ConflictException(
+        'Idempotency-Key reused with a different request body',
+      );
+    }
+
+    // Build the Sigcore-hosted answer URL. The answer route is public and
+    // stateless — it derives its TwiML from query params. Twilio hits it
+    // when the destination picks up.
+    const publicBase: string | undefined =
+      this.configService.get<string>('PUBLIC_BASE_URL') ||
+      (process.env.RAILWAY_PUBLIC_DOMAIN
+        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+        : undefined);
+    if (!publicBase) {
+      this.dialIdempotency.release(workspaceId, idempotencyKey);
+      throw new BadRequestException(
+        'Sigcore PUBLIC_BASE_URL not configured — cannot construct outbound answer URL',
+      );
+    }
+    const answerMode = dto.answerMode ?? 'hangup';
+    const answerParams = new URLSearchParams({ mode: answerMode });
+    if (answerMode === 'twiml_url' && dto.answerTwimlUrl) {
+      answerParams.set('url', dto.answerTwimlUrl);
+    }
+    const answerUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/voice/outbound-answer?${answerParams.toString()}`;
+
+    // Wrap statusCallbackUrl in a Sigcore signed token so Twilio dials
+    // Sigcore first for status events, mirroring the recording-status
+    // wrapping in Task 6B.5C.
+    let wrappedStatusUrl: string | undefined;
+    if (dto.statusCallbackUrl && this.callbackForwarder.isArmed()) {
+      const token = this.callbackForwarder.mintToken({
+        kind: 'call_status',
+        sigcoreWorkspaceId: workspaceId,
+        sigcoreTenantId: tenantId,
+        callioDestUrl: dto.statusCallbackUrl,
+      });
+      if (token) {
+        wrappedStatusUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/status/${token}`;
+      }
+    }
+
+    // Fire the actual Twilio call. Any Twilio-side failure surfaces as
+    // 502 (BadGatewayException) and releases the idempotency slot so the
+    // caller can retry with the same key.
+    let result;
+    try {
+      result = await this.twilioVoiceService.dialOutbound(integration, {
+        fromNumber: dto.fromNumber,
+        toNumber: dto.toNumber,
+        answerUrl,
+        statusCallbackUrl: wrappedStatusUrl,
+        recordingChannels: dto.recordingChannels,
+        timeoutSeconds: dto.timeoutSeconds,
+      });
+    } catch (err) {
+      this.dialIdempotency.release(workspaceId, idempotencyKey);
+      throw err;
+    }
+
+    this.dialIdempotency.remember(workspaceId, idempotencyKey, bodyHash, result);
+    return { data: result };
+  }
 
   @Post(':providerCallSid/recording/start')
   @HttpCode(HttpStatus.OK)
