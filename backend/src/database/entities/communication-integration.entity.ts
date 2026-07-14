@@ -62,7 +62,13 @@ export type OperationalReasonCode =
   (typeof OperationalReasonCode)[keyof typeof OperationalReasonCode];
 
 @Entity('communication_integrations')
-@Index(['workspaceId', 'provider'], { unique: true })
+// Incident 2026-07-14 Phase 4a — plain unique on (workspaceId, provider)
+// removed. Uniqueness is now enforced by two PARTIAL unique indexes
+// (workspace-scoped and tenant-scoped) declared in migrations only.
+// TypeORM decorators cannot express partial indexes; if this decorator is
+// re-added, TypeORM `synchronize` mode will recreate the plain unique and
+// break the ability to hold both an LB workspace-scoped row and a Callio
+// tenant-scoped row in the same workspace.
 export class CommunicationIntegration {
   @PrimaryGeneratedColumn('uuid')
   id: string;
