@@ -459,21 +459,29 @@ export class WebhooksController {
       return;
     }
     const wssBase = verified.payload.callioDestUrl;
-    // Build the Callio WSS URL. Append ?session=<token> so Callio's
-    // WSS handler can verify + burn the token before accepting the media.
+    // Twilio Media Streams drops the WSS query string on ~50% of upgrades
+    // (documented behavior, same issue that motivates <Parameter> fallback
+    // on the inbound path). We MUST convey the session token via
+    // <Parameter> inside <Stream> so Callio's MediaStreamService picks it
+    // up from the start-event's customParameters. Also include it in the
+    // URL query as a belt-and-suspenders fallback for cases where Twilio
+    // does preserve the query — Callio prefers the query when both present.
     const separator = wssBase.includes('?') ? '&' : '?';
     const wssUrl = `${wssBase}${separator}session=${encodeURIComponent(token)}`;
-    // XML-escape the URL. Query separator & is the primary metacharacter
-    // to guard against here.
-    const escaped = wssUrl
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
+    const xmlEscape = (s: string): string =>
+      s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
     const twiml =
       `<?xml version="1.0" encoding="UTF-8"?>` +
-      `<Response><Connect><Stream url="${escaped}"/></Connect></Response>`;
+      `<Response><Connect>` +
+      `<Stream url="${xmlEscape(wssUrl)}">` +
+      `<Parameter name="session" value="${xmlEscape(token)}"/>` +
+      `</Stream>` +
+      `</Connect></Response>`;
     res.status(200).set('Content-Type', 'text/xml').send(twiml);
   }
 
