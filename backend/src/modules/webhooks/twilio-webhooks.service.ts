@@ -654,6 +654,15 @@ export class TwilioWebhooksService {
       isNewConversation = true;
     }
 
+    // Resolve the workspace's Twilio integration id so downstream calls to
+    // `IntegrationResourceGuard` (Callio's Task-6B hangup / recording_start ops)
+    // hit the strict `metadata.integrationId === integrationId` link instead of
+    // the pilot AccountSid-prefix fallback. Best-effort — a missing integration
+    // row simply omits the field and preserves the pre-Phase-B fallback path.
+    const inboundIntegration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: 'twilio' as any },
+    });
+
     // Create call record
     const call = this.callRepo.create({
       conversationId: conversation.id,
@@ -668,11 +677,14 @@ export class TwilioWebhooksService {
         callerCity: payload.CallerCity,
         callerState: payload.CallerState,
         callerCountry: payload.CallerCountry,
+        ...(inboundIntegration ? { integrationId: inboundIntegration.id } : {}),
       },
     });
 
     await this.callRepo.save(call);
-    this.logger.log(`Created Twilio call record ${payload.CallSid}`);
+    this.logger.log(
+      `Created Twilio call record ${payload.CallSid} (integrationId=${inboundIntegration?.id ?? 'null'})`,
+    );
 
     // Emit call.inbound webhook so LeadBridge can match caller to lead
     if (this.outboundWebhooksService) {
