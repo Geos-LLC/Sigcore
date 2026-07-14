@@ -104,6 +104,17 @@ export class TenantPhoneNumber {
   @Column({ name: 'a2p_attached_at', nullable: true })
   a2pAttachedAt?: Date;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * FK to `communication_integrations(id)` (ON DELETE RESTRICT). Nullable
+   * so pre-Phase-2 rows are grandfathered; the ProviderContextResolver's
+   * rule 1 (`by_number`) uses this column when present.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

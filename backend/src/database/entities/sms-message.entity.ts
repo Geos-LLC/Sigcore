@@ -66,6 +66,17 @@ export class SmsMessage {
   @Column({ type: 'text', nullable: true })
   source?: string;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Owning provider integration for the outbound/inbound SMS. Stamped by
+   * send/receive paths so downstream ProviderContextResolver rule 2
+   * (`by_stamped_resource`) resolves deterministically.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

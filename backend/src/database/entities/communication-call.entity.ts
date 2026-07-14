@@ -81,6 +81,17 @@ export class CommunicationCall {
   @Column({ name: 'local_voicemail_path', nullable: true })
   localVoicemailPath: string;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * Stamped by call-persistence code paths so ProviderContextResolver's
+   * rule 2 (`by_stamped_resource`) can resolve `providerCallId` -> owning
+   * integration without falling back to `metadata.integrationId`.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

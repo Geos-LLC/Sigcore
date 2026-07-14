@@ -6,10 +6,15 @@
  * that the thrown ForbiddenException carries the correct `check=N` marker.
  */
 
-import { ForbiddenException, BadRequestException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { IntegrationResourceGuardService } from './integration-resource-guard.service';
 import { ProviderType } from '../../database/entities/communication-integration.entity';
 import { PhoneNumberProvider } from '../../database/entities/tenant-phone-number.entity';
+import { ProviderContextEvent } from '../../modules/integrations/provider-context-events';
 
 function buildMockRepo() {
   return {
@@ -25,13 +30,16 @@ function build() {
   const integrationRepo = buildMockRepo();
   const callRepo = buildMockRepo();
   const tpnRepo = buildMockRepo();
+  const emitted: ProviderContextEvent[] = [];
+  const emitter = { emit: (e: ProviderContextEvent) => emitted.push(e) };
   const svc = new IntegrationResourceGuardService(
     tenantRepo as any,
     integrationRepo as any,
     callRepo as any,
     tpnRepo as any,
+    emitter as any,
   );
-  return { svc, tenantRepo, integrationRepo, callRepo, tpnRepo };
+  return { svc, tenantRepo, integrationRepo, callRepo, tpnRepo, emitted };
 }
 
 const WS = 'ws-1';
@@ -255,5 +263,142 @@ describe('IntegrationResourceGuardService.assert (input validation)', () => {
         integrationId: INT_ID,
       }),
     ).rejects.toThrow(ForbiddenException);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Incident 2026-07-14 Phase 2 — ownership guard extensions
+// -----------------------------------------------------------------------
+describe('IntegrationResourceGuardService — Phase 2 extensions', () => {
+  it('guard_prefers_owner_tenant_id_over_metadata_ensure', async () => {
+    // Column says caller-tenant, metadata says other-tenant.
+    // The column must win — caller is allowed through.
+    const { svc, tenantRepo, integrationRepo, tpnRepo } = build();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    integrationRepo.findOne.mockResolvedValue({
+      id: INT_ID,
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      ownerTenantId: TENANT,
+      metadata: { ensure: { tenantId: OTHER_TENANT } },
+    });
+    tpnRepo.findOne.mockResolvedValue({
+      id: TPN_ID,
+      workspaceId: WS,
+      tenantId: TENANT,
+      provider: PhoneNumberProvider.TWILIO,
+    });
+
+    const result = await svc.assert({
+      request: request(),
+      integrationId: INT_ID,
+      tpnId: TPN_ID,
+    });
+    expect(result.integration.id).toBe(INT_ID);
+  });
+
+  it('guard_rejects_when_owner_tenant_id_mismatches_caller', async () => {
+    // Column says OTHER_TENANT, metadata says caller-tenant.
+    // The column must win — deny with check=3.
+    const { svc, tenantRepo, integrationRepo } = build();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    integrationRepo.findOne.mockResolvedValue({
+      id: INT_ID,
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      ownerTenantId: OTHER_TENANT,
+      metadata: { ensure: { tenantId: TENANT } },
+    });
+
+    await expect(
+      svc.assert({
+        request: request(),
+        integrationId: INT_ID,
+        providerCallSid: CALL_SID,
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('check=3 failed'),
+    });
+  });
+
+  it('grandfathers rows with neither owner_tenant_id nor metadata (warn+allow)', async () => {
+    const { svc, tenantRepo, integrationRepo, tpnRepo } = build();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    integrationRepo.findOne.mockResolvedValue({
+      id: INT_ID,
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      ownerTenantId: null,
+      metadata: {},
+    });
+    tpnRepo.findOne.mockResolvedValue({
+      id: TPN_ID,
+      workspaceId: WS,
+      tenantId: TENANT,
+      provider: PhoneNumberProvider.TWILIO,
+    });
+
+    const result = await svc.assert({
+      request: request(),
+      integrationId: INT_ID,
+      tpnId: TPN_ID,
+    });
+    expect(result.integration.id).toBe(INT_ID);
+  });
+
+  it('guard_ambiguity_check_fires_when_multiple_integrations_and_no_hint', async () => {
+    const { svc, integrationRepo, emitted } = build();
+    integrationRepo.find.mockResolvedValue([{ id: 'a' }, { id: 'b' }]);
+
+    await expect(
+      svc.assertNoAmbiguity({
+        workspaceId: WS,
+        provider: ProviderType.TWILIO,
+      }),
+    ).rejects.toThrow(ConflictException);
+
+    expect(
+      emitted.some(
+        (e) =>
+          e.event === 'provider_context_ambiguous' &&
+          e.reason === 'guard_ambiguity_no_hint_supplied',
+      ),
+    ).toBe(true);
+  });
+
+  it('guard_ambiguity_check_passes_with_single_integration', async () => {
+    const { svc, integrationRepo, emitted } = build();
+    integrationRepo.find.mockResolvedValue([{ id: 'a' }]);
+
+    await expect(
+      svc.assertNoAmbiguity({
+        workspaceId: WS,
+        provider: ProviderType.TWILIO,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(emitted.length).toBe(0);
+  });
+
+  it('guard_ambiguity_check_short_circuits_when_hint_supplied', async () => {
+    const { svc, integrationRepo } = build();
+    // Should never touch the repo — hint short-circuits.
+    await expect(
+      svc.assertNoAmbiguity({
+        workspaceId: WS,
+        provider: ProviderType.TWILIO,
+        hintIntegrationId: INT_ID,
+      }),
+    ).resolves.toBeUndefined();
+    expect(integrationRepo.find).not.toHaveBeenCalled();
+
+    await expect(
+      svc.assertNoAmbiguity({
+        workspaceId: WS,
+        provider: ProviderType.TWILIO,
+        hintTpnId: TPN_ID,
+      }),
+    ).resolves.toBeUndefined();
+    expect(integrationRepo.find).not.toHaveBeenCalled();
   });
 });

@@ -92,6 +92,16 @@ export class PhoneNumberOrder {
   @Column({ type: 'jsonb', nullable: true })
   metadata?: Record<string, unknown>;
 
+  /**
+   * Incident 2026-07-14 — per-number → integration ownership repair.
+   *
+   * The provider integration that fulfilled the number purchase / release.
+   * Nullable for legacy rows.
+   */
+  @Column({ name: 'communication_integration_id', type: 'uuid', nullable: true })
+  @Index()
+  communicationIntegrationId?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
