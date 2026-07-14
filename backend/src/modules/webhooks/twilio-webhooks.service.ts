@@ -265,11 +265,25 @@ export class TwilioWebhooksService {
 
   /**
    * Get the auth token for a workspace's Twilio integration.
+   *
+   * Incident 2026-07-14 Phase 4a — when `accountSid` is provided, use it as
+   * the primary lookup key. This avoids the ambiguity that appears once a
+   * workspace holds >1 Twilio integration row (e.g. LB workspace-scoped +
+   * Callio tenant-scoped after Phase 4). Fall back to workspace-scoped
+   * lookup for legacy callers that don't yet pass `accountSid`.
    */
-  async getAuthToken(workspaceId: string): Promise<string | null> {
-    const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.TWILIO },
-    });
+  async getAuthToken(
+    workspaceId: string,
+    accountSid?: string,
+  ): Promise<string | null> {
+    const where = accountSid
+      ? {
+          workspaceId,
+          provider: ProviderType.TWILIO,
+          externalWorkspaceId: accountSid,
+        }
+      : { workspaceId, provider: ProviderType.TWILIO };
+    const integration = await this.integrationRepo.findOne({ where });
 
     if (!integration?.credentialsEncrypted) {
       return null;

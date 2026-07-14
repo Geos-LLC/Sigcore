@@ -217,7 +217,13 @@ export class WebhooksController {
 
     // Verify Twilio signature
     if (signature) {
-      const authToken = await this.twilioWebhooksService.getAuthToken(workspace.id);
+      // Phase 4a — pass AccountSid so we deterministically pick the correct
+      // integration row when a workspace holds multiple Twilio integrations
+      // (workspace-scoped + tenant-scoped rows).
+      const authToken = await this.twilioWebhooksService.getAuthToken(
+        workspace.id,
+        payload?.AccountSid,
+      );
       if (authToken) {
         const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
         const isValid = this.twilioWebhooksService.verifyTwilioSignature(
@@ -293,7 +299,12 @@ export class WebhooksController {
     if (!signature) {
       throw new BadRequestException('Missing X-Twilio-Signature header');
     }
-    const authToken = await this.twilioWebhooksService.getAuthToken(workspace.id);
+    // Phase 4a — pass AccountSid so the correct integration row is chosen
+    // when a workspace holds multiple Twilio integrations.
+    const authToken = await this.twilioWebhooksService.getAuthToken(
+      workspace.id,
+      payload?.AccountSid,
+    );
     if (authToken) {
       const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
       const isValid = this.twilioWebhooksService.verifyTwilioSignature(
@@ -740,7 +751,12 @@ export class WebhooksController {
 
     // Verify Twilio signature
     if (signature) {
-      const authToken = await this.twilioWebhooksService.getAuthToken(workspace.id);
+      // Phase 4a — pass AccountSid so the correct integration row is chosen
+      // when a workspace holds multiple Twilio integrations.
+      const authToken = await this.twilioWebhooksService.getAuthToken(
+        workspace.id,
+        payload?.AccountSid,
+      );
       if (authToken) {
         const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
         const isValid = this.twilioWebhooksService.verifyTwilioSignature(
