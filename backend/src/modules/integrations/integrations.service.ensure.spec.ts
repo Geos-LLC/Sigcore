@@ -222,20 +222,28 @@ describe('IntegrationsService.ensureIntegration', () => {
   });
 
   it('ensure_concurrent_calls_race_produces_one_row', async () => {
-    // Simulate: race — first findOne returns null (no row yet), save throws
-    // 23505 unique-violation, second findOne returns the row inserted by the
+    // Simulate: race — first tenant-scoped findOne returns null, workspace-scoped
+    // fallback findOne returns null, save throws 23505 unique-violation, then on
+    // re-runOnce the tenant-scoped findOne returns the winner inserted by the
     // racing caller. Expected result: created:false, id of the winner.
+    //
+    // Note: Incident 2026-07-14 Phase 5a — ensureIntegration now does a
+    // tenant-preferred lookup followed by workspace-scoped fallback (2 findOne
+    // calls per run) so the mock chain reflects that.
     const { service, integrationRepo, tenantRepo } = buildService();
     tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    const winner = {
+      id: 'winner-id',
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      credentialsEncrypted: 'enc({})',
+      metadata: { ensure: { tenantId: TENANT } },
+      ownerTenantId: TENANT,
+    };
     integrationRepo.findOne
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: 'winner-id',
-        workspaceId: WS,
-        provider: ProviderType.TWILIO,
-        credentialsEncrypted: 'enc({})',
-        metadata: {},
-      });
+      .mockResolvedValueOnce(null)   // 1st: tenant-scoped lookup
+      .mockResolvedValueOnce(null)   // 2nd: workspace-scoped fallback
+      .mockResolvedValueOnce(winner); // 3rd (retry): tenant-scoped lookup finds winner
     integrationRepo.save.mockRejectedValueOnce(Object.assign(new Error('unique_violation'), { code: '23505' }));
 
     const result = await service.ensureIntegration(WS, {
@@ -246,6 +254,34 @@ describe('IntegrationsService.ensureIntegration', () => {
 
     expect(result.created).toBe(false);
     expect(result.id).toBe('winner-id');
+  });
+
+  it('ensure_prefers_tenant_scoped_row_over_workspace_scoped', async () => {
+    // Incident 2026-07-14 Phase 5a — when a workspace holds BOTH a
+    // workspace-scoped row (owner_tenant_id IS NULL) and a tenant-scoped
+    // row (owner_tenant_id = X), ensureIntegration for tenant X must return
+    // the tenant-scoped row, not the workspace-scoped one.
+    const { service, integrationRepo, tenantRepo } = buildService();
+    tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
+    const tenantScopedRow = {
+      id: 'tenant-scoped-id',
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      credentialsEncrypted: 'enc({})',
+      metadata: { ensure: { tenantId: TENANT } },
+      ownerTenantId: TENANT,
+    };
+    integrationRepo.findOne.mockResolvedValueOnce(tenantScopedRow);
+
+    const result = await service.ensureIntegration(WS, {
+      tenantId: TENANT,
+      provider: ProviderType.TWILIO,
+    });
+
+    expect(result.id).toBe('tenant-scoped-id');
+    // Ensure the tenant-scoped query was made first (with ownerTenantId=TENANT).
+    expect(integrationRepo.findOne).toHaveBeenCalledTimes(1);
+    expect(integrationRepo.findOne.mock.calls[0][0].where.ownerTenantId).toBe(TENANT);
   });
 
   it('rejects when provider missing (BadRequest)', async () => {

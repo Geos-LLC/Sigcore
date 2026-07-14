@@ -7,7 +7,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import {
@@ -343,9 +343,32 @@ export class IntegrationsService {
     await this.ensureWorkspace(workspaceId);
 
     const runOnce = async (): Promise<EnsureIntegrationResult> => {
-      const existing = await this.integrationRepo.findOne({
-        where: { workspaceId, provider: dto.provider },
+      // Incident 2026-07-14 Phase 5a — tenant-preferred lookup.
+      //
+      // A workspace may now hold TWO integrations for the same provider:
+      //   - workspace-scoped (owner_tenant_id IS NULL) — the LB shared row
+      //   - tenant-scoped (owner_tenant_id = X) — the Callio row
+      //
+      // Prefer the tenant-scoped row when it matches the caller's tenantId.
+      // Fall back to the workspace-scoped row so pre-Wave-2 callers still
+      // resolve to the legacy shared row without needing a schema-aware
+      // client change.
+      let existing = await this.integrationRepo.findOne({
+        where: {
+          workspaceId,
+          provider: dto.provider,
+          ownerTenantId: dto.tenantId,
+        },
       });
+      if (!existing) {
+        existing = await this.integrationRepo.findOne({
+          where: {
+            workspaceId,
+            provider: dto.provider,
+            ownerTenantId: IsNull(),
+          },
+        });
+      }
 
       if (existing) {
         // ------------------------------------------------------------------
