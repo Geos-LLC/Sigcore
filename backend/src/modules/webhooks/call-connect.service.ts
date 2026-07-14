@@ -23,6 +23,35 @@ import {
   ProviderType,
 } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+
+/**
+ * Diagnostic telemetry for the Twilio account-selection incident (2026-07-14).
+ * `TwilioLegSelection` carries the resolution result plus enough context to
+ * emit one `call_connect_twilio_client_selected` line per outbound leg and
+ * to attribute any `client.calls.create` failure to the exact integration
+ * that was picked. Fields intentionally exclude the auth token.
+ */
+type TwilioLegSelectionSource = 'tenant' | 'workspace';
+interface TwilioLegSelection {
+  client: twilio.Twilio;
+  integrationId: string;
+  selectionSource: TwilioLegSelectionSource;
+  providerAccountSid: string;
+  providerSubaccountSid: string | null;
+  /**
+   * The integration id that OWNS `session.fromNumberE164` per our own
+   * `tenant_phone_numbers` record. Distinct from `integrationId` above,
+   * which is the integration the Twilio client was actually built from.
+   * When these disagree, we've picked the wrong Twilio account for the
+   * From-number. Today the field is populated from
+   * `tenant_phone_numbers.metadata.integrationId` if present — that
+   * column is not yet written by any provisioning path (see the
+   * post-incident From-aware lookup design), so this field is `null`
+   * in practice. Emitting it anyway so log-based comparisons work
+   * automatically once the schema is in place.
+   */
+  selectedPhoneIntegrationId: string | null;
+}
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { EncryptionService } from '../../common/services/encryption.service';
@@ -1341,7 +1370,7 @@ export class CallConnectService {
     session: CallConnectSession,
     settings: CallConnectSettings,
   ): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+    const selection = await this.selectTwilioClientForLeg(session, 'agent');
     const baseUrl = this.getBaseUrl();
 
     this.logger.log(
@@ -1365,7 +1394,7 @@ export class CallConnectService {
       (callParams as any).recordingStatusCallback = `${baseUrl}/api/webhooks/twilio/recording-status`;
       this.logger.log(`[AGENT_FIRST] Recording agent leg for session ${session.id}`);
     }
-    const call = await client.calls.create(callParams as any);
+    const call = await this.createLegCall(selection, session, 'agent', callParams);
 
     await this.updateSession(session, {
       status: SessionStatus.CALLING_AGENT,
@@ -1379,7 +1408,18 @@ export class CallConnectService {
     session: CallConnectSession,
     settings: CallConnectSettings,
   ): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+    // Both legs use the same selected integration + share `session.fromNumberE164`.
+    // Resolve once, look up the phone-integration once, log per-leg.
+    const selection = await this.resolveTwilioSelection(
+      session.businessId,
+      session.tenantId,
+    );
+    selection.selectedPhoneIntegrationId = await this.lookupPhoneIntegrationId(
+      session.businessId,
+      session.fromNumberE164,
+    );
+    this.emitSelectionLog(selection, session, 'agent');
+    this.emitSelectionLog(selection, session, 'lead');
     const baseUrl = this.getBaseUrl();
 
     this.logger.log(
@@ -1387,7 +1427,7 @@ export class CallConnectService {
     );
 
     const [agentCall, leadCall] = await Promise.all([
-      client.calls.create({
+      this.createLegCall(selection, session, 'agent', {
         to: session.agentPhoneE164,
         from: session.fromNumberE164,
         url: `${baseUrl}/api/webhooks/twilio/voice/agent?sessionId=${session.id}`,
@@ -1396,7 +1436,7 @@ export class CallConnectService {
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: settings.ringTimeoutSeconds,
       }),
-      client.calls.create({
+      this.createLegCall(selection, session, 'lead', {
         to: session.leadPhoneE164,
         from: session.fromNumberE164,
         url: `${baseUrl}/api/webhooks/twilio/voice/lead?sessionId=${session.id}`,
@@ -1433,7 +1473,7 @@ export class CallConnectService {
   }
 
   private async initiateLeadCall(session: CallConnectSession): Promise<void> {
-    const client = await this.getTwilioClient(session.businessId, session.tenantId);
+    const selection = await this.selectTwilioClientForLeg(session, 'lead');
     const baseUrl = this.getBaseUrl();
     const settings = await this.settingsRepo.findOne({
       where: { businessId: session.businessId },
@@ -1443,7 +1483,7 @@ export class CallConnectService {
       `Initiating lead call ${session.leadPhoneE164} for session ${session.id}`,
     );
 
-    const leadCall = await client.calls.create({
+    const leadCall = await this.createLegCall(selection, session, 'lead', {
       to: session.leadPhoneE164,
       from: session.fromNumberE164,
       url: `${baseUrl}/api/webhooks/twilio/voice/lead?sessionId=${session.id}`,
@@ -1517,7 +1557,8 @@ export class CallConnectService {
     });
 
     try {
-      const client = await this.getTwilioClient(session.businessId, session.tenantId);
+      const selection = await this.selectTwilioClientForLeg(session, 'voicemail_drop');
+      const client = selection.client;
 
       if (speakMode && session.agentCallSid) {
         // SPEAK mode: redirect agent to a hold conference so they can leave a personal voicemail.
@@ -1544,7 +1585,7 @@ export class CallConnectService {
         ? `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail-agent?sessionId=${session.id}`
         : `${baseUrl}/api/webhooks/twilio/voice/lead/voicemail?sessionId=${session.id}`;
 
-      await client.calls.create({
+      await this.createLegCall(selection, session, 'voicemail_drop', {
         to: session.leadPhoneE164,
         from: session.fromNumberE164,
         url: voicemailUrl,
@@ -1680,6 +1721,24 @@ export class CallConnectService {
     workspaceId: string,
     tenantId?: string,
   ): Promise<twilio.Twilio> {
+    const sel = await this.resolveTwilioSelection(workspaceId, tenantId);
+    return sel.client;
+  }
+
+  /**
+   * Diagnostic-only resolution used at outbound-leg creation sites (2026-07-14
+   * incident). Same resolution rules as `getTwilioClient` — DB reads are
+   * identical — but returns the picked integration id, selection source
+   * (tenant vs workspace), account SID, and subaccount SID alongside the
+   * Twilio client so the caller can emit one
+   * `call_connect_twilio_client_selected` telemetry event per leg and, on
+   * `client.calls.create` failure, attribute the failure to the exact row
+   * that was picked. Never returns the auth token to the caller.
+   */
+  private async resolveTwilioSelection(
+    workspaceId: string,
+    tenantId?: string,
+  ): Promise<TwilioLegSelection> {
     // 1. Try tenant-level integration first (tenant-provisioned Twilio account)
     if (tenantId) {
       const tenantIntegration = await this.tenantIntegrationRepo.findOne({
@@ -1689,7 +1748,18 @@ export class CallConnectService {
         const credentials = JSON.parse(
           this.encryptionService.decrypt(tenantIntegration.credentialsEncrypted),
         );
-        return twilio(credentials.accountSid, credentials.authToken);
+        return {
+          client: twilio(credentials.accountSid, credentials.authToken),
+          integrationId: tenantIntegration.id,
+          selectionSource: 'tenant',
+          providerAccountSid: credentials.accountSid,
+          // TenantIntegration does not carry a subaccount SID column; the
+          // account SID above IS the account credentials are bound to.
+          providerSubaccountSid: null,
+          // Populated later by `selectTwilioClientForLeg` from the caller's
+          // fromNumber; this method has no fromNumber context.
+          selectedPhoneIntegrationId: null,
+        };
       }
     }
 
@@ -1708,7 +1778,185 @@ export class CallConnectService {
       this.encryptionService.decrypt(integration.credentialsEncrypted),
     );
 
-    return twilio(credentials.accountSid, credentials.authToken);
+    return {
+      client: twilio(credentials.accountSid, credentials.authToken),
+      integrationId: integration.id,
+      selectionSource: 'workspace',
+      providerAccountSid: credentials.accountSid,
+      // 6B.5A: populated when a subaccount was minted for this workspace;
+      // NULL for grandfathered pilot/master-account rows.
+      providerSubaccountSid: integration.providerSubaccountSid ?? null,
+      // Populated later by `selectTwilioClientForLeg` from the caller's
+      // fromNumber; this method has no fromNumber context.
+      selectedPhoneIntegrationId: null,
+    };
+  }
+
+  /**
+   * Look up the integration id that owns `fromNumber` per our own
+   * `tenant_phone_numbers` record. Returns `null` when the TPN row does
+   * not exist or `metadata.integrationId` is not populated (the common
+   * case today — no provisioning path writes this field yet). Written
+   * this way so the From-aware lookup lands transparently once the
+   * schema/backfill is in place.
+   */
+  private async lookupPhoneIntegrationId(
+    workspaceId: string,
+    fromNumber: string,
+  ): Promise<string | null> {
+    try {
+      const tpn = await this.tenantPhoneRepo.findOne({
+        where: { workspaceId, phoneNumber: fromNumber },
+      });
+      const meta = tpn?.metadata as Record<string, unknown> | undefined;
+      const id = meta && typeof meta.integrationId === 'string' ? meta.integrationId : null;
+      return id;
+    } catch (err: any) {
+      this.logger.warn(
+        `call_connect_twilio_phone_integration_lookup_error workspaceId=${workspaceId} fromNumber=${this.maskPhone(fromNumber)} error=${(err?.message ?? String(err)).slice(0, 200).replace(/\s+/g, ' ')}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the Twilio client for an outbound leg AND emit one
+   * `call_connect_twilio_client_selected` telemetry line. Callers that
+   * subsequently invoke `client.calls.create(...)` should use
+   * `createLegCall(selection, session, leg, params)` to get failure
+   * telemetry with matching selection context.
+   */
+  private async selectTwilioClientForLeg(
+    session: CallConnectSession,
+    leg: 'agent' | 'lead' | 'voicemail_drop',
+  ): Promise<TwilioLegSelection> {
+    const sel = await this.resolveTwilioSelection(
+      session.businessId,
+      session.tenantId,
+    );
+    sel.selectedPhoneIntegrationId = await this.lookupPhoneIntegrationId(
+      session.businessId,
+      session.fromNumberE164,
+    );
+    this.emitSelectionLog(sel, session, leg);
+    return sel;
+  }
+
+  /**
+   * Emit the `call_connect_twilio_client_selected` telemetry line. Split
+   * out from `selectTwilioClientForLeg` so PARALLEL mode can resolve once
+   * and log per-leg without redundant DB reads.
+   */
+  private emitSelectionLog(
+    sel: TwilioLegSelection,
+    session: CallConnectSession,
+    leg: 'agent' | 'lead' | 'voicemail_drop',
+  ): void {
+    this.logger.log(
+      `call_connect_twilio_client_selected ` +
+        `sessionId=${session.id} ` +
+        `workspaceId=${session.businessId} ` +
+        `tenantId=${session.tenantId ?? 'none'} ` +
+        `integrationId=${sel.integrationId} ` +
+        `selectionSource=${sel.selectionSource} ` +
+        `providerAccountSid=${this.maskAccountSid(sel.providerAccountSid)} ` +
+        `providerSubaccountSid=${sel.providerSubaccountSid ? this.maskAccountSid(sel.providerSubaccountSid) : 'none'} ` +
+        `fromNumber=${this.maskPhone(session.fromNumberE164)} ` +
+        `selectedPhoneIntegrationId=${sel.selectedPhoneIntegrationId ?? 'none'} ` +
+        `leg=${leg}`,
+    );
+  }
+
+  /**
+   * Wrap `client.calls.create(params)` for an outbound leg. On any Twilio
+   * failure, emit `call_connect_twilio_create_failed` with the selection
+   * context and Twilio's error code + message, then re-throw so existing
+   * exception handling (`initiateMode` catch → `failSession`) is unchanged.
+   *
+   * When `CALL_CONNECT_DIAG_OWNERSHIP=true`, additionally run a read-only
+   * `incomingPhoneNumbers.list({ phoneNumber })` probe against the selected
+   * account to record whether the picked account actually owns the From-
+   * number. Env-gated because it adds one Twilio round-trip per failure —
+   * safe to leave off outside an active incident.
+   */
+  private async createLegCall(
+    selection: TwilioLegSelection,
+    session: CallConnectSession,
+    leg: 'agent' | 'lead' | 'voicemail_drop',
+    params: Record<string, unknown>,
+  ): Promise<any> {
+    try {
+      return await selection.client.calls.create(params as any);
+    } catch (err: any) {
+      const twilioErrorCode =
+        err?.code !== undefined && err?.code !== null ? String(err.code) : 'unknown';
+      const twilioErrorMessage = (err?.message ?? String(err))
+        .slice(0, 200)
+        .replace(/\s+/g, ' ');
+      const toNumber = typeof params.to === 'string' ? params.to : undefined;
+      this.logger.warn(
+        `call_connect_twilio_create_failed ` +
+          `sessionId=${session.id} ` +
+          `leg=${leg} ` +
+          `workspaceId=${session.businessId} ` +
+          `tenantId=${session.tenantId ?? 'none'} ` +
+          `integrationId=${selection.integrationId} ` +
+          `selectionSource=${selection.selectionSource} ` +
+          `providerAccountSid=${this.maskAccountSid(selection.providerAccountSid)} ` +
+          `providerSubaccountSid=${selection.providerSubaccountSid ? this.maskAccountSid(selection.providerSubaccountSid) : 'none'} ` +
+          `fromNumber=${this.maskPhone(session.fromNumberE164)} ` +
+          `selectedPhoneIntegrationId=${selection.selectedPhoneIntegrationId ?? 'none'} ` +
+          `toNumberMasked=${this.maskPhone(toNumber)} ` +
+          `twilioErrorCode=${twilioErrorCode} ` +
+          `twilioErrorMessage=${twilioErrorMessage}`,
+      );
+
+      if (this.config.get<string>('CALL_CONNECT_DIAG_OWNERSHIP') === 'true') {
+        try {
+          const matches = await selection.client.incomingPhoneNumbers.list({
+            phoneNumber: session.fromNumberE164,
+            limit: 1,
+          });
+          this.logger.warn(
+            `call_connect_twilio_ownership_check ` +
+              `sessionId=${session.id} ` +
+              `providerAccountSid=${this.maskAccountSid(selection.providerAccountSid)} ` +
+              `fromNumber=${this.maskPhone(session.fromNumberE164)} ` +
+              `selectedAccountOwnsFromNumber=${matches.length > 0}`,
+          );
+        } catch (probeErr: any) {
+          this.logger.warn(
+            `call_connect_twilio_ownership_check_error ` +
+              `sessionId=${session.id} ` +
+              `error=${(probeErr?.message ?? String(probeErr)).slice(0, 200).replace(/\s+/g, ' ')}`,
+          );
+        }
+      }
+
+      throw err;
+    }
+  }
+
+  /**
+   * Mask an E.164 phone number for logs: keeps country + first 3 digits
+   * and last 4, replaces the middle with `***`. Non-E.164 or short inputs
+   * collapse to `***` / `unknown`.
+   */
+  private maskPhone(e164?: string | null): string {
+    if (!e164) return 'unknown';
+    if (e164.length < 8) return '***';
+    return `${e164.slice(0, 5)}***${e164.slice(-4)}`;
+  }
+
+  /**
+   * Mask a Twilio Account SID (`AC...`) or Subaccount SID for logs. Keeps
+   * enough prefix to distinguish master from subaccount families and
+   * enough suffix to disambiguate two accounts with the same prefix.
+   */
+  private maskAccountSid(sid?: string | null): string {
+    if (!sid) return 'unknown';
+    if (sid.length <= 10) return sid;
+    return `${sid.slice(0, 6)}…${sid.slice(-4)}`;
   }
 
   /** Check if current time is within configured quiet hours */
