@@ -49,7 +49,16 @@ function buildService(settingsRepo = buildSettingsRepo()) {
     config as any,
   );
 
-  return { service, settingsRepo, sessionRepo, tenantPhoneRepo };
+  return {
+    service,
+    settingsRepo,
+    sessionRepo,
+    tenantPhoneRepo,
+    integrationRepo,
+    tenantIntegrationRepo,
+    encryptionService,
+    config,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -414,5 +423,461 @@ describe('CallConnectService – handleAgentTwiml skipAgentWhisper branch', () =
 
     expect(twiml).toContain('<Gather');
     expect(twiml).toContain('Human-agent whisper.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Twilio account-selection telemetry (diagnostic-only, 2026-07-14 incident).
+//
+// These tests do not exercise `twilio.calls.create()` against a live client
+// (that requires a real Twilio account SID/auth token). They exercise the
+// internal resolution + logging + failure-capture helpers directly against
+// a fake selection whose `client.calls.create` is a jest.fn() that throws
+// on demand. Existing behaviour of `getTwilioClient` is verified by
+// asserting the same DB reads happen and the returned client has the
+// Twilio SDK's shape.
+// ---------------------------------------------------------------------------
+const AUTH_TOKEN_MASTER = 'auth-token-master-do-not-log-123';
+const AUTH_TOKEN_TENANT = 'auth-token-tenant-do-not-log-456';
+const AUTH_TOKEN_SUBACCT = 'auth-token-subacct-do-not-log-789';
+
+const ACCOUNT_SID_MASTER = 'AC4d3fe3eb0000000000000000000000abcd';
+const ACCOUNT_SID_TENANT = 'ACdddddddddddddddddddddddddddddd1234';
+const ACCOUNT_SID_SUBACCT = 'ACfefefefefefefefefefefefefefefe9999';
+
+describe('CallConnectService – Twilio account-selection telemetry', () => {
+  function primeWorkspaceIntegration(
+    integrationRepo: ReturnType<typeof buildMockRepo>,
+    encryptionService: { decrypt: jest.Mock },
+    opts: {
+      accountSid?: string;
+      authToken?: string;
+      providerSubaccountSid?: string | null;
+      integrationId?: string;
+    } = {},
+  ) {
+    integrationRepo.findOne.mockResolvedValue({
+      id: opts.integrationId ?? 'ws-integration-1',
+      workspaceId: WORKSPACE_ID,
+      provider: 'twilio',
+      credentialsEncrypted: 'enc-blob-workspace',
+      providerSubaccountSid: opts.providerSubaccountSid ?? null,
+    });
+    encryptionService.decrypt.mockImplementation((enc: string) => {
+      if (enc === 'enc-blob-workspace') {
+        return JSON.stringify({
+          accountSid: opts.accountSid ?? ACCOUNT_SID_MASTER,
+          authToken: opts.authToken ?? AUTH_TOKEN_MASTER,
+        });
+      }
+      if (enc === 'enc-blob-tenant') {
+        return JSON.stringify({
+          accountSid: ACCOUNT_SID_TENANT,
+          authToken: AUTH_TOKEN_TENANT,
+        });
+      }
+      return '{}';
+    });
+  }
+
+  function primeTenantIntegration(
+    tenantIntegrationRepo: ReturnType<typeof buildMockRepo>,
+  ) {
+    tenantIntegrationRepo.findOne.mockResolvedValue({
+      id: 'tenant-integration-1',
+      workspaceId: WORKSPACE_ID,
+      tenantId: 'tenant-1',
+      provider: 'twilio',
+      credentialsEncrypted: 'enc-blob-tenant',
+    });
+  }
+
+  it('emits call_connect_twilio_client_selected with source=workspace when only the workspace integration exists', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      tenantPhoneRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService, {
+      accountSid: ACCOUNT_SID_MASTER,
+      providerSubaccountSid: null,
+      integrationId: 'ws-int-abc',
+    });
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    tenantPhoneRepo.findOne.mockResolvedValue(null);
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const session = makeSession({
+      id: 'sess-ws-1',
+      businessId: WORKSPACE_ID,
+      tenantId: 'tenant-1' as any,
+      fromNumberE164: '+19045778584',
+    });
+    const sel = await (service as any).selectTwilioClientForLeg(session, 'lead');
+
+    const selectionLog = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(selectionLog).toBeDefined();
+    expect(selectionLog).toContain('sessionId=sess-ws-1');
+    expect(selectionLog).toContain(`workspaceId=${WORKSPACE_ID}`);
+    expect(selectionLog).toContain('tenantId=tenant-1');
+    expect(selectionLog).toContain('integrationId=ws-int-abc');
+    expect(selectionLog).toContain('selectionSource=workspace');
+    expect(selectionLog).toContain('providerAccountSid=AC4d3f…abcd');
+    expect(selectionLog).toContain('providerSubaccountSid=none');
+    expect(selectionLog).toContain('fromNumber=+1904***8584');
+    expect(selectionLog).toContain('selectedPhoneIntegrationId=none');
+    expect(selectionLog).toContain('leg=lead');
+    expect(sel.selectionSource).toBe('workspace');
+    expect(sel.providerAccountSid).toBe(ACCOUNT_SID_MASTER);
+    expect(sel.selectedPhoneIntegrationId).toBeNull();
+  });
+
+  it('emits call_connect_twilio_client_selected with source=tenant when a tenant integration exists', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      tenantPhoneRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService);
+    primeTenantIntegration(tenantIntegrationRepo);
+    tenantPhoneRepo.findOne.mockResolvedValue(null);
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const session = makeSession({
+      id: 'sess-tenant-1',
+      businessId: WORKSPACE_ID,
+      tenantId: 'tenant-1' as any,
+    });
+    const sel = await (service as any).selectTwilioClientForLeg(session, 'agent');
+
+    const selectionLog = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(selectionLog).toContain('selectionSource=tenant');
+    expect(selectionLog).toContain('integrationId=tenant-integration-1');
+    expect(selectionLog).toContain('leg=agent');
+    expect(sel.selectionSource).toBe('tenant');
+    expect(sel.integrationId).toBe('tenant-integration-1');
+    expect(sel.providerAccountSid).toBe(ACCOUNT_SID_TENANT);
+    // Workspace repo should NOT have been consulted when tenant wins.
+    expect(integrationRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('surfaces providerSubaccountSid when set on the workspace integration', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      tenantPhoneRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService, {
+      accountSid: ACCOUNT_SID_SUBACCT,
+      authToken: AUTH_TOKEN_SUBACCT,
+      providerSubaccountSid: ACCOUNT_SID_SUBACCT,
+    });
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    tenantPhoneRepo.findOne.mockResolvedValue(null);
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const session = makeSession({ tenantId: undefined as any });
+    await (service as any).selectTwilioClientForLeg(session, 'lead');
+
+    const selectionLog = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(selectionLog).toContain(`providerSubaccountSid=ACfefe…9999`);
+    expect(selectionLog).toContain(`providerAccountSid=ACfefe…9999`);
+  });
+
+  it('populates selectedPhoneIntegrationId from tenant_phone_numbers.metadata.integrationId when present', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      tenantPhoneRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService, {
+      integrationId: 'ws-int-selected',
+    });
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    tenantPhoneRepo.findOne.mockResolvedValue({
+      id: 'tpn-1',
+      workspaceId: WORKSPACE_ID,
+      phoneNumber: '+19045778584',
+      metadata: { integrationId: 'ws-int-actual-owner' },
+    });
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const session = makeSession({
+      tenantId: undefined as any,
+      fromNumberE164: '+19045778584',
+    });
+    const sel = await (service as any).selectTwilioClientForLeg(session, 'lead');
+
+    expect(sel.selectedPhoneIntegrationId).toBe('ws-int-actual-owner');
+    expect(sel.integrationId).toBe('ws-int-selected');
+    const selectionLog = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(selectionLog).toContain('integrationId=ws-int-selected');
+    expect(selectionLog).toContain('selectedPhoneIntegrationId=ws-int-actual-owner');
+  });
+
+  it('emits selectedPhoneIntegrationId=none when TPN row is missing or metadata is absent', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      tenantPhoneRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService);
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    // No TPN row at all — the common case today.
+    tenantPhoneRepo.findOne.mockResolvedValue(null);
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const session = makeSession({ tenantId: undefined as any });
+    const sel = await (service as any).selectTwilioClientForLeg(session, 'lead');
+
+    expect(sel.selectedPhoneIntegrationId).toBeNull();
+    const selectionLog = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(selectionLog).toContain('selectedPhoneIntegrationId=none');
+  });
+
+  // Builds a completely fake TwilioLegSelection so tests can control what
+  // `.calls.create` and `.incomingPhoneNumbers.list` return. Bypasses the
+  // real Twilio SDK entirely (whose `.calls` is a getter and can't be
+  // reassigned on a live client instance).
+  function makeFakeSelection(overrides: Partial<{
+    integrationId: string;
+    selectionSource: 'tenant' | 'workspace';
+    providerAccountSid: string;
+    providerSubaccountSid: string | null;
+    selectedPhoneIntegrationId: string | null;
+    createError: any;
+    createReturn: any;
+    listReturn: any[];
+    listError: any;
+  }> = {}): {
+    selection: any;
+    createMock: jest.Mock;
+    listMock: jest.Mock;
+  } {
+    const createMock = overrides.createError
+      ? jest.fn().mockRejectedValue(overrides.createError)
+      : jest.fn().mockResolvedValue(overrides.createReturn ?? { sid: 'CA_test' });
+    const listMock = overrides.listError
+      ? jest.fn().mockRejectedValue(overrides.listError)
+      : jest.fn().mockResolvedValue(overrides.listReturn ?? []);
+    const client = {
+      calls: { create: createMock },
+      incomingPhoneNumbers: { list: listMock },
+    };
+    return {
+      selection: {
+        client,
+        integrationId: overrides.integrationId ?? 'ws-int-fake',
+        selectionSource: overrides.selectionSource ?? 'workspace',
+        providerAccountSid: overrides.providerAccountSid ?? ACCOUNT_SID_MASTER,
+        providerSubaccountSid:
+          'providerSubaccountSid' in overrides
+            ? overrides.providerSubaccountSid ?? null
+            : null,
+        selectedPhoneIntegrationId:
+          'selectedPhoneIntegrationId' in overrides
+            ? overrides.selectedPhoneIntegrationId ?? null
+            : null,
+      },
+      createMock,
+      listMock,
+    };
+  }
+
+  it('never logs the decrypted auth token or credentials JSON', async () => {
+    const { service } = buildService();
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+    const warnSpy = jest.spyOn((service as any).logger, 'warn');
+
+    const session = makeSession({ tenantId: undefined as any });
+    const { selection } = makeFakeSelection({
+      createError: Object.assign(new Error('boom'), { code: 21212 }),
+    });
+
+    // Emit the selection log manually so we exercise emitSelectionLog too.
+    (service as any).emitSelectionLog(selection, session, 'lead');
+    await expect(
+      (service as any).createLegCall(selection, session, 'lead', {
+        to: '+15551234567',
+        from: session.fromNumberE164,
+      }),
+    ).rejects.toThrow('boom');
+
+    const allLogs = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+      .map((args) => String(args[0]))
+      .join('\n');
+    expect(allLogs).not.toContain(AUTH_TOKEN_MASTER);
+    expect(allLogs).not.toContain(AUTH_TOKEN_TENANT);
+    expect(allLogs).not.toContain(AUTH_TOKEN_SUBACCT);
+    expect(allLogs).not.toContain('authToken');
+  });
+
+  it('captures Twilio error code + message on client.calls.create failure and rethrows', async () => {
+    const { service } = buildService();
+    const warnSpy = jest.spyOn((service as any).logger, 'warn');
+
+    const session = makeSession({
+      id: 'sess-fail-1',
+      businessId: WORKSPACE_ID,
+      tenantId: 'tenant-1' as any,
+      fromNumberE164: '+19045778584',
+    });
+    const { selection } = makeFakeSelection({
+      integrationId: 'ws-int-fail',
+      selectionSource: 'workspace',
+      providerAccountSid: ACCOUNT_SID_MASTER,
+      providerSubaccountSid: ACCOUNT_SID_SUBACCT,
+      selectedPhoneIntegrationId: 'ws-int-actual-owner',
+      createError: Object.assign(
+        new Error('The From phone number is not a valid'),
+        { code: 21212 },
+      ),
+    });
+
+    await expect(
+      (service as any).createLegCall(selection, session, 'lead', {
+        to: '+15551234567',
+        from: session.fromNumberE164,
+      }),
+    ).rejects.toThrow('The From phone number is not a valid');
+
+    const failureLog = warnSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_create_failed'));
+    expect(failureLog).toBeDefined();
+    expect(failureLog).toContain('sessionId=sess-fail-1');
+    expect(failureLog).toContain('leg=lead');
+    expect(failureLog).toContain(`workspaceId=${WORKSPACE_ID}`);
+    expect(failureLog).toContain('tenantId=tenant-1');
+    expect(failureLog).toContain('integrationId=ws-int-fail');
+    expect(failureLog).toContain('selectionSource=workspace');
+    expect(failureLog).toContain('providerAccountSid=AC4d3f…abcd');
+    expect(failureLog).toContain(`providerSubaccountSid=ACfefe…9999`);
+    expect(failureLog).toContain('fromNumber=+1904***8584');
+    expect(failureLog).toContain('selectedPhoneIntegrationId=ws-int-actual-owner');
+    expect(failureLog).toContain('toNumberMasked=+1555***4567');
+    expect(failureLog).toContain('twilioErrorCode=21212');
+    expect(failureLog).toContain('twilioErrorMessage=The From phone number is not a valid');
+  });
+
+  it('runs the ownership probe only when CALL_CONNECT_DIAG_OWNERSHIP=true', async () => {
+    const { service, config } = buildService();
+    config.get.mockImplementation((key: string) =>
+      key === 'CALL_CONNECT_DIAG_OWNERSHIP' ? 'true' : 'http://localhost:3002',
+    );
+    const warnSpy = jest.spyOn((service as any).logger, 'warn');
+
+    const session = makeSession({
+      id: 'sess-own-1',
+      tenantId: undefined as any,
+      fromNumberE164: '+19045778584',
+    });
+    const { selection, listMock } = makeFakeSelection({
+      createError: Object.assign(new Error('nope'), { code: 21212 }),
+      listReturn: [],
+    });
+
+    await expect(
+      (service as any).createLegCall(selection, session, 'lead', {
+        to: '+15551234567',
+        from: session.fromNumberE164,
+      }),
+    ).rejects.toThrow('nope');
+
+    expect(listMock).toHaveBeenCalledWith({
+      phoneNumber: '+19045778584',
+      limit: 1,
+    });
+    const ownershipLog = warnSpy.mock.calls
+      .map((args) => String(args[0]))
+      .find((line) => line.startsWith('call_connect_twilio_ownership_check '));
+    expect(ownershipLog).toContain('selectedAccountOwnsFromNumber=false');
+    expect(ownershipLog).toContain('sessionId=sess-own-1');
+  });
+
+  it('does NOT run the ownership probe when the diag flag is unset', async () => {
+    const { service, config } = buildService();
+    config.get.mockImplementation((key: string) =>
+      key === 'CALL_CONNECT_DIAG_OWNERSHIP' ? undefined : 'http://localhost:3002',
+    );
+
+    const session = makeSession({ tenantId: undefined as any });
+    const { selection, listMock } = makeFakeSelection({
+      createError: Object.assign(new Error('nope'), { code: 21212 }),
+    });
+
+    await expect(
+      (service as any).createLegCall(selection, session, 'lead', {
+        to: '+15551234567',
+        from: session.fromNumberE164,
+      }),
+    ).rejects.toThrow('nope');
+
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it('preserves existing getTwilioClient behavior (returns Twilio client, no telemetry)', async () => {
+    const {
+      service,
+      integrationRepo,
+      tenantIntegrationRepo,
+      encryptionService,
+    } = buildService();
+    primeWorkspaceIntegration(integrationRepo, encryptionService);
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    const logSpy = jest.spyOn((service as any).logger, 'log');
+
+    const client = await (service as any).getTwilioClient(WORKSPACE_ID);
+
+    // Twilio SDK client exposes `.calls` and `.incomingPhoneNumbers`.
+    expect(client).toBeDefined();
+    expect(client.calls).toBeDefined();
+    expect(client.incomingPhoneNumbers).toBeDefined();
+    // getTwilioClient itself does not emit selection telemetry — that lives
+    // at the leg-creation call sites so it stays "exactly once per leg".
+    const anyTelemetry = logSpy.mock.calls
+      .map((args) => String(args[0]))
+      .some((line) => line.startsWith('call_connect_twilio_client_selected'));
+    expect(anyTelemetry).toBe(false);
+  });
+
+  it('maskPhone keeps country + first-3 + last-4 and collapses short inputs', () => {
+    const { service } = buildService();
+    const mask = (service as any).maskPhone.bind(service);
+    expect(mask('+19045778584')).toBe('+1904***8584');
+    expect(mask('+447700900000')).toBe('+4477***0000');
+    expect(mask('+12345')).toBe('***');
+    expect(mask(undefined)).toBe('unknown');
+    expect(mask(null)).toBe('unknown');
+    expect(mask('')).toBe('unknown');
+  });
+
+  it('maskAccountSid keeps prefix + suffix and passes short values through', () => {
+    const { service } = buildService();
+    const mask = (service as any).maskAccountSid.bind(service);
+    expect(mask('AC4d3fe3eb0000000000000000000000abcd')).toBe('AC4d3f…abcd');
+    expect(mask('AC12345')).toBe('AC12345');
+    expect(mask(null)).toBe('unknown');
+    expect(mask(undefined)).toBe('unknown');
   });
 });
