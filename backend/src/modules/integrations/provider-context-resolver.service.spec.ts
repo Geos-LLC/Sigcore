@@ -158,22 +158,34 @@ describe('ProviderContextResolver — rule 1 by_number', () => {
     expect(ctx.rule).toBe('by_tenant');
   });
 
-  it('rejects cross-tenant TPN when caller tenantId differs', async () => {
-    const { svc, tpnRepo, emitted } = build();
+  it('emits cross-tenant event but does NOT reject when caller tenantId differs (shared-sender)', async () => {
+    // Incident 2026-07-14 Phase 5a — Sigcore's shared-sender PPA model
+    // permits cross-tenant TPN use within one workspace. The resolver is
+    // now a SELECTION service, not an access-control gate. It emits the
+    // event for telemetry but returns the integration; the caller
+    // (sendMessageToPhoneNumber) validates PPA before sending.
+    const { svc, tpnRepo, integrationRepo, emitted } = build();
     tpnRepo.findOne.mockResolvedValue(twilioTpn({ tenantId: OTHER_TENANT }));
+    integrationRepo.findOne.mockResolvedValue(twilioIntegration());
 
-    await expect(
-      svc.resolve({
-        workspaceId: WS,
-        provider: ProviderType.TWILIO,
-        tenantPhoneNumberId: TPN_ID,
-        tenantId: TENANT,
-      }),
-    ).rejects.toThrow(ForbiddenException);
+    const ctx = await svc.resolve({
+      workspaceId: WS,
+      provider: ProviderType.TWILIO,
+      tenantPhoneNumberId: TPN_ID,
+      tenantId: TENANT,
+    });
 
+    expect(ctx.rule).toBe('by_number');
+    expect(ctx.integration).toBeDefined();
     expect(
       emitted.some((e) => e.event === 'provider_context_cross_tenant_denied'),
     ).toBe(true);
+    // The soft-warn reason marker must be present so telemetry can
+    // distinguish this from a hard denial.
+    const evt = emitted.find(
+      (e) => e.event === 'provider_context_cross_tenant_denied',
+    );
+    expect(evt?.reason).toBe('tpn_tenant_mismatch_soft_warn');
   });
 
   it('does NOT reject when caller omits tenantId (shared-sender case)', async () => {

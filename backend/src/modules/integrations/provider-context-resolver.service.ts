@@ -183,9 +183,18 @@ export class ProviderContextResolver {
         input.fromNumber ?? null,
       );
       if (tpn) {
-        // Cross-tenant TPN safety — caller supplied tenantId must match
-        // TPN's tenantId. Shared-sender PPA is a Communication service
-        // concern, not the resolver's.
+        // Incident 2026-07-14 Phase 5a fix — Sigcore's shared-sender model
+        // (PPA relaxation from 2026-05-11) explicitly permits one tenant to
+        // send SMS from another tenant's TPN when a `profile_phone_assignment`
+        // links them within the same workspace. The resolver's job is to
+        // pick the RIGHT integration for a phone number; access control lives
+        // in the calling service (e.g. `sendMessageToPhoneNumber` validates
+        // PPA before sending). Emit an event for visibility, but do NOT throw
+        // — the caller decides whether cross-tenant use is authorized.
+        //
+        // Voice callers that need strict single-tenant enforcement should
+        // validate `context.tenantPhoneNumber.tenantId === expectedTenantId`
+        // themselves after calling `resolve()`.
         if (input.tenantId && tpn.tenantId && tpn.tenantId !== input.tenantId) {
           this.emit('provider_context_cross_tenant_denied', {
             workspaceId,
@@ -194,11 +203,9 @@ export class ProviderContextResolver {
             rule: 'by_number',
             mode: effectiveMode,
             phoneLast4: phoneLast4(tpn.phoneNumber),
-            reason: 'tpn_tenant_mismatch',
+            reason: 'tpn_tenant_mismatch_soft_warn',
           });
-          throw new ForbiddenException(
-            'ProviderContextResolver: TPN belongs to a different tenant',
-          );
+          // No throw — resolver returns the integration anyway.
         }
         if (tpn.communicationIntegrationId) {
           const integration = await this.integrationRepo.findOne({
