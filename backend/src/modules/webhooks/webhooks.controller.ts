@@ -415,6 +415,69 @@ export class WebhooksController {
   }
 
   /**
+   * Phase C.2 — token-scoped outbound-answer for media_stream mode.
+   *
+   * When `POST /v1/calls/dial` is called with `answerMode=media_stream`,
+   * Sigcore mints a signed single-use `media_session` token and hands
+   * Twilio an answer URL that embeds that token. Twilio then POSTs to
+   * this route when the destination picks up.
+   *
+   * We verify the token here (kind='media_session', not expired, HMAC valid),
+   * inject the token as a `?session=` query param on Callio's WSS URL,
+   * and return `<Connect><Stream/></Connect>` TwiML. Callio's
+   * MediaStreamService then verifies the same token when the WSS opens.
+   *
+   * The token is single-use ONLY at the Callio hop (Redis SETNX on the
+   * WSS side). This route does not enforce single-use because Twilio may
+   * legitimately re-request the answer TwiML — e.g. if the initial TCP
+   * request times out and Twilio retries. Single-use at the WSS hop
+   * prevents replay attacks against the media stream itself.
+   */
+  @Post('twilio/voice/outbound-answer/:token')
+  @HttpCode(HttpStatus.OK)
+  async handleOutboundAnswerTokenTwiml(
+    @Param('token') token: string,
+    @Res() res: Response,
+  ) {
+    const secret = process.env.SIGCORE_VOICE_FORWARD_HMAC_SECRET;
+    const verified = verifyCallbackToken({
+      secret,
+      token,
+      expectedKind: 'media_session' as CallbackTokenKind,
+      nowSeconds: Math.floor(Date.now() / 1000),
+    });
+    if (!verified.ok) {
+      this.logger.warn(
+        `outbound_answer_token_denied reason=${verified.reason} token_prefix=${token.slice(0, 8)}`,
+      );
+      // Twilio expects TwiML in the 200 response. Returning a Hangup here
+      // fails-closed for the customer (call disconnects) without leaking
+      // rejection details in the XML body. The warning log is our audit
+      // trail.
+      const hangupTwiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`;
+      res.status(200).set('Content-Type', 'text/xml').send(hangupTwiml);
+      return;
+    }
+    const wssBase = verified.payload.callioDestUrl;
+    // Build the Callio WSS URL. Append ?session=<token> so Callio's
+    // WSS handler can verify + burn the token before accepting the media.
+    const separator = wssBase.includes('?') ? '&' : '?';
+    const wssUrl = `${wssBase}${separator}session=${encodeURIComponent(token)}`;
+    // XML-escape the URL. Query separator & is the primary metacharacter
+    // to guard against here.
+    const escaped = wssUrl
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+    const twiml =
+      `<?xml version="1.0" encoding="UTF-8"?>` +
+      `<Response><Connect><Stream url="${escaped}"/></Connect></Response>`;
+    res.status(200).set('Content-Type', 'text/xml').send(twiml);
+  }
+
+  /**
    * TwiML endpoint for the agent leg of a Call Connect session.
    * Twilio calls this when the agent's phone rings.
    * Returns a whisper + Gather (AGENT_FIRST) or direct conference join (PARALLEL).

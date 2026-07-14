@@ -45,27 +45,66 @@ import * as crypto from 'crypto';
  *      possession + HMAC verify is enough.
  */
 
-export type CallbackTokenKind = 'recording_status' | 'call_status';
+/**
+ * Phase C.2 (2026-07-14) — `media_session` kind added.
+ *
+ * A media_session token binds an outbound-answer TwiML redirect + Callio
+ * WSS connection to a specific (workspace, tenant, integration, callioCallId,
+ * providerCallSid). Sigcore mints when answerMode='media_stream' at dial
+ * time. Twilio embeds the token in two hops:
+ *
+ *   1. Answer URL:  https://sigcore.../outbound-answer/<token>
+ *      → Sigcore verifies (kind='media_session'), returns TwiML
+ *        <Connect><Stream url="wss://callio.../voice-stream?session=<token>"/></Connect>
+ *
+ *   2. WSS URL:     wss://callio.../voice-stream?session=<token>
+ *      → Callio verifies (kind='media_session'), enforces single-use via
+ *        Redis (SETNX), bootstraps orchestrator against the bound callioCallId.
+ *
+ * Same wire format as recording/call-status tokens (`<b64>.<hex>`), same
+ * HMAC secret (`SIGCORE_VOICE_FORWARD_HMAC_SECRET`) — Callio only needs
+ * to know one thing to verify all three token classes.
+ */
+export type CallbackTokenKind = 'recording_status' | 'call_status' | 'media_session';
 
 export interface CallbackTokenPayload {
   /** Format version — bump for backward-incompatible payload changes. */
   v: 1;
-  /** Event kind — recording vs call status. Bound to the token HMAC. */
+  /** Event kind — recording vs call status vs media session. Bound to the token HMAC. */
   kind: CallbackTokenKind;
   /** Sigcore's workspace + tenant. Forwarded to Callio in the HMAC envelope. */
   sigcoreWorkspaceId: string;
   sigcoreTenantId: string;
   /**
-   * The Callio URL Sigcore will POST the HMAC-signed callback to. Sigcore
-   * validates the URL is plausible (https, non-empty path) before minting.
+   * The Callio URL Sigcore will POST the HMAC-signed callback to. For
+   * `media_session` this is the wss:// URL Callio will accept a media
+   * stream on (Sigcore validates it's ws:// or wss://).
    */
   callioDestUrl: string;
   /**
    * Callio's internal callId — only present for recording-status where
    * Callio wants to correlate the recording back to its own row. Absent
    * for call-status where the callback's `CallSid` is the correlation.
+   *
+   * Phase C.2 — REQUIRED for `media_session`: Callio uses it to look up
+   * the voice_calls row for the outbound call before bootstrapping the
+   * orchestrator.
    */
   callioCallId?: string;
+  /**
+   * Phase C.2 — media_session only. The Twilio providerCallSid bound to
+   * this token; Callio verifies the WSS payload's `start` event carries
+   * the same CallSid before touching the orchestrator (defense against
+   * token reuse across calls).
+   */
+  providerCallSid?: string;
+  /**
+   * Phase C.2 — media_session only. The Sigcore integration id that
+   * placed the call. Callio uses it to attribute the outbound leg to
+   * the right integration for hangup + recording ops (which already go
+   * through Sigcore per Phase A).
+   */
+  integrationId?: string;
   /** Unix seconds when this token stops being accepted. */
   exp: number;
 }

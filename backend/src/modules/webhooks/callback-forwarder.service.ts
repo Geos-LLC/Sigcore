@@ -215,6 +215,16 @@ export class CallbackForwarderService {
     sigcoreTenantId: string;
     callioDestUrl: string;
     callioCallId?: string;
+    /**
+     * Phase C.2 — required for `kind='media_session'`. Callio verifies
+     * the WSS `start` event's CallSid matches.
+     */
+    providerCallSid?: string;
+    /**
+     * Phase C.2 — required for `kind='media_session'`. Callio can
+     * attribute the outbound leg to the right integration.
+     */
+    integrationId?: string;
     ttlSeconds?: number;
   }): string | null {
     if (!this.hmacSecret) return null;
@@ -227,6 +237,8 @@ export class CallbackForwarderService {
       sigcoreTenantId: input.sigcoreTenantId,
       callioDestUrl: input.callioDestUrl,
       callioCallId: input.callioCallId,
+      providerCallSid: input.providerCallSid,
+      integrationId: input.integrationId,
       exp: now + ttl,
     };
     return mintCallbackToken(this.hmacSecret, payload);
@@ -235,8 +247,16 @@ export class CallbackForwarderService {
   /**
    * Route helper: eventType per token kind. Kept as a public map so
    * controllers don't need to know the coupling detail.
+   *
+   * Phase C.2 note: `media_session` tokens are consumed by Callio's WSS
+   * verifier, not by the Sigcore→Callio HMAC forward path — so this map
+   * has no natural mapping for it. Callers should not invoke this for
+   * `media_session`; a defensive throw keeps the shape honest.
    */
   eventTypeForKind(kind: CallbackTokenKind): ForwardEventType {
+    if (kind === 'media_session') {
+      throw new Error('eventTypeForKind not applicable to media_session tokens');
+    }
     return kind === 'recording_status'
       ? 'voice_recording_status'
       : 'voice_call_status';

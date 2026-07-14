@@ -106,17 +106,44 @@ export class DialCallDto {
    *   - 'twiml_url': return `<Response><Redirect>{answerTwimlUrl}</Redirect></Response>`,
    *     letting the caller host arbitrary answer TwiML. Requires
    *     `answerTwimlUrl` to be set.
-   *
-   * Phase C.2 will add `media_stream` for Attach AI / voicemail flows.
+   *   - 'media_stream' (Phase C.2): mint a signed single-use session token
+   *     and return `<Response><Connect><Stream url="{mediaStreamWssBaseUrl}?session={token}"/></Connect></Response>`
+   *     so Twilio opens a WSS to Callio. Requires `mediaStreamWssBaseUrl`
+   *     AND `callioCallId` to be set — the token binds workspace, tenant,
+   *     integration, providerCallSid, and callioCallId so Callio can look
+   *     up the pre-created voice_calls row and drop the stream into an
+   *     orchestrator instance.
    */
   @IsString()
   @IsOptional()
-  @IsIn(['hangup', 'twiml_url'])
-  answerMode?: 'hangup' | 'twiml_url';
+  @IsIn(['hangup', 'twiml_url', 'media_stream'])
+  answerMode?: 'hangup' | 'twiml_url' | 'media_stream';
 
   @IsString()
   @IsOptional()
   answerTwimlUrl?: string;
+
+  /**
+   * Phase C.2 — Callio's WSS base URL for the AI media stream. Sigcore
+   * appends `?session=<token>` when constructing the TwiML `<Stream url>`.
+   * Must start with wss:// (ws:// only permitted for localhost in dev/test).
+   * Required when answerMode='media_stream'.
+   */
+  @IsString()
+  @IsOptional()
+  mediaStreamWssBaseUrl?: string;
+
+  /**
+   * Phase C.2 — Callio's own voice_calls.id for the outbound call. The
+   * caller creates the row BEFORE dialing so orchestrator wiring on the
+   * Callio side (bootstrapped when the WSS opens) can find its state
+   * without a lookup roundtrip. Baked into the session token so an
+   * attacker with a valid signature cannot substitute a different callId.
+   * Required when answerMode='media_stream'.
+   */
+  @IsString()
+  @IsOptional()
+  callioCallId?: string;
 
   @IsString()
   @IsOptional()

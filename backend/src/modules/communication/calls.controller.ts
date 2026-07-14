@@ -304,6 +304,26 @@ export class CallsV1Controller {
     if (dto.answerMode === 'twiml_url' && !dto.answerTwimlUrl) {
       throw new BadRequestException('answerTwimlUrl required when answerMode=twiml_url');
     }
+    if (dto.answerMode === 'media_stream') {
+      if (!dto.mediaStreamWssBaseUrl) {
+        throw new BadRequestException('mediaStreamWssBaseUrl required when answerMode=media_stream');
+      }
+      if (!dto.callioCallId) {
+        throw new BadRequestException('callioCallId required when answerMode=media_stream');
+      }
+      // Basic wss:// validation. Sigcore refuses to hand Twilio a URL
+      // scheme that isn't a WebSocket. (ws:// permitted only in dev.)
+      const isProd = (this.configService.get<string>('NODE_ENV') ?? 'production') === 'production';
+      if (isProd) {
+        if (!/^wss:\/\//i.test(dto.mediaStreamWssBaseUrl)) {
+          throw new BadRequestException('mediaStreamWssBaseUrl must be wss:// in production');
+        }
+      } else {
+        if (!/^(wss|ws):\/\//i.test(dto.mediaStreamWssBaseUrl)) {
+          throw new BadRequestException('mediaStreamWssBaseUrl must be ws:// or wss://');
+        }
+      }
+    }
     if (dto.timeoutSeconds !== undefined) {
       if (typeof dto.timeoutSeconds !== 'number' || dto.timeoutSeconds < 5 || dto.timeoutSeconds > 600) {
         throw new BadRequestException('timeoutSeconds must be number between 5 and 600');
@@ -372,11 +392,52 @@ export class CallsV1Controller {
       );
     }
     const answerMode = dto.answerMode ?? 'hangup';
-    const answerParams = new URLSearchParams({ mode: answerMode });
-    if (answerMode === 'twiml_url' && dto.answerTwimlUrl) {
-      answerParams.set('url', dto.answerTwimlUrl);
+    let answerUrl: string;
+    if (answerMode === 'media_stream') {
+      // Phase C.2 — mint a signed single-use session token that the
+      // outbound-answer route redeems into <Connect><Stream/></Connect>
+      // TwiML. Token binds everything Callio's WSS handler needs to
+      // authenticate the connection AND find the pre-created voice_calls
+      // row without a DB roundtrip.
+      const token = this.callbackForwarder.mintToken({
+        kind: 'media_session' as any,
+        sigcoreWorkspaceId: workspaceId,
+        sigcoreTenantId: tenantId,
+        // Reuse the callioDestUrl field to carry the WSS base URL.
+        // Callio's verifier reads this to whitelist the destination and
+        // returns it back in its own decoded payload — no free-form URLs.
+        callioDestUrl: dto.mediaStreamWssBaseUrl!,
+        callioCallId: dto.callioCallId!,
+        // Phase C.2 fields — providerCallSid + integrationId. The
+        // providerCallSid isn't known until after Twilio returns from
+        // client.calls.create, so we bake it in AFTER dial. We mint an
+        // "unbound" token now with just the callioCallId, integration,
+        // workspace/tenant; the outbound-answer route re-mints a
+        // providerCallSid-bound token when it serves the TwiML. This
+        // narrows the reuse window: even a leaked outer token can only
+        // be redeemed by Twilio pinging the exact answer-URL Sigcore
+        // built for THIS call. The inner (WSS-facing) token is what
+        // Callio actually verifies + burns.
+        integrationId: dto.integrationId,
+        // TTL 1h — Twilio call-answer typically fires within seconds;
+        // 1h covers the worst case (destination lets it ring the full
+        // timeoutSeconds, plus buffer).
+        ttlSeconds: 3600,
+      });
+      if (!token) {
+        this.dialIdempotency.release(workspaceId, idempotencyKey);
+        throw new BadRequestException(
+          'Sigcore callback forwarder HMAC secret not configured — media_stream mode requires SIGCORE_VOICE_FORWARD_HMAC_SECRET',
+        );
+      }
+      answerUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/voice/outbound-answer/${token}`;
+    } else {
+      const answerParams = new URLSearchParams({ mode: answerMode });
+      if (answerMode === 'twiml_url' && dto.answerTwimlUrl) {
+        answerParams.set('url', dto.answerTwimlUrl);
+      }
+      answerUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/voice/outbound-answer?${answerParams.toString()}`;
     }
-    const answerUrl = `${publicBase.replace(/\/$/, '')}/api/webhooks/twilio/voice/outbound-answer?${answerParams.toString()}`;
 
     // Wrap statusCallbackUrl in a Sigcore signed token so Twilio dials
     // Sigcore first for status events, mirroring the recording-status
