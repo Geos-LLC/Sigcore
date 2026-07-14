@@ -169,6 +169,7 @@ describe('CallbackForwarderService', () => {
         headers: {
           signature: headers[SIGCORE_FORWARD_HEADERS.signature],
           timestamp: headers[SIGCORE_FORWARD_HEADERS.timestamp],
+          nonce: headers[SIGCORE_FORWARD_HEADERS.nonce],
           workspaceId: headers[SIGCORE_FORWARD_HEADERS.workspaceId],
           tenantId: headers[SIGCORE_FORWARD_HEADERS.tenantId],
           callSid: headers[SIGCORE_FORWARD_HEADERS.callSid],
@@ -239,6 +240,7 @@ describe('CallbackForwarderService', () => {
         headers: {
           signature: headers[SIGCORE_FORWARD_HEADERS.signature],
           timestamp: headers[SIGCORE_FORWARD_HEADERS.timestamp],
+          nonce: headers[SIGCORE_FORWARD_HEADERS.nonce],
           workspaceId: headers[SIGCORE_FORWARD_HEADERS.workspaceId],
           tenantId: headers[SIGCORE_FORWARD_HEADERS.tenantId],
           callSid: headers[SIGCORE_FORWARD_HEADERS.callSid],

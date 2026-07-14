@@ -57,6 +57,15 @@ export const SIGCORE_FORWARD_HEADERS = {
    * fails BEFORE the signature is checked (see verify's `expectedEventType`).
    */
   eventType: 'x-sigcore-forwarded-event-type',
+  /**
+   * Phase B.1 — replay-protection nonce. Sigcore generates a fresh random
+   * nonce per forwarded request; Callio stores it in Redis with TTL and
+   * rejects duplicates within the freshness window (2× FRESHNESS_WINDOW_SECONDS
+   * by default, i.e. 600s). Bound to the HMAC via the canonical string so a
+   * request with a valid HMAC but missing/mutated nonce fails at
+   * bad_signature (or missing_nonce).
+   */
+  nonce: 'x-sigcore-forwarded-nonce',
 } as const;
 
 /** Event types that Sigcore may forward. Route handlers pin one value each. */
@@ -79,6 +88,13 @@ export type ForwardEnvelope = {
    */
   eventType: ForwardEventType;
   timestamp: string;
+  /**
+   * Phase B.1 — replay-protection nonce. Callers (Sigcore forwarders) MUST
+   * populate this with a fresh unique value per request (recommended:
+   * `crypto.randomUUID()` or `randomBytes(16).toString('hex')`). Verifiers
+   * (Callio) treat empty string as "missing_nonce" and reject.
+   */
+  nonce: string;
   workspaceId: string;
   tenantId: string;
   callSid: string;
@@ -86,7 +102,7 @@ export type ForwardEnvelope = {
 };
 
 export type VerifyResult =
-  | { ok: true }
+  | { ok: true; nonce: string }
   | {
       ok: false;
       // Machine-friendly reason. Never includes the secret or the raw signature.
@@ -97,6 +113,8 @@ export type VerifyResult =
         | 'missing_tenant_id'
         | 'missing_call_sid'
         | 'missing_event_type'
+        | 'missing_nonce'
+        | 'malformed_nonce'
         | 'unexpected_event_type'
         | 'malformed_timestamp'
         | 'malformed_signature'
@@ -104,6 +122,13 @@ export type VerifyResult =
         | 'bad_signature'
         | 'secret_not_configured';
     };
+
+/**
+ * Nonce format — 32 hex chars (16 random bytes). Verifiers enforce this
+ * shape to prevent an attacker from smuggling arbitrary strings into the
+ * Redis nonce store (unbounded key size, injection via key prefix, etc.).
+ */
+const NONCE_REGEX = /^[a-f0-9]{32}$/i;
 
 /** Compute the canonical string that both sides sign. */
 export function canonicalize(env: ForwardEnvelope): string {
@@ -114,11 +139,22 @@ export function canonicalize(env: ForwardEnvelope): string {
     env.path,
     env.eventType,
     env.timestamp,
+    env.nonce,
     env.workspaceId,
     env.tenantId,
     env.callSid,
     bodyHash,
   ].join('\n');
+}
+
+/**
+ * Phase B.1 — generate a fresh cryptographically-random nonce for use as
+ * `env.nonce`. 16 bytes → 32 hex chars → 128 bits of entropy. Every forward
+ * gets a unique value; Callio rejects duplicates within the freshness window
+ * via Redis.
+ */
+export function generateNonce(): string {
+  return crypto.randomBytes(16).toString('hex');
 }
 
 /**
@@ -160,6 +196,8 @@ export function verify(input: {
     callSid: string | undefined;
     /** Task 6B.5C — event-type header (see SIGCORE_FORWARD_HEADERS.eventType). */
     eventType: string | undefined;
+    /** Phase B.1 — replay-protection nonce. */
+    nonce: string | undefined;
   };
   /**
    * Task 6B.5C — the route's pinned event type. Every route pins ONE value
@@ -182,6 +220,10 @@ export function verify(input: {
   if (!headers.tenantId) return { ok: false, reason: 'missing_tenant_id' };
   if (!headers.callSid) return { ok: false, reason: 'missing_call_sid' };
   if (!headers.eventType) return { ok: false, reason: 'missing_event_type' };
+  if (!headers.nonce) return { ok: false, reason: 'missing_nonce' };
+  if (!NONCE_REGEX.test(headers.nonce)) {
+    return { ok: false, reason: 'malformed_nonce' };
+  }
   if (headers.eventType !== expectedEventType) {
     return { ok: false, reason: 'unexpected_event_type' };
   }
@@ -203,6 +245,7 @@ export function verify(input: {
     path: input.path,
     eventType: expectedEventType,
     timestamp: headers.timestamp,
+    nonce: headers.nonce,
     workspaceId: headers.workspaceId,
     tenantId: headers.tenantId,
     callSid: headers.callSid,
@@ -217,5 +260,5 @@ export function verify(input: {
   if (!crypto.timingSafeEqual(receivedBuf, expectedBuf)) {
     return { ok: false, reason: 'bad_signature' };
   }
-  return { ok: true };
+  return { ok: true, nonce: headers.nonce };
 }

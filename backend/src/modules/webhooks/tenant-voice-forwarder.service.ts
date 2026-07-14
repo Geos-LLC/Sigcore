@@ -4,6 +4,7 @@ import axios, { AxiosError, AxiosResponse } from 'axios';
 import { EmailService } from '../email/email.service';
 import {
   SIGCORE_FORWARD_HEADERS,
+  generateNonce,
   sign as signForwardEnvelope,
 } from './sigcore-forward-signature.util';
 
@@ -279,8 +280,11 @@ export class TenantVoiceForwarderService {
     // same value.
     if (this.forwardHmacSecret) {
       const timestamp = Math.floor(Date.now() / 1000).toString();
+      // Phase B.1 — fresh nonce per forward for Callio replay protection.
+      const nonce = generateNonce();
       const path = this.extractSignedPath(input.voiceInboundUrl);
       headers[SIGCORE_FORWARD_HEADERS.timestamp] = timestamp;
+      headers[SIGCORE_FORWARD_HEADERS.nonce] = nonce;
       // Task 6B.5C — pin eventType so a valid inbound-voice envelope cannot
       // be replayed against a callback route on Callio.
       headers[SIGCORE_FORWARD_HEADERS.eventType] = 'voice_inbound';
@@ -291,6 +295,7 @@ export class TenantVoiceForwarderService {
           path,
           eventType: 'voice_inbound',
           timestamp,
+          nonce,
           workspaceId: input.correlation.workspaceId,
           tenantId: input.correlation.tenantId,
           callSid: input.correlation.providerCallSid,

@@ -19,11 +19,14 @@ import {
 const SECRET = 'super-secret-shared-hmac-key-32chars!!';
 const NOW = 1_784_000_000; // 2026-07-15-ish
 
+const TEST_NONCE = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+
 const envBase: ForwardEnvelope = {
   method: 'POST',
   path: '/webhooks/twilio/voice/ws-a',
   eventType: 'voice_inbound',
   timestamp: String(NOW),
+  nonce: TEST_NONCE,
   workspaceId: 'ws-a',
   tenantId: 'tenant-a',
   callSid: 'CA_test_123',
@@ -34,6 +37,7 @@ function makeHeaders(env: ForwardEnvelope, signature: string) {
   return {
     signature,
     timestamp: env.timestamp,
+    nonce: env.nonce,
     workspaceId: env.workspaceId,
     tenantId: env.tenantId,
     callSid: env.callSid,
@@ -66,19 +70,20 @@ function verifyEnvelope(
   });
 }
 
-describe('canonicalize (v2 shape — 8-line, eventType included)', () => {
-  it('produces the exact 8-line canonical string', () => {
+describe('canonicalize (v3 shape — 9-line, eventType + nonce included)', () => {
+  it('produces the exact 9-line canonical string', () => {
     const s = canonicalize(envBase);
     const lines = s.split('\n');
-    expect(lines).toHaveLength(8);
+    expect(lines).toHaveLength(9);
     expect(lines[0]).toBe('POST');
     expect(lines[1]).toBe('/webhooks/twilio/voice/ws-a');
     expect(lines[2]).toBe('voice_inbound');
     expect(lines[3]).toBe(String(NOW));
-    expect(lines[4]).toBe('ws-a');
-    expect(lines[5]).toBe('tenant-a');
-    expect(lines[6]).toBe('CA_test_123');
-    expect(lines[7]).toMatch(/^[0-9a-f]{64}$/);
+    expect(lines[4]).toBe(TEST_NONCE);
+    expect(lines[5]).toBe('ws-a');
+    expect(lines[6]).toBe('tenant-a');
+    expect(lines[7]).toBe('CA_test_123');
+    expect(lines[8]).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('normalizes method to uppercase', () => {

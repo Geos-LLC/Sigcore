@@ -5,6 +5,7 @@ import axios, { AxiosResponse, AxiosError } from 'axios';
 import {
   ForwardEventType,
   SIGCORE_FORWARD_HEADERS,
+  generateNonce,
   sign as signForwardEnvelope,
 } from './sigcore-forward-signature.util';
 import {
@@ -111,11 +112,14 @@ export class CallbackForwarderService {
 
     const path = this.extractSignedPath(input.callioDestUrl);
     const timestamp = Math.floor(Date.now() / 1000).toString();
+    // Phase B.1 — fresh nonce per forwarded callback.
+    const nonce = generateNonce();
     const signature = signForwardEnvelope(this.hmacSecret, {
       method: 'POST',
       path,
       eventType: input.eventType,
       timestamp,
+      nonce,
       workspaceId: input.sigcoreWorkspaceId,
       tenantId: input.sigcoreTenantId,
       callSid: input.providerCallSid,
@@ -129,6 +133,7 @@ export class CallbackForwarderService {
       [SIGCORE_FORWARD_HEADERS.tenantId]: input.sigcoreTenantId,
       [SIGCORE_FORWARD_HEADERS.callSid]: input.providerCallSid,
       [SIGCORE_FORWARD_HEADERS.timestamp]: timestamp,
+      [SIGCORE_FORWARD_HEADERS.nonce]: nonce,
       [SIGCORE_FORWARD_HEADERS.eventType]: input.eventType,
       [SIGCORE_FORWARD_HEADERS.signature]: signature,
     };
