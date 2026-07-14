@@ -252,6 +252,88 @@ export class WebhooksController {
   }
 
   /**
+   * Phase B.1 — workspace-scoped call-status callback receiver.
+   *
+   * Same shape as `POST /twilio/voice/:webhookId` but for status callbacks.
+   * The webhookId in the path lets us verify the X-Twilio-Signature against
+   * that workspace's Twilio integration credentials (which we can't do on
+   * the legacy `/twilio/voice/status` route because it carries no
+   * workspace binding). After signature verification we forward the
+   * callback to the tenant's Callio status endpoint under a Sigcore HMAC
+   * envelope (voice_call_status), so Callio sees the same
+   * `voice_calls.status/startedAt/endedAt/durationSeconds` updates it
+   * used to get from the (pre-Phase-B) direct Twilio→Callio status_callback.
+   *
+   * Deploy step: set the pilot number's Twilio `StatusCallback` URL to
+   * `${SIGCORE_BASE_URL}/api/webhooks/twilio/voice/status/${webhookId}`.
+   * The legacy `/twilio/voice/status` route stays live for Call Connect's
+   * internal status callbacks; the new scoped route is what number-level
+   * status_callback configs point at.
+   *
+   * IMPORTANT: this route must be defined BEFORE `twilio/voice/:webhookId`
+   * to avoid the wildcard swallowing it.
+   */
+  @Post('twilio/voice/status/:webhookId')
+  @HttpCode(HttpStatus.OK)
+  async handleTwilioCallStatusScoped(
+    @Param('webhookId') webhookId: string,
+    @Req() req: Request,
+    @Headers('x-twilio-signature') signature: string,
+    @Body() payload: TwilioCallStatusPayload,
+  ) {
+    this.logger.log(
+      `Twilio call status (scoped): ${payload.CallSid} -> ${payload.CallStatus} webhookId=${webhookId.slice(0, 8)}`,
+    );
+
+    const workspace = await this.twilioWebhooksService.getWorkspaceByWebhookId(webhookId);
+    if (!workspace) throw new NotFoundException('Invalid webhook URL');
+
+    // Verify Twilio signature. Twilio always includes X-Twilio-Signature on
+    // status callbacks; a missing signature is treated as a protocol error.
+    if (!signature) {
+      throw new BadRequestException('Missing X-Twilio-Signature header');
+    }
+    const authToken = await this.twilioWebhooksService.getAuthToken(workspace.id);
+    if (authToken) {
+      const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+      const isValid = this.twilioWebhooksService.verifyTwilioSignature(
+        authToken,
+        signature,
+        fullUrl,
+        payload as unknown as Record<string, string>,
+      );
+      if (!isValid) {
+        this.logger.warn(
+          `Invalid Twilio status signature webhookId=${webhookId.slice(0, 8)} callSid=${payload.CallSid}`,
+        );
+        throw new BadRequestException('Invalid webhook signature');
+      }
+    } else {
+      // No stored auth token means we can't verify — fail closed to prevent
+      // a mis-provisioned workspace from accepting unsigned status POSTs.
+      this.logger.warn(
+        `No auth token for workspace=${workspace.id} — refusing unsigned scoped status callback`,
+      );
+      throw new BadRequestException('Workspace not provisioned for signature verification');
+    }
+
+    // Update Sigcore's own state (same as the legacy route).
+    await this.twilioWebhooksService.handleCallStatus(payload);
+
+    // Forward to Callio if the tenant is configured for it.
+    const forwardResult = await this.twilioWebhooksService.forwardCallStatusToCallio(
+      workspace.id,
+      payload,
+      req as RawBodyRequest<Request>,
+      signature,
+    );
+    this.logger.log(
+      `sigcore_call_status_forward outcome=${forwardResult.outcome} reason=${forwardResult.reason ?? 'ok'} callSid=${payload.CallSid}`,
+    );
+    return '';
+  }
+
+  /**
    * Handle forwarded inbound call dial status (Dial action callback).
    * Called when an inbound call forwarded to an agent's phone completes.
    * MUST be before twilio/voice/:webhookId to avoid route conflicts.

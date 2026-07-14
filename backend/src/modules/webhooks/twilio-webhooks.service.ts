@@ -1012,6 +1012,108 @@ export class TwilioWebhooksService {
   }
 
   /**
+   * Phase B.1 — forward a call-status callback to the tenant's Callio
+   * status endpoint under a Sigcore HMAC envelope. Called by the scoped
+   * status callback controller AFTER Twilio signature verification and
+   * AFTER local `handleCallStatus` state update.
+   *
+   * Failure modes are all treated as fallback (Sigcore-side state is
+   * already updated). Callio-side state may be stale; a follow-up call
+   * status event or the recording-status callback will resync.
+   */
+  async forwardCallStatusToCallio(
+    workspaceId: string,
+    payload: TwilioCallStatusPayload,
+    req: {
+      rawBody?: Buffer;
+      headers?: Record<string, string | string[] | undefined>;
+    },
+    twilioSignature: string,
+  ): Promise<{ outcome: 'success' | 'skipped' | 'fallback'; reason?: string }> {
+    if (!this.voiceForwarder) {
+      return { outcome: 'skipped', reason: 'forwarder_not_wired' };
+    }
+    const forwardFlag =
+      (this.configService.get<string>('SIGCORE_VOICE_INBOUND_FORWARD_ENABLED') ??
+        '').toLowerCase() === 'true';
+    if (!forwardFlag) {
+      return { outcome: 'skipped', reason: 'flag_off' };
+    }
+
+    // Resolve the tenant that owns the destination number on this call.
+    // Twilio uses `Called` for outbound, `To` for inbound number-level
+    // status_callbacks. Try both — first non-empty wins.
+    const ourNumber = payload.To || (payload as any).Called;
+    if (!ourNumber) {
+      return { outcome: 'skipped', reason: 'no_destination_number' };
+    }
+    const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
+      where: { workspaceId, phoneNumber: ourNumber },
+    });
+    if (!phoneAllocation) {
+      return { outcome: 'skipped', reason: 'no_tenant_binding' };
+    }
+    const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
+    const voiceInboundUrl = tenant?.voiceInboundUrl;
+    if (!voiceInboundUrl) {
+      return { outcome: 'skipped', reason: 'no_voice_inbound_url' };
+    }
+
+    // Derive the Callio status URL by swapping `/voice/` for `/status/`.
+    // Callio's TwilioStatusController is `@Controller('webhooks/twilio/status')`
+    // + `@Post(':workspaceId')` — same workspaceId path segment as the
+    // inbound-voice route. If a tenant sets a bespoke voiceInboundUrl that
+    // doesn't contain `/voice/`, we skip forwarding rather than guess.
+    if (!voiceInboundUrl.includes('/webhooks/twilio/voice/')) {
+      return { outcome: 'skipped', reason: 'voice_url_shape_unrecognized' };
+    }
+    const callioStatusUrl = voiceInboundUrl.replace(
+      '/webhooks/twilio/voice/',
+      '/webhooks/twilio/status/',
+    );
+
+    // Lazy import to avoid a heavier module cycle — CallbackForwarderService
+    // is already exported by the webhooks module.
+    const {
+      CallbackForwarderService,
+    } = await import('./callback-forwarder.service');
+    const forwarder = new CallbackForwarderService(this.configService);
+    if (!forwarder.isArmed()) {
+      return { outcome: 'skipped', reason: 'callback_forwarder_not_armed' };
+    }
+
+    const rawBody =
+      req.rawBody && req.rawBody.length > 0
+        ? req.rawBody
+        : Buffer.from(
+            new URLSearchParams(payload as unknown as Record<string, string>).toString(),
+            'utf8',
+          );
+    const contentType =
+      typeof req.headers?.['content-type'] === 'string'
+        ? (req.headers['content-type'] as string)
+        : 'application/x-www-form-urlencoded';
+
+    const result = await forwarder.forward({
+      eventType: 'voice_call_status',
+      callioDestUrl: callioStatusUrl,
+      sigcoreWorkspaceId: workspaceId,
+      sigcoreTenantId: tenant!.id,
+      providerCallSid: payload.CallSid,
+      rawBody,
+      contentType,
+      twilioSignature,
+    });
+    if (result.outcome === 'success') {
+      return { outcome: 'success' };
+    }
+    return {
+      outcome: 'fallback',
+      reason: `${result.reason ?? 'forward_failed'}${result.statusCode ? `:${result.statusCode}` : ''}`,
+    };
+  }
+
+  /**
    * Handle recording completion webhook from Twilio.
    */
   async handleRecordingComplete(payload: TwilioRecordingPayload): Promise<void> {
