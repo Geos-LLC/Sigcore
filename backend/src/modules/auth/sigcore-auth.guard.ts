@@ -4,6 +4,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ApiKey } from '../../database/entities';
 
+// Twilio VoiceGrant identity character subset — validated defensively so any
+// X-User-Id we forward into `VoiceIdentity.encode` can be embedded safely.
+const VOICE_USER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
 /**
  * Guard for Sigcore service-to-service authentication.
  * Supports two auth methods:
@@ -38,6 +42,8 @@ export class SigcoreAuthGuard implements CanActivate {
       request.workspaceId = workspaceId;
       request.authType = 'service';
       request.authScopeType = 'workspace'; // service keys are workspace-scoped
+
+      this.attachUserIdIfPresent(request);
       return true;
     }
 
@@ -92,9 +98,32 @@ export class SigcoreAuthGuard implements CanActivate {
       }
       request.tenantId = tenantId;
       request.authScopeType = (tenantId || key.scope === 'tenant') ? 'tenant' : 'workspace';
+
+      this.attachUserIdIfPresent(request);
       return true;
     }
 
     throw new UnauthorizedException('Authentication required. Provide X-Sigcore-Key or x-api-key header.');
+  }
+
+  /**
+   * Optional per-user scope for endpoints that mint user-identified tokens
+   * (Voice SDK per-user identity). Applied to BOTH auth methods so Callio's
+   * `x-api-key`-based proxy and any future `x-sigcore-key`-based caller can
+   * forward per-user context. Absent = legacy workspace-only scope — the
+   * consumer must NOT reject in that case, or every legacy caller that never
+   * sent X-User-Id would break.
+   */
+  private attachUserIdIfPresent(request: any): void {
+    const rawUserId = request.headers['x-user-id'];
+    if (rawUserId === undefined) return;
+
+    const userId = Array.isArray(rawUserId) ? rawUserId[0] : rawUserId;
+    if (typeof userId !== 'string' || !VOICE_USER_ID_RE.test(userId)) {
+      throw new UnauthorizedException(
+        'X-User-Id must be an alphanumeric/dash/underscore string, 1–64 chars',
+      );
+    }
+    request.userId = userId;
   }
 }

@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
@@ -26,6 +27,8 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { OpenPhoneProvider } from '../communication/providers/openphone.provider';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioVoiceService } from '../communication/twilio-voice.service';
+import { VoiceIdentity } from '../communication/voice-identity';
+import { ProviderContextResolver } from './provider-context-resolver.service';
 import { normalizeToE164, last10Digits } from '../../common/util/phone';
 import { OpenPhoneContactCacheService, resolveDisplayName } from './openphone-contact-cache.service';
 import {
@@ -90,6 +93,14 @@ export class IntegrationsService {
     private twilioProvider: TwilioProvider,
     private twilioVoiceService: TwilioVoiceService,
     private configService: ConfigService,
+    // Browser Voice Contract — provider-context resolver is optional to
+    // preserve backwards-compat for unit specs constructing this service
+    // directly. When absent, `generateOutgoingCallTwiML` skips the ownership
+    // check (log-only) — the primary enforcement site is
+    // `TwilioWebhooksService.handleOutgoingCall`, which the TwiML App
+    // actually hits on browser calls.
+    @Optional()
+    private providerContextResolver?: ProviderContextResolver,
   ) {}
 
   /**
@@ -1407,9 +1418,15 @@ export class IntegrationsService {
 
   // ==================== TWILIO VOICE ====================
 
-  async generateTwilioVoiceToken(workspaceId: string): Promise<string> {
+  async generateTwilioVoiceToken(
+    workspaceId: string,
+    userId?: string,
+  ): Promise<string> {
     this.logger.log(`========== GENERATE VOICE TOKEN START ==========`);
     this.logger.log(`Workspace ID: ${workspaceId}`);
+    // Legacy path (no userId) is supported — log it so ops can track
+    // consumers that haven't migrated yet.
+    this.logger.log(`User ID: ${userId ?? '(legacy — none)'}`);
 
     const workspace = await this.ensureWorkspace(workspaceId);
     this.logger.log(`Found workspace: ${workspace.name}`);
@@ -1445,10 +1462,15 @@ export class IntegrationsService {
       throw new BadRequestException('Twilio Voice credentials not configured. Please reconnect your Twilio account.');
     }
 
-    // Use workspace ID as identity for the voice client
-    const identity = workspace.id;
-
-    this.logger.log(`Generating access token for identity: ${identity}`);
+    // Encode via VoiceIdentity so the wire format stays behind one abstraction
+    // — extra fields (clientType / deviceId) can be added at call sites today
+    // without requiring a format change here.
+    const identity = VoiceIdentity.encode({ workspaceId: workspace.id, userId });
+    this.logger.log(
+      `Generating access token for identity: ${identity} (${
+        userId ? 'per-user' : 'legacy workspace-only'
+      })`,
+    );
     const token = this.twilioVoiceService.generateAccessToken(
       identity,
       credentials.accountSid,
@@ -1469,6 +1491,41 @@ export class IntegrationsService {
     from: string,
     callerId?: string,
   ): Promise<string> {
+    // Defensive check on the admin `/integrations/twilio/voice/twiml`
+    // endpoint. The TwiML App actually hits `handleOutgoingCall` for browser
+    // calls (which is where the primary enforcement lives), but this
+    // endpoint is exposed on the API surface too and must not be a bypass.
+    // Same resolver-driven ownership rules apply.
+    const effectiveCallerId = callerId ?? from;
+    const enforcement =
+      (this.configService.get<string>(
+        'SIGCORE_VOICE_CALLER_ID_ENFORCEMENT',
+      ) ?? 'on').toLowerCase();
+    const enforce = enforcement !== 'off';
+
+    if (this.providerContextResolver) {
+      let ownedByNumber = false;
+      try {
+        const context = await this.providerContextResolver.resolve({
+          workspaceId,
+          provider: ProviderType.TWILIO,
+          fromNumber: effectiveCallerId,
+        });
+        ownedByNumber = context.rule === 'by_number';
+      } catch {
+        ownedByNumber = false;
+      }
+      if (!ownedByNumber) {
+        this.logger.warn(
+          `[CALLER-ID REJECT] admin-twiml workspace=${workspaceId} callerId=${effectiveCallerId} to=${to} enforce=${enforce}`,
+        );
+        if (enforce) {
+          throw new BadRequestException(
+            `Caller ID ${effectiveCallerId} is not an owned phone number for this workspace`,
+          );
+        }
+      }
+    }
     return this.twilioVoiceService.generateOutgoingCallTwiML(to, from, callerId);
   }
 
