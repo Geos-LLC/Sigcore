@@ -1,12 +1,13 @@
 import { Test } from '@nestjs/testing';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { Reflector } from '@nestjs/core';
 
 import { IntegrationsController } from './integrations.controller';
 import { IntegrationsService } from './integrations.service';
 import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
 import { ProviderContextResolver } from './provider-context-resolver.service';
+import { TwilioVoiceProvisionerService } from './twilio-voice-provisioner.service';
 import {
   LoggingProviderContextEventEmitter,
   PROVIDER_CONTEXT_EVENT_EMITTER,
@@ -88,6 +89,11 @@ describe('Sigcore Browser Voice Contract DI graph', () => {
         // resolver is dropped from the module while IntegrationsService
         // still expects it (@Optional dep).
         ProviderContextResolver,
+        // TwilioVoiceProvisionerService — the IntegrationsController now
+        // injects this to serve POST /:id/provision-voice. Missing here
+        // would repro the exact class of Feature-1-style boot crash the
+        // compile tests are designed to prevent.
+        TwilioVoiceProvisionerService,
         {
           provide: PROVIDER_CONTEXT_EVENT_EMITTER,
           useClass: LoggingProviderContextEventEmitter,
@@ -104,6 +110,15 @@ describe('Sigcore Browser Voice Contract DI graph', () => {
         {
           provide: OpenPhoneContactCacheService,
           useValue: { get: jest.fn(), invalidate: jest.fn() },
+        },
+        // TwilioVoiceProvisionerService uses @InjectDataSource() for
+        // pessimistic_write row lock semantics — provide a stub with a
+        // shape that mirrors DataSource.transaction()'s callback contract.
+        {
+          provide: getDataSourceToken(),
+          useValue: {
+            transaction: jest.fn(async (cb: any) => cb({ getRepository: () => stubRepo })),
+          },
         },
         { provide: getRepositoryToken(CommunicationIntegration), useValue: stubRepo },
         { provide: getRepositoryToken(TenantIntegration), useValue: stubRepo },
