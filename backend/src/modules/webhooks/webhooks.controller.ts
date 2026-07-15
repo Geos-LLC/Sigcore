@@ -775,7 +775,19 @@ export class WebhooksController {
 
     let twiml: string;
 
-    if (payload.Direction !== 'inbound') {
+    // Twilio Voice SDK calls (Device.connect from a browser) arrive at the
+    // TwiML App voice URL with `Direction: "inbound"` — from Twilio's view,
+    // the client CALLED INTO the platform. So checking Direction alone
+    // routes browser softphone calls into the PSTN-inbound path, which ends
+    // in voicemail because the destination number isn't a known workspace
+    // phone. The reliable Voice SDK discriminator is `Caller: "client:..."`.
+    //
+    // Server-initiated outbound calls via POST /v1/calls/dial arrive with
+    // `Direction: "outbound-api"` and no `client:` caller — the existing
+    // check covers them.
+    const isVoiceSdkOutbound =
+      typeof payload.Caller === 'string' && payload.Caller.startsWith('client:');
+    if (payload.Direction !== 'inbound' || isVoiceSdkOutbound) {
       twiml = await this.twilioWebhooksService.handleOutgoingCall(workspace.id, payload);
     } else {
       // Wave-2 Voice Foundation PR 3 — pass the forward context so the tenant
