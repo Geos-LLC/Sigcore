@@ -21,7 +21,7 @@ import {
   EnsureIntegrationDto,
 } from './dto';
 import { SigcoreAuthGuard } from '../auth/sigcore-auth.guard';
-import { WorkspaceId, TenantId } from '../auth/decorators/workspace-id.decorator';
+import { WorkspaceId, TenantId, UserId } from '../auth/decorators/workspace-id.decorator';
 import { RequiresTenantScope } from '../auth/decorators/require-tenant-scope.decorator';
 import { ProviderType } from '../../database/entities/communication-integration.entity';
 
@@ -470,9 +470,17 @@ export class IntegrationsController {
   // ==================== TWILIO VOICE ====================
 
   @Get('twilio/voice-token')
-  async getTwilioVoiceToken(@WorkspaceId() workspaceId: string) {
-    console.log(`[VOICE TOKEN REQUEST] Workspace: ${workspaceId}`);
-    const token = await this.integrationsService.generateTwilioVoiceToken(workspaceId);
+  async getTwilioVoiceToken(
+    @WorkspaceId() workspaceId: string,
+    @UserId() userId: string | undefined,
+  ) {
+    console.log(
+      `[VOICE TOKEN REQUEST] Workspace: ${workspaceId} User: ${userId ?? '(legacy)'}`,
+    );
+    const token = await this.integrationsService.generateTwilioVoiceToken(
+      workspaceId,
+      userId,
+    );
     console.log(`[VOICE TOKEN RESPONSE] Token generated successfully`);
     return { data: { token } };
   }

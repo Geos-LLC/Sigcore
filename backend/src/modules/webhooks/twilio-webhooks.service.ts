@@ -37,6 +37,7 @@ import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { CallConnectService } from './call-connect.service';
 import { ResolveProfileForInboundService } from '../routing/resolve-profile-for-inbound.service';
+import { ProviderContextResolver } from '../integrations/provider-context-resolver.service';
 
 export interface TwilioSmsWebhookPayload {
   MessageSid: string;
@@ -154,6 +155,12 @@ export class TwilioWebhooksService {
     // to pre-PR-3.
     @Optional()
     private voiceForwarder?: TenantVoiceForwarderService,
+    // Browser Voice Contract — provider-context resolver is the single source
+    // of truth for "which integration owns this phone number." @Optional so
+    // existing unit specs that construct this service directly keep working;
+    // when undefined, caller-ID ownership enforcement falls back to log-only.
+    @Optional()
+    private providerContextResolver?: ProviderContextResolver,
   ) {}
 
   /**
@@ -888,11 +895,83 @@ export class TwilioWebhooksService {
 
     // Get the destination number from the payload
     const toNumber = payload.To;
-    const fromNumber = payload.From; // This is the workspace phone number passed from the frontend
+    const fromNumber = payload.From; // Browser-supplied "From" — must be verified
     const participantNumber = toNumber;
     const ourNumber = fromNumber;
 
     this.logger.log(`Extracted - To: ${toNumber}, From: ${fromNumber}`);
+
+    // ------------------------------------------------------------------
+    // Caller-ID ownership enforcement (Browser Voice Contract, Task 4).
+    //
+    // The browser is UNTRUSTED: any device holding a valid Voice SDK token
+    // could otherwise pass an arbitrary `From` and Twilio would happily
+    // dial with a spoofed caller ID. We delegate the ownership decision to
+    // ProviderContextResolver — the single source of truth for
+    // "which integration owns this phone number" (Incident 2026-07-14
+    // Phase 2). Duplicating the TPN lookup here would inevitably drift.
+    //
+    // Rules:
+    //   - Resolver returns `by_number` → number is stamped to a workspace-
+    //     owned integration → allowed.
+    //   - Resolver returns `by_legacy_workspace_fallback` → number is NOT
+    //     in the workspace's `tenant_phone_numbers` allocation → rejected.
+    //   - Resolver throws → rejected.
+    //   - Env `SIGCORE_VOICE_CALLER_ID_ENFORCEMENT=off` → log-only,
+    //     preserves pre-Task-4 behaviour for rollback without a redeploy.
+    // ------------------------------------------------------------------
+    const enforcement =
+      (this.configService.get<string>('SIGCORE_VOICE_CALLER_ID_ENFORCEMENT') ??
+        'on').toLowerCase();
+    const enforce = enforcement !== 'off';
+
+    let resolvedIntegrationId: string | null = null;
+    let ownershipRejected = false;
+
+    if (this.providerContextResolver) {
+      try {
+        const context = await this.providerContextResolver.resolve({
+          workspaceId,
+          provider: ProviderType.TWILIO,
+          fromNumber,
+        });
+        if (context.rule === 'by_number') {
+          resolvedIntegrationId = context.integration.id;
+        } else {
+          // Legacy fallback or any other rule means the number was NOT
+          // found in the workspace's TPN allocation → not owned.
+          ownershipRejected = true;
+          this.logger.warn(
+            `[CALLER-ID REJECT] workspace=${workspaceId} From=${fromNumber} to=${toNumber} rule=${context.rule} enforce=${enforce}`,
+          );
+        }
+      } catch (err: any) {
+        ownershipRejected = true;
+        this.logger.warn(
+          `[CALLER-ID REJECT] workspace=${workspaceId} From=${fromNumber} to=${toNumber} resolver_error=${err?.message} enforce=${enforce}`,
+        );
+      }
+    } else {
+      // Resolver absent — old test constructors or partial DI graphs. Log
+      // once so the gap is visible; do not block outbound calls in that
+      // case (would break unit tests that construct the service directly).
+      this.logger.warn(
+        `[CALLER-ID SKIP] workspace=${workspaceId} From=${fromNumber} — ProviderContextResolver not wired`,
+      );
+    }
+
+    if (ownershipRejected && enforce) {
+      // Return TwiML that plays a message and hangs up. Twilio treats this
+      // as normal call completion; the browser Call transitions to
+      // 'disconnect' cleanly rather than 'error'.
+      const VoiceResponseReject = twilio.twiml.VoiceResponse;
+      const rejectResp = new VoiceResponseReject();
+      rejectResp.say(
+        'This caller ID is not authorized for your account. Please contact your administrator.',
+      );
+      rejectResp.hangup();
+      return rejectResp.toString();
+    }
 
     // Find or create conversation
     let conversation = await this.conversationRepo.findOne({
@@ -921,7 +1000,16 @@ export class TwilioWebhooksService {
       this.logger.log(`Created conversation ${conversation.id} for outgoing call`);
     }
 
-    // Create call record
+    // Create call record. Stamped with:
+    //   - `communicationIntegrationId`: enables ProviderContextResolver
+    //     Rule 2 (by_stamped_resource) for downstream ops (hangup / recording
+    //     lookup / etc.) without re-resolving from `From`.
+    //   - `metadata.origin`: distinguishes browser-initiated calls from
+    //     server-initiated (AI outbound) calls. Load-bearing for future
+    //     analytics like "PSTN → browser → AI → transfer" attribution.
+    //   - `metadata.callerIdentity`: Twilio's `Caller` field carries
+    //     `client:<identity>` for Voice SDK calls, which decodes back to
+    //     the workspace+user that initiated the call.
     const call = this.callRepo.create({
       conversationId: conversation.id,
       direction: CallDirection.OUT,
@@ -931,8 +1019,11 @@ export class TwilioWebhooksService {
       providerCallId: payload.CallSid,
       status: CallStatus.COMPLETED, // Will be updated via status callback
       startedAt: new Date(),
+      communicationIntegrationId: resolvedIntegrationId ?? undefined,
       metadata: {
         status: payload.CallStatus,
+        origin: 'browser_sdk',
+        callerIdentity: payload.Caller ?? null,
       },
     });
 

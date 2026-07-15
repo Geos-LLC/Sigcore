@@ -124,4 +124,113 @@ describe('SigcoreAuthGuard', () => {
       await expect(guard.canActivate(ctx as any)).rejects.toThrow(UnauthorizedException);
     });
   });
+
+  // ===================== X-User-Id per-user scope =====================
+  // Callio's proxy today authenticates via x-api-key, so X-User-Id must be
+  // readable on BOTH paths. Absence is legacy-compatible (workspace-only
+  // scope). Malformed values fail loud rather than silently degrading — a
+  // malformed value is a bug on the consumer side, not a runtime condition.
+  describe('X-User-Id per-user scope', () => {
+    describe('on the x-sigcore-key (service) path', () => {
+      it('attaches userId when a well-formed X-User-Id is supplied', async () => {
+        const { guard } = buildGuard('key');
+        const ctx = mockContext({
+          'x-sigcore-key': 'key',
+          'x-workspace-id': 'ws-1',
+          'x-user-id': 'user-abc-123',
+        });
+
+        const result = await guard.canActivate(ctx as any);
+
+        expect(result).toBe(true);
+        expect(ctx.request.userId).toBe('user-abc-123');
+      });
+
+      it('leaves userId undefined when X-User-Id is absent (legacy preserved)', async () => {
+        const { guard } = buildGuard('key');
+        const ctx = mockContext({
+          'x-sigcore-key': 'key',
+          'x-workspace-id': 'ws-1',
+        });
+
+        await guard.canActivate(ctx as any);
+        expect(ctx.request.userId).toBeUndefined();
+      });
+    });
+
+    describe('on the x-api-key path (Callio proxy uses this today)', () => {
+      it('attaches userId when a well-formed X-User-Id is supplied', async () => {
+        const { guard, apiKeyRepo } = buildGuard();
+        apiKeyRepo.findOne.mockResolvedValue({
+          key: 'sc_abc123',
+          workspaceId: 'ws-1',
+          tenantId: null,
+          scope: 'workspace',
+          active: true,
+          lastUsedAt: null,
+        });
+
+        const ctx = mockContext({
+          'x-api-key': 'sc_abc123',
+          'x-user-id': 'user-abc-123',
+        });
+
+        const result = await guard.canActivate(ctx as any);
+        expect(result).toBe(true);
+        expect(ctx.request.userId).toBe('user-abc-123');
+        expect(ctx.request.workspaceId).toBe('ws-1');
+      });
+
+      it('leaves userId undefined when X-User-Id is absent (legacy consumers)', async () => {
+        const { guard, apiKeyRepo } = buildGuard();
+        apiKeyRepo.findOne.mockResolvedValue({
+          key: 'sc_abc123',
+          workspaceId: 'ws-1',
+          tenantId: null,
+          scope: 'workspace',
+          active: true,
+          lastUsedAt: null,
+        });
+
+        const ctx = mockContext({ 'x-api-key': 'sc_abc123' });
+        await guard.canActivate(ctx as any);
+        expect(ctx.request.userId).toBeUndefined();
+      });
+    });
+
+    describe('validation (applied uniformly on both paths)', () => {
+      it('rejects X-User-Id with disallowed characters', async () => {
+        const { guard } = buildGuard('key');
+        const ctx = mockContext({
+          'x-sigcore-key': 'key',
+          'x-workspace-id': 'ws-1',
+          'x-user-id': 'user<script>',
+        });
+
+        await expect(guard.canActivate(ctx as any)).rejects.toThrow(UnauthorizedException);
+      });
+
+      it('rejects X-User-Id longer than 64 characters', async () => {
+        const { guard } = buildGuard('key');
+        const ctx = mockContext({
+          'x-sigcore-key': 'key',
+          'x-workspace-id': 'ws-1',
+          'x-user-id': 'a'.repeat(65),
+        });
+
+        await expect(guard.canActivate(ctx as any)).rejects.toThrow(UnauthorizedException);
+      });
+
+      it('rejects empty X-User-Id header', async () => {
+        const { guard } = buildGuard('key');
+        const ctx = mockContext({
+          'x-sigcore-key': 'key',
+          'x-workspace-id': 'ws-1',
+          'x-user-id': '',
+        });
+
+        await expect(guard.canActivate(ctx as any)).rejects.toThrow(UnauthorizedException);
+      });
+    });
+  });
 });
