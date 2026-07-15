@@ -1431,14 +1431,35 @@ export class IntegrationsService {
     const workspace = await this.ensureWorkspace(workspaceId);
     this.logger.log(`Found workspace: ${workspace.name}`);
 
-    // Get Twilio integration with voice credentials
-    const integration = await this.integrationRepo.findOne({
-      where: {
-        workspaceId,
-        provider: ProviderType.TWILIO,
-        status: IntegrationStatus.ACTIVE,
-      },
-    });
+    // Post-Wave-2, a workspace may hold TWO Twilio integrations:
+    //   - workspace-scoped (owner_tenant_id IS NULL) — the LB shared row
+    //   - tenant-scoped (owner_tenant_id = X)        — the Callio row
+    // Voice SDK credentials (voiceApiKey/Secret/TwimlAppSid) live on the
+    // TENANT-scoped row (provisioned via POST /integrations/:id/provision-
+    // voice). Prefer the tenant-scoped row so voice-token minting doesn't
+    // pick up the workspace-scoped LB row which never has voice creds.
+    // Fall back to workspace-scoped for pre-Wave-2 workspaces where the
+    // only integration is the legacy shared one.
+    //
+    // Same shape as the `ensureIntegration` fix from Incident 2026-07-14
+    // Phase 5a (commit e203b1b) — established pattern.
+    let integration = await this.integrationRepo
+      .createQueryBuilder('i')
+      .where('i.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('i.provider = :provider', { provider: ProviderType.TWILIO })
+      .andWhere('i.status = :status', { status: IntegrationStatus.ACTIVE })
+      .andWhere('i.owner_tenant_id IS NOT NULL')
+      .orderBy('i.created_at', 'DESC')
+      .getOne();
+    if (!integration) {
+      integration = await this.integrationRepo.findOne({
+        where: {
+          workspaceId,
+          provider: ProviderType.TWILIO,
+          status: IntegrationStatus.ACTIVE,
+        },
+      });
+    }
 
     if (!integration) {
       this.logger.error(`Twilio integration not found for workspace ${workspaceId}`);
