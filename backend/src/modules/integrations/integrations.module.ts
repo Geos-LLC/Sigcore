@@ -4,6 +4,7 @@ import { IntegrationsController, IntegrationsV1Controller } from './integrations
 import { IntegrationsService } from './integrations.service';
 import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
 import { TwilioSubaccountProvisionerService } from './twilio-subaccount-provisioner.service';
+import { TwilioVoiceProvisionerService } from './twilio-voice-provisioner.service';
 import { CommunicationIntegration } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
@@ -57,6 +58,10 @@ import {
     WhatsAppWebProvider,
     SfAuthGuard,
     TwilioSubaccountProvisionerService,
+    // Feature 2 (Browser Softphone) — provisions Voice SDK credentials
+    // (voiceApiKey/voiceApiSecret/voiceTwimlAppSid) on an existing Twilio
+    // integration. Idempotent and admin-only.
+    TwilioVoiceProvisionerService,
     // Incident 2026-07-14 Phase 2 — ProviderContextResolver + event emitter.
     ProviderContextResolver,
     {
@@ -69,6 +74,7 @@ import {
     OpenPhoneContactCacheService,
     WhatsAppWebProvider,
     TwilioSubaccountProvisionerService,
+    TwilioVoiceProvisionerService,
     ProviderContextResolver,
     PROVIDER_CONTEXT_EVENT_EMITTER,
   ],

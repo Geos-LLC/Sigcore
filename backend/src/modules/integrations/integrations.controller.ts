@@ -10,9 +10,11 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  Param,
 } from '@nestjs/common';
 import { IntegrationsService } from './integrations.service';
 import { OpenPhoneContactCacheService } from './openphone-contact-cache.service';
+import { TwilioVoiceProvisionerService } from './twilio-voice-provisioner.service';
 import { CommunicationService } from '../communication/communication.service';
 import {
   SetupIntegrationDto,
@@ -47,6 +49,7 @@ export class IntegrationsController {
     private readonly integrationsService: IntegrationsService,
     private readonly communicationService: CommunicationService,
     private readonly contactCache: OpenPhoneContactCacheService,
+    private readonly twilioVoiceProvisioner: TwilioVoiceProvisionerService,
   ) {}
 
   // ==================== GENERAL INTEGRATION ENDPOINTS ====================
@@ -511,6 +514,34 @@ export class IntegrationsController {
       body.callerId,
     );
     return { data: { twiml } };
+  }
+
+  /**
+   * Feature 2 — Voice SDK credential provisioning.
+   *
+   * Provisions `voiceApiKey`, `voiceApiSecret`, `voiceTwimlAppSid` onto an
+   * existing Twilio communication_integrations row so browser softphones
+   * can mint Voice SDK access tokens.
+   *
+   * Auth: SigcoreAuthGuard (X-Sigcore-Key or admin x-api-key). The service
+   * additionally verifies the integration belongs to the caller's workspace.
+   *
+   * Idempotent: safe to call repeatedly. Sigcore adopts existing TwiML Apps
+   * by FriendlyName; API Keys are only created when Sigcore has no record.
+   *
+   * Never returns secrets. Response contains masked SIDs only.
+   */
+  @Post(':id/provision-voice')
+  @HttpCode(HttpStatus.OK)
+  async provisionVoice(
+    @Param('id') integrationId: string,
+    @WorkspaceId() workspaceId: string,
+  ) {
+    const result = await this.twilioVoiceProvisioner.provisionVoice(
+      integrationId,
+      workspaceId,
+    );
+    return { data: result };
   }
 }
 
