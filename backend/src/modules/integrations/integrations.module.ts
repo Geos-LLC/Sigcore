@@ -25,6 +25,8 @@ import { SfWhatsAppController } from './sf-whatsapp.controller';
 import { SfAuthGuard } from '../auth/sf-auth.guard';
 import { CommunicationModule } from '../communication/communication.module';
 import { ProviderContextResolver } from './provider-context-resolver.service';
+import { ProviderContextAuditService } from './provider-context-audit.service';
+import { ProviderContextAuditController } from './provider-context-audit.controller';
 import {
   LoggingProviderContextEventEmitter,
   PROVIDER_CONTEXT_EVENT_EMITTER,
@@ -47,7 +49,14 @@ import {
     ]),
     forwardRef(() => CommunicationModule),
   ],
-  controllers: [IntegrationsController, IntegrationsV1Controller, WhatsAppController, SfWhatsAppController],
+  controllers: [
+    IntegrationsController,
+    IntegrationsV1Controller,
+    WhatsAppController,
+    SfWhatsAppController,
+    // 2026-07-18 Wave-3 completion — admin audit for provider-context ownership.
+    ProviderContextAuditController,
+  ],
   providers: [
     IntegrationsService,
     OpenPhoneContactCacheService,
@@ -68,6 +77,8 @@ import {
       provide: PROVIDER_CONTEXT_EVENT_EMITTER,
       useClass: LoggingProviderContextEventEmitter,
     },
+    // 2026-07-18 Wave-3 completion — provider-context audit service.
+    ProviderContextAuditService,
   ],
   exports: [
     IntegrationsService,
@@ -76,6 +87,7 @@ import {
     TwilioSubaccountProvisionerService,
     TwilioVoiceProvisionerService,
     ProviderContextResolver,
+    ProviderContextAuditService,
     PROVIDER_CONTEXT_EVENT_EMITTER,
   ],
 })
