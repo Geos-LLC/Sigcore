@@ -485,6 +485,73 @@ describe('ProviderContextResolver — required inputs', () => {
 });
 
 // -----------------------------------------------------------------------
+// 2026-07-18 — structured ambiguity + not-found bodies
+// -----------------------------------------------------------------------
+describe('ProviderContextResolver — structured error bodies', () => {
+  it('rule 4 ambiguity: exception body carries workspaceId, provider, resolutionStage, candidate ids', async () => {
+    const { svc, integrationRepo } = build('compatibility');
+    integrationRepo.find.mockResolvedValueOnce([
+      twilioIntegration({ id: 'int-workspace', scopeType: 'WORKSPACE', ownerTenantId: null }),
+      twilioTenantIntegration({ id: 'int-tenant', scopeType: 'TENANT', ownerTenantId: OTHER_TENANT }),
+    ]);
+
+    try {
+      await svc.resolve({ workspaceId: WS, provider: ProviderType.TWILIO });
+      throw new Error('expected ConflictException');
+    } catch (err: any) {
+      const body = err.getResponse();
+      expect(body.error).toBe('ProviderContextAmbiguous');
+      expect(body.workspaceId).toBe(WS);
+      expect(body.provider).toBe(ProviderType.TWILIO);
+      expect(body.resolutionStage).toBe('by_legacy_workspace_fallback');
+      expect(body.candidateIntegrationIds).toEqual(['int-workspace', 'int-tenant']);
+      expect(body.candidateOwnerTenantIds).toEqual([null, OTHER_TENANT]);
+      expect(body.candidateScopeTypes).toEqual(['WORKSPACE', 'TENANT']);
+      expect(body.hint).toContain('integrationId');
+    }
+  });
+
+  it('rule 3 ambiguity: exception body carries candidate ids for tenant-scoped rows', async () => {
+    const { svc, integrationRepo } = build('compatibility');
+    integrationRepo.find.mockResolvedValueOnce([
+      twilioTenantIntegration({ id: 'a' }),
+      twilioTenantIntegration({ id: 'b' }),
+    ]);
+
+    try {
+      await svc.resolve({
+        workspaceId: WS,
+        provider: ProviderType.TWILIO,
+        tenantId: TENANT,
+      });
+      throw new Error('expected ConflictException');
+    } catch (err: any) {
+      const body = err.getResponse();
+      expect(body.resolutionStage).toBe('by_tenant');
+      expect(body.candidateIntegrationIds).toEqual(['a', 'b']);
+    }
+  });
+
+  it('not-found body: exception carries workspaceId, provider, resolutionStage, empty candidate list', async () => {
+    const { svc, integrationRepo } = build('compatibility');
+    integrationRepo.find.mockResolvedValueOnce([]);
+
+    try {
+      await svc.resolve({ workspaceId: WS, provider: ProviderType.TWILIO });
+      throw new Error('expected NotFoundException');
+    } catch (err: any) {
+      const body = err.getResponse();
+      expect(body.error).toBe('ProviderContextNotFound');
+      expect(body.workspaceId).toBe(WS);
+      expect(body.provider).toBe(ProviderType.TWILIO);
+      expect(body.resolutionStage).toBe('by_legacy_workspace_fallback');
+      expect(body.candidateIntegrationIds).toEqual([]);
+      expect(body.hint).toContain('POST /v1/integrations/ensure');
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
 // Mode selection
 // -----------------------------------------------------------------------
 describe('ProviderContextResolver — mode selection', () => {

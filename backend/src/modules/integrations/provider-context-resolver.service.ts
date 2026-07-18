@@ -288,9 +288,18 @@ export class ProviderContextResolver {
           candidateCount: candidates.length,
           reason: 'multiple_tenant_scoped_integrations',
         });
-        throw new ConflictException(
-          'ProviderContextResolver: multiple tenant-scoped integrations match; supply integrationId',
-        );
+        throw new ConflictException({
+          error: 'ProviderContextAmbiguous',
+          message:
+            'multiple tenant-scoped integrations match; supply integrationId, fromNumber, or providerResourceSid',
+          workspaceId,
+          provider,
+          resolutionStage: 'by_tenant',
+          candidateIntegrationIds: candidates.map((c) => c.id),
+          candidateOwnerTenantIds: candidates.map((c) => c.ownerTenantId ?? null),
+          candidateScopeTypes: candidates.map((c) => c.scopeType),
+          hint: 'supply integrationId, fromNumber, or providerResourceSid',
+        });
       }
     }
 
@@ -347,14 +356,31 @@ export class ProviderContextResolver {
           candidateCount: legacyCandidates.length,
           reason: 'multiple_workspace_integrations',
         });
-        throw new ConflictException(
-          'ProviderContextResolver: multiple integrations for this (workspace, provider); supply integrationId, tpnId, or tenantId',
-        );
+        throw new ConflictException({
+          error: 'ProviderContextAmbiguous',
+          message:
+            'multiple integrations for this (workspace, provider); supply integrationId, tpnId, or tenantId',
+          workspaceId,
+          provider,
+          resolutionStage: 'by_legacy_workspace_fallback',
+          candidateIntegrationIds: legacyCandidates.map((c) => c.id),
+          candidateOwnerTenantIds: legacyCandidates.map(
+            (c) => c.ownerTenantId ?? null,
+          ),
+          candidateScopeTypes: legacyCandidates.map((c) => c.scopeType),
+          hint: 'supply integrationId, tpnId, or tenantId',
+        });
       } else {
         // Zero candidates — no integration exists at all.
-        throw new NotFoundException(
-          'ProviderContextResolver: no integration found for the requested (workspace, provider)',
-        );
+        throw new NotFoundException({
+          error: 'ProviderContextNotFound',
+          message: 'no integration found for the requested (workspace, provider)',
+          workspaceId,
+          provider,
+          resolutionStage: 'by_legacy_workspace_fallback',
+          candidateIntegrationIds: [],
+          hint: 'create an integration via POST /v1/integrations/ensure',
+        });
       }
     }
 
