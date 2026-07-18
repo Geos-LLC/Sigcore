@@ -39,10 +39,21 @@ export class BackfillTpnCommunicationIntegrationId1775000000000
 {
   public async up(queryRunner: QueryRunner): Promise<void> {
     // Rule 1 — TENANT-scoped exact match.
-    // Note the `provider::text` cast: tenant_phone_numbers.provider is
-    // its own enum type (openphone/twilio/whatsapp) while
-    // communication_integrations.provider uses a different enum. Cast to
-    // text on both sides to compare by the underlying string value.
+    //
+    // Every id-column comparison here is wrapped in `::text` casts
+    // because the base schema mixes types across tables:
+    //   - `tenant_phone_numbers.workspace_id` / `tenant_id` are `varchar`
+    //     (InitialSchema, 2026-02).
+    //   - `communication_integrations.workspace_id` is `varchar`.
+    //   - `communication_integrations.owner_tenant_id` is `uuid`
+    //     (added by 1774000000000).
+    //   - `provider` enums differ between the two tables.
+    //
+    // Prod avoided the mismatch because rows were inserted with UUID-
+    // shaped strings on both sides — Postgres' runtime cast succeeded.
+    // A fresh migration run against an empty DB rejects the join at
+    // plan time. Casting to text keeps behavior identical in both
+    // environments.
     await queryRunner.query(`
       UPDATE tenant_phone_numbers AS tpn
       SET communication_integration_id = ci.id, updated_at = NOW()
@@ -50,10 +61,10 @@ export class BackfillTpnCommunicationIntegrationId1775000000000
       WHERE tpn.communication_integration_id IS NULL
         AND tpn.status = 'active'
         AND ci.status = 'active'
-        AND ci.workspace_id = tpn.workspace_id
+        AND ci.workspace_id::text = tpn.workspace_id::text
         AND ci.provider::text = tpn.provider::text
         AND ci.scope_type = 'TENANT'
-        AND ci.owner_tenant_id = tpn.tenant_id
+        AND ci.owner_tenant_id::text = tpn.tenant_id::text
     `);
 
     // Rule 2 — WORKSPACE-scoped fallback.
@@ -64,7 +75,7 @@ export class BackfillTpnCommunicationIntegrationId1775000000000
       WHERE tpn.communication_integration_id IS NULL
         AND tpn.status = 'active'
         AND ci.status = 'active'
-        AND ci.workspace_id = tpn.workspace_id
+        AND ci.workspace_id::text = tpn.workspace_id::text
         AND ci.provider::text = tpn.provider::text
         AND ci.scope_type = 'WORKSPACE'
         AND ci.owner_tenant_id IS NULL
@@ -92,7 +103,7 @@ export class BackfillTpnCommunicationIntegrationId1775000000000
       ) pick
       WHERE tpn.communication_integration_id IS NULL
         AND tpn.status = 'active'
-        AND pick.workspace_id = tpn.workspace_id
+        AND pick.workspace_id::text = tpn.workspace_id::text
         AND pick.provider::text = tpn.provider::text
     `);
 
@@ -103,7 +114,7 @@ export class BackfillTpnCommunicationIntegrationId1775000000000
       SET communication_integration_id = tpn.communication_integration_id, updated_at = NOW()
       FROM tenant_phone_numbers tpn
       WHERE ord.communication_integration_id IS NULL
-        AND ord.tenant_phone_number_id = tpn.id
+        AND ord.tenant_phone_number_id::text = tpn.id::text
         AND tpn.communication_integration_id IS NOT NULL
     `);
   }

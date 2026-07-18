@@ -227,23 +227,23 @@ export class ProviderContextAuditService {
       SELECT
         t.tenant_id::text AS "tenantId",
         t.workspace_id::text AS "workspaceId",
-        EXISTS (SELECT 1 FROM communication_businesses b WHERE b.tenant_id = t.tenant_id) AS "hasBusiness",
-        EXISTS (SELECT 1 FROM communication_profiles p WHERE p.tenant_id = t.tenant_id) AS "hasProfile",
+        EXISTS (SELECT 1 FROM communication_businesses b WHERE b.tenant_id::text = t.tenant_id::text) AS "hasBusiness",
+        EXISTS (SELECT 1 FROM communication_profiles p WHERE p.tenant_id::text = t.tenant_id::text) AS "hasProfile",
         EXISTS (
           SELECT 1
           FROM profile_phone_assignments ppa
           JOIN communication_profiles p ON p.id = ppa.profile_id
-          WHERE p.tenant_id = t.tenant_id
+          WHERE p.tenant_id::text = t.tenant_id::text
             AND ppa.active = TRUE
         ) AS "hasPpa"
       FROM tenants_with_tpn t
-      WHERE NOT EXISTS (SELECT 1 FROM communication_businesses b WHERE b.tenant_id = t.tenant_id)
-         OR NOT EXISTS (SELECT 1 FROM communication_profiles p WHERE p.tenant_id = t.tenant_id)
+      WHERE NOT EXISTS (SELECT 1 FROM communication_businesses b WHERE b.tenant_id::text = t.tenant_id::text)
+         OR NOT EXISTS (SELECT 1 FROM communication_profiles p WHERE p.tenant_id::text = t.tenant_id::text)
          OR NOT EXISTS (
               SELECT 1
               FROM profile_phone_assignments ppa
               JOIN communication_profiles p ON p.id = ppa.profile_id
-              WHERE p.tenant_id = t.tenant_id
+              WHERE p.tenant_id::text = t.tenant_id::text
                 AND ppa.active = TRUE
             )
       ORDER BY t.workspace_id, t.tenant_id

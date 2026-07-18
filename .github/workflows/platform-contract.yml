@@ -1,0 +1,67 @@
+name: Platform Contract
+
+# Runs the platform-contract test suite against a real Postgres.
+# See PLATFORM_CONTRACT.md for the invariants under test.
+#
+# Triggers:
+#   - Every PR (validates the invariants pre-merge)
+#   - Push to main / staging (regression barrier post-merge)
+#   - Manual dispatch for on-demand runs
+
+on:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/platform-contract.yml'
+  push:
+    branches: [main, staging]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/platform-contract.yml'
+  workflow_dispatch:
+
+jobs:
+  platform-contract:
+    name: Platform Contract Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: platform-contract
+          POSTGRES_DB: platform_contract
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend deps
+        working-directory: backend
+        run: npm ci
+
+      - name: Run platform-contract suite
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:platform-contract@localhost:5432/platform_contract
+          NODE_ENV: test
+          # Deterministic key for the EncryptionService — the harness sets
+          # this too but env-level is more resilient to future harness
+          # changes.
+          ENCRYPTION_KEY: platform-contract-test-key-32-bytes-long
+        run: npm run test:platform
