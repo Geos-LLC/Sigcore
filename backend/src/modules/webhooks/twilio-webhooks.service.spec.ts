@@ -74,7 +74,11 @@ describe('TwilioWebhooksService.getAuthToken — Phase 4a defensive lookup', () 
     expect(token).toBe('tok_from_encrypted');
   });
 
-  it('getAuthToken_falls_back_to_workspace_only_when_accountSid_absent — where clause omits externalWorkspaceId', async () => {
+  it('getAuthToken_falls_back_to_workspace_scoped_only_when_accountSid_absent — where clause omits externalWorkspaceId and constrains to ownerTenantId IS NULL', async () => {
+    // Wave-3 completion 2026-07-18: the AccountSid-less fallback now
+    // constrains to WORKSPACE-scoped rows (ownerTenantId IS NULL) so the
+    // signature check can never accidentally decrypt a tenant-scoped
+    // row's authToken. See TwilioWebhooksService.getAuthToken comment.
     const { svc, integrationRepo } = buildSvc();
     integrationRepo.findOne.mockResolvedValue({
       id: 'int-legacy',
@@ -85,11 +89,13 @@ describe('TwilioWebhooksService.getAuthToken — Phase 4a defensive lookup', () 
 
     expect(integrationRepo.findOne).toHaveBeenCalledTimes(1);
     const call = integrationRepo.findOne.mock.calls[0][0];
-    expect(call.where).toEqual({
-      workspaceId: 'ws-1',
-      provider: ProviderType.TWILIO,
-    });
+    expect(call.where.workspaceId).toBe('ws-1');
+    expect(call.where.provider).toBe(ProviderType.TWILIO);
     expect(call.where.externalWorkspaceId).toBeUndefined();
+    // The ownerTenantId constraint is a typeorm FindOperator (IsNull()).
+    // Match its shape rather than the exact instance.
+    expect(call.where.ownerTenantId).toBeDefined();
+    expect(call.where.ownerTenantId?._type).toBe('isNull');
     expect(token).toBe('tok_from_encrypted');
   });
 

@@ -6,7 +6,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import {
   TenantPhoneNumber,
@@ -108,6 +108,64 @@ export class PhoneNumberProvisioningService {
     // preflight + state-machine logic is testable in isolation.
     private twilioSubaccountProvisioner: TwilioSubaccountProvisionerService,
   ) {}
+
+  /**
+   * Wave-3 completion 2026-07-18 — resolve the correct
+   * `communication_integrations.id` to stamp on a freshly created
+   * TenantPhoneNumber. Deterministic; mirrors `ProviderContextResolver`'s
+   * rules 3 → 4 without throwing (returns null on ambiguity so callers
+   * can log and continue rather than roll back a Twilio purchase).
+   *
+   * Priority:
+   *   1. TENANT-scoped row for (workspaceId, provider, ownerTenantId=tenantId)
+   *   2. WORKSPACE-scoped row for (workspaceId, provider, ownerTenantId IS NULL)
+   *   3. Legacy — exactly one active row for (workspaceId, provider)
+   *      regardless of scope. This matches the resolver's compatibility
+   *      mode and covers pre-Wave-2 workspaces.
+   *
+   * Returns null (with a warning log) when zero or >1 candidates are
+   * ambiguous. The TPN is left unstamped in that case and the
+   * `audit-provider-context` report surfaces it for manual repair.
+   */
+  private async resolveIntegrationIdForTpnStamp(
+    workspaceId: string,
+    tenantId: string,
+    provider: ProviderType,
+  ): Promise<string | null> {
+    // Rule 3 — TENANT-scoped
+    const tenantScoped = await this.integrationRepo.findOne({
+      where: {
+        workspaceId,
+        provider,
+        scopeType: 'TENANT',
+        ownerTenantId: tenantId,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+    if (tenantScoped) return tenantScoped.id;
+
+    // Rule 4 — WORKSPACE-scoped
+    const workspaceScoped = await this.integrationRepo.findOne({
+      where: {
+        workspaceId,
+        provider,
+        ownerTenantId: IsNull(),
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+    if (workspaceScoped) return workspaceScoped.id;
+
+    // Legacy — any single active row
+    const legacy = await this.integrationRepo.find({
+      where: { workspaceId, provider, status: IntegrationStatus.ACTIVE },
+    });
+    if (legacy.length === 1) return legacy[0].id;
+
+    this.logger.warn(
+      `[stampTpn] ambiguous or missing integration for workspace=${workspaceId} tenant=${tenantId} provider=${provider} (candidates=${legacy.length}); TPN left unstamped`,
+    );
+    return null;
+  }
 
   /**
    * Materialize the (CommunicationBusiness → default CommunicationProfile →
@@ -424,6 +482,21 @@ export class PhoneNumberProvisioningService {
         },
       });
       await this.tenantPhoneRepo.save(allocation);
+
+      // Wave-3 completion 2026-07-18 — stamp TPN.communication_integration_id
+      // so ProviderContextResolver rule 1 (by_number) resolves this TPN
+      // deterministically. Missing this stamp is the exact bug that broke
+      // Natallia + K&D on 2026-07-16 (409 ambiguous).
+      const intId = await this.resolveIntegrationIdForTpnStamp(
+        workspaceId, tenantId, PhoneNumberProvider.TWILIO as unknown as ProviderType,
+      );
+      if (intId) {
+        allocation.communicationIntegrationId = intId;
+        await this.tenantPhoneRepo.save(allocation);
+        // Also stamp the order for symmetry — any downstream analysis
+        // (billing, audit) can trace the purchase back to the integration.
+        order.communicationIntegrationId = intId;
+      }
 
       // Materialize CommunicationBusiness → default CommunicationProfile →
       // ProfilePhoneAssignment so outbound resolution accepts the new
@@ -1140,6 +1213,20 @@ export class PhoneNumberProvisioningService {
     }
 
     await this.tenantPhoneRepo.save(allocation);
+
+    // Wave-3 completion 2026-07-18 — stamp TPN.communication_integration_id
+    // for the re-homed row (or for a legacy row that never carried the
+    // stamp before). Same rationale as purchaseNumber.
+    if (!allocation.communicationIntegrationId) {
+      const intId = await this.resolveIntegrationIdForTpnStamp(
+        workspaceId, newTenantId, PhoneNumberProvider.TWILIO as unknown as ProviderType,
+      );
+      if (intId) {
+        allocation.communicationIntegrationId = intId;
+        await this.tenantPhoneRepo.save(allocation);
+      }
+    }
+
     this.logger.log(
       `[reallocatePhoneNumber] ${phoneNumber} re-homed to tenant ${newTenantId} (workspace: ${workspaceId})`,
     );

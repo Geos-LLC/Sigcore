@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenEx
 import { InjectRepository } from '@nestjs/typeorm';
 import { normalizeToE164 } from '../../common/util/phone';
 import { OpenPhoneContactCacheService } from '../integrations/openphone-contact-cache.service';
-import { Repository, In } from 'typeorm';
+import { Repository, In, IsNull } from 'typeorm';
 import {
   CommunicationIntegration,
   ProviderType,
@@ -2556,8 +2556,12 @@ export class CommunicationService {
 
     const encryptedCredentials = this.encryptionService.encrypt(credentialsString);
 
+    // Wave-3 completion 2026-07-18: constrain to WORKSPACE-scoped row only.
+    // A workspace may now hold multiple integrations for the same provider
+    // (workspace-scoped + N tenant-scoped). This admin-facing setup path is
+    // workspace-level; it must never rotate a TENANT-scoped row's creds.
     let integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider },
+      where: { workspaceId, provider, ownerTenantId: IsNull() },
     });
 
     if (integration) {
@@ -2569,6 +2573,9 @@ export class CommunicationService {
         provider,
         credentialsEncrypted: encryptedCredentials,
         externalWorkspaceId,
+        // Wave-3 completion 2026-07-18: explicit scope stamp.
+        scopeType: 'WORKSPACE',
+        ownerTenantId: null,
       });
     }
 
