@@ -16,6 +16,10 @@ import {
 } from '@nestjs/common';
 import { TenantsService, CreateTenantDto, AllocatePhoneNumberDto, ConnectTenantIntegrationDto } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
+import {
+  CommunicationProvisioningService,
+  ProvisionCommunicationChainInput,
+} from './communication-provisioning.service';
 import { SetVoiceWebhookDto } from './dto/voice-webhook.dto';
 import { validateVoiceInboundUrl } from './voice-webhook-url.validator';
 import { ConfigService } from '@nestjs/config';
@@ -56,6 +60,9 @@ export class TenantsController {
     private readonly provisioningService: PhoneNumberProvisioningService,
     private readonly apiKeysService: ApiKeysService,
     private readonly communicationService: CommunicationService,
+    // Wave-3 completion 2026-07-18 — one-shot communication-ready provisioning
+    // + tenant-level readiness reporting.
+    private readonly communicationProvisioningService: CommunicationProvisioningService,
   ) {}
 
   private assertCanAccessTenant = assertCanAccessTenant;
@@ -102,6 +109,17 @@ export class TenantsController {
       allowInactive?: boolean;
       /** When true, skip minting a new key if an active key already exists. */
       reuseActiveKey?: boolean;
+      /**
+       * Wave-3 completion 2026-07-18 — optional one-shot communication
+       * chain provisioning. When present, `provisionCommunicationChain`
+       * runs after the tenant + API key are ready, materializing the
+       * `communication_business` + default `communication_profile` (plus
+       * PPA + TPN stamp when `phoneNumber` supplied, plus a
+       * webhook_subscription when `webhook.url` supplied). Purely
+       * additive — omitting the block preserves the pre-existing
+       * two-step flow byte-for-byte.
+       */
+      communication?: ProvisionCommunicationChainInput;
     },
   ) {
     const helpers = await import('./idempotent-provisioning.helpers');
@@ -148,6 +166,30 @@ export class TenantsController {
       issuedKey = result.key;
     }
 
+    // Wave-3 completion 2026-07-18 — optional one-shot communication chain.
+    // Runs AFTER tenant + API key so the tenant row exists for the
+    // provisioning service to attach chain rows to. Failures here do NOT
+    // roll back the tenant / key creation — the provisioning caller may
+    // retry the block against an already-provisioned tenant since
+    // `provisionCommunicationChain` is idempotent.
+    let communicationResult:
+      | Awaited<
+          ReturnType<CommunicationProvisioningService['provisionCommunicationChain']>
+        >
+      | undefined;
+    let communicationError: string | undefined;
+    if (dto.communication) {
+      try {
+        communicationResult =
+          await this.communicationProvisioningService.provisionCommunicationChain(
+            tenant,
+            dto.communication,
+          );
+      } catch (err: any) {
+        communicationError = err?.message ?? 'unknown';
+      }
+    }
+
     return {
       data: {
         // Back-compat fields (unchanged shape) ----------------------------
@@ -159,8 +201,50 @@ export class TenantsController {
         // PR10 fields -----------------------------------------------------
         reused: { tenant: reused, apiKey: apiKeyReused },
         apiKeySummary,
+        // Wave-3 completion 2026-07-18 fields (only present when caller
+        // supplied `dto.communication`).
+        ...(dto.communication
+          ? {
+              communication: communicationError
+                ? { error: communicationError }
+                : communicationResult,
+            }
+          : {}),
       },
     };
+  }
+
+  /**
+   * Wave-3 completion 2026-07-18 — GET /tenants/:tenantId/communication-readiness
+   *
+   * Returns whether every chain the outbound resolver walks is present
+   * for the tenant: integration, business, profile, PPA (for its active
+   * TPN), and webhook subscription. Used by:
+   *
+   *   - CI post-deploy check (regression barrier for the
+   *     communication-ready invariant).
+   *   - LB / product callers polling after a provision + purchase to
+   *     detect partial-provision states before customer traffic hits
+   *     `INVALID_PROFILE_PHONE` / 409 ambiguous.
+   *
+   * Tenant-scoped keys may only read their own record (assertCanAccessTenant).
+   */
+  @Get(':tenantId/communication-readiness')
+  async getCommunicationReadiness(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() callerTenantId: string | null,
+    @Param('tenantId') tenantId: string,
+  ) {
+    this.assertCanAccessTenant(callerTenantId, tenantId);
+    // `getTenant` throws NotFound if the tenant doesn't belong to the
+    // workspace; readiness responds only on live tenants.
+    const tenant = await this.tenantsService.getTenant(
+      workspaceId,
+      tenantId,
+      callerTenantId,
+    );
+    const data = await this.communicationProvisioningService.getReadiness(tenant);
+    return { data };
   }
 
   /**

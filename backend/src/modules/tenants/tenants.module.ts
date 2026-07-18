@@ -4,6 +4,7 @@ import { TenantsController, TenantsV1Controller } from './tenants.controller';
 import { TenantPortalController } from './tenant-portal.controller';
 import { TenantsService } from './tenants.service';
 import { PhoneNumberProvisioningService } from './phone-number-provisioning.service';
+import { CommunicationProvisioningService } from './communication-provisioning.service';
 import {
   Tenant,
   TenantPhoneNumber,
@@ -47,7 +48,19 @@ import { IntegrationsModule } from '../integrations/integrations.module';
     forwardRef(() => IntegrationsModule),
   ],
   controllers: [TenantsController, TenantsV1Controller, TenantPortalController],
-  providers: [TenantsService, PhoneNumberProvisioningService, EncryptionService],
-  exports: [TenantsService, PhoneNumberProvisioningService],
+  providers: [
+    TenantsService,
+    PhoneNumberProvisioningService,
+    // Wave-3 completion 2026-07-18 — one-shot communication-ready provisioning
+    // + readiness reporting for POST /tenants/provision + the
+    // GET /tenants/:id/communication-readiness endpoint.
+    CommunicationProvisioningService,
+    EncryptionService,
+  ],
+  exports: [
+    TenantsService,
+    PhoneNumberProvisioningService,
+    CommunicationProvisioningService,
+  ],
 })
 export class TenantsModule {}
