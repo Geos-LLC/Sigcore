@@ -231,8 +231,14 @@ export class IntegrationsService {
     const webhookUrl = `${baseUrl}/api/webhooks/openphone/${workspace.webhookId}`;
     this.logger.log(`Webhook URL for workspace ${workspaceId}: ${webhookUrl} (BASE_URL config=${this.configService.get('BASE_URL')}, env=${process.env.BASE_URL}, railway=${process.env.RAILWAY_PUBLIC_DOMAIN})`);
 
+    // Wave-3 completion 2026-07-18: constrain to WORKSPACE-scoped row only.
+    // Since Wave-2, a workspace may hold multiple integrations for the same
+    // provider (workspace-scoped + N tenant-scoped). `setupIntegration` is
+    // the workspace-level setup entry point and must never rotate a
+    // tenant-scoped row's credentials. The partial unique index guarantees
+    // there is at most one WORKSPACE-scoped row per (workspace, provider).
     let integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: dto.provider },
+      where: { workspaceId, provider: dto.provider, ownerTenantId: IsNull() },
     });
 
     // Delete old webhooks if updating an existing integration
@@ -282,6 +288,10 @@ export class IntegrationsService {
         webhookSecretEncrypted: encryptedWebhookSecret ?? undefined,
         externalWorkspaceId: dto.externalWorkspaceId,
         status: IntegrationStatus.ACTIVE,
+        // Wave-3 completion 2026-07-18: explicit scope stamp. Workspace-level
+        // setup always creates a WORKSPACE-scoped row.
+        scopeType: 'WORKSPACE',
+        ownerTenantId: null,
         metadata,
       });
     }
@@ -612,8 +622,10 @@ export class IntegrationsService {
       this.logger.warn(`Failed to create TwiML App: ${twimlAppResult.error}`);
     }
 
+    // Wave-3 completion 2026-07-18: constrain to WORKSPACE-scoped row only.
+    // See same-file setupIntegration for rationale.
     let integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.TWILIO },
+      where: { workspaceId, provider: ProviderType.TWILIO, ownerTenantId: IsNull() },
     });
 
     // Configure webhooks on Twilio phone number if provided
@@ -682,6 +694,10 @@ export class IntegrationsService {
         credentialsEncrypted: encryptedCredentials,
         webhookSecretEncrypted: encryptedAuthToken,
         status: IntegrationStatus.ACTIVE,
+        // Wave-3 completion 2026-07-18: explicit scope stamp. Workspace-level
+        // setup always creates a WORKSPACE-scoped row.
+        scopeType: 'WORKSPACE',
+        ownerTenantId: null,
         metadata,
       });
     }

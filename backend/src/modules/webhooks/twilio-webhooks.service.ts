@@ -1,6 +1,6 @@
 import { Injectable, Logger, Optional, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { validateRequest } from 'twilio';
 import * as twilio from 'twilio';
@@ -283,13 +283,22 @@ export class TwilioWebhooksService {
     workspaceId: string,
     accountSid?: string,
   ): Promise<string | null> {
+    // Wave-3 completion 2026-07-18: constrain the AccountSid-less fallback
+    // to WORKSPACE-scoped rows. Delivery-status callbacks that arrive
+    // without an AccountSid hint (older Twilio configs) previously hit
+    // `findOne({workspaceId, provider})`, which returns arbitrary
+    // ordering when the workspace holds both a workspace-scoped LB row
+    // and a tenant-scoped Callio row — causing the signature check to
+    // decrypt the wrong authToken and fail silently. The workspace-scoped
+    // row is the correct fallback because every LB tenant's SMS is sent
+    // via that row.
     const where = accountSid
       ? {
           workspaceId,
           provider: ProviderType.TWILIO,
           externalWorkspaceId: accountSid,
         }
-      : { workspaceId, provider: ProviderType.TWILIO };
+      : { workspaceId, provider: ProviderType.TWILIO, ownerTenantId: IsNull() };
     const integration = await this.integrationRepo.findOne({ where });
 
     if (!integration?.credentialsEncrypted) {

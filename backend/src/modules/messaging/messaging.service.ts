@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as twilio from 'twilio';
 import { SmsMessage, SmsDirection, SmsStatus } from '../../database/entities/sms-message.entity';
@@ -167,9 +167,17 @@ export class MessagingService {
   // ──────────────────────────────────────────────────────────────
 
   async listAssignments(workspaceId: string) {
-    // Auto-register phone numbers from active Twilio integrations so no manual setup is needed
+    // Auto-register phone numbers from active Twilio integrations so no manual setup is needed.
+    // Wave-3 completion 2026-07-18: constrain to WORKSPACE-scoped row. LB's
+    // messaging service is workspace-level; a tenant-scoped row (Callio,
+    // future subaccount tenants) must never be picked here.
     const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+      where: {
+        workspaceId,
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+        ownerTenantId: IsNull(),
+      },
     });
 
     // Resolve phone number: prefer metadata, fall back to encrypted credentials, then query Twilio API
@@ -302,8 +310,10 @@ export class MessagingService {
   }
 
   private async getTwilioClient(workspaceId: string): Promise<twilio.Twilio> {
+    // Wave-3 completion 2026-07-18: constrain to WORKSPACE-scoped row.
+    // See listAssignments for rationale.
     const integration = await this.integrationRepo.findOne({
-      where: { workspaceId, provider: ProviderType.TWILIO },
+      where: { workspaceId, provider: ProviderType.TWILIO, ownerTenantId: IsNull() },
     });
 
     if (!integration?.credentialsEncrypted) {
