@@ -693,19 +693,80 @@ export class PhoneNumberProvisioningService {
         });
       }
 
-      // Release from Twilio
-      await this.twilioProvider.releasePhoneNumber(credentials, allocation.providerId!);
+      // Release from Twilio. If Twilio 404s the stored SID (SIDs can rotate
+      // on subaccount transfers, re-purchases, or manual Console moves —
+      // real-world case observed 2026-07-20 with 4 leaked LB tenant phones
+      // where Sigcore's stored PN...SIDs no longer existed in the account
+      // but the numbers themselves were still there under fresh SIDs),
+      // fall back to a phone-number lookup, update our stored SID, and
+      // retry the release with the current one. If Twilio's account
+      // genuinely doesn't hold the number anymore, treat that as an
+      // already-released success — nothing to do at Twilio, just
+      // deallocate the local record so the ghost row stops showing up in
+      // inventory.
+      let usedSid: string = allocation.providerId!;
+      let sidResolvedViaLookup = false;
+      try {
+        await this.twilioProvider.releasePhoneNumber(credentials, usedSid);
+      } catch (releaseErr: any) {
+        const isNotFound =
+          releaseErr?.status === 404 ||
+          releaseErr?.code === 20404 ||
+          /was not found/i.test(releaseErr?.message ?? '');
+        if (!isNotFound) throw releaseErr;
+
+        this.logger.warn(
+          `Stored SID ${usedSid} not found in Twilio for ${allocation.phoneNumber}; re-resolving via findPhoneNumberSid`,
+        );
+        const currentSid = await this.twilioProvider.findPhoneNumberSid(
+          credentials,
+          allocation.phoneNumber,
+        );
+        if (currentSid && currentSid !== usedSid) {
+          usedSid = currentSid;
+          sidResolvedViaLookup = true;
+          this.logger.log(
+            `Re-resolved ${allocation.phoneNumber}: stored ${allocation.providerId} → current ${usedSid}; retrying release`,
+          );
+          await this.twilioProvider.releasePhoneNumber(credentials, usedSid);
+        } else if (!currentSid) {
+          this.logger.warn(
+            `${allocation.phoneNumber} not in Twilio account at all — deallocating locally as an already-released number`,
+          );
+          // Fall through to the deallocate step below; the Twilio-side is
+          // already clean, no retry needed.
+        } else {
+          // currentSid === usedSid but Twilio still 404s — the number
+          // really is gone from this account under this exact SID. Treat
+          // as already-released and deallocate locally.
+          this.logger.warn(
+            `${allocation.phoneNumber} SID ${usedSid} 404 with no alternative — treating as already-released`,
+          );
+        }
+      }
 
       // Deallocate from tenant
       await this.tenantPhoneRepo.remove(allocation);
 
-      // Update order
+      // Update order — record the SID actually released against, so audit
+      // trails can distinguish "released via stored SID" from "self-healed".
       order.status = PhoneNumberOrderStatus.RELEASED;
       order.completedAt = new Date();
       order.tenantPhoneNumberId = undefined; // Allocation no longer exists
+      order.phoneNumberSid = usedSid;
+      if (sidResolvedViaLookup) {
+        order.metadata = {
+          ...(order.metadata as Record<string, unknown> | undefined ?? {}),
+          selfHealedFromSid: allocation.providerId ?? null,
+          resolvedSid: usedSid,
+        };
+      }
       await this.orderRepo.save(order);
 
-      this.logger.log(`Successfully released ${allocation.phoneNumber} from tenant ${tenantId}`);
+      this.logger.log(
+        `Successfully released ${allocation.phoneNumber} from tenant ${tenantId}` +
+          (sidResolvedViaLookup ? ` (self-healed SID ${allocation.providerId} → ${usedSid})` : ''),
+      );
 
       return {
         success: true,

@@ -1226,6 +1226,46 @@ export class TwilioProvider implements CommunicationProvider {
   }
 
   /**
+   * Look up the current Twilio SID for a phone number by E.164.
+   *
+   * Used by the release-number self-heal path: if the SID we stored at
+   * provision time no longer matches Twilio's record (SIDs can rotate on
+   * subaccount transfers, re-purchases, or manual moves in the Console),
+   * the stored-SID release will 404. Callers use this to re-resolve the
+   * current SID and retry.
+   *
+   * Returns null when Twilio's account genuinely does not hold the number
+   * anymore — in that case the number is already gone and the local
+   * allocation record can be safely deallocated without a Twilio call.
+   */
+  async findPhoneNumberSid(
+    credentials: TwilioCredentials | string,
+    phoneNumberE164: string,
+  ): Promise<string | null> {
+    try {
+      const creds = typeof credentials === 'string' ? JSON.parse(credentials) as TwilioCredentials : credentials;
+      const client = this.createClient(creds);
+
+      const matches = await client.incomingPhoneNumbers.list({
+        phoneNumber: phoneNumberE164,
+        limit: 1,
+      });
+
+      if (matches.length === 0) {
+        this.logger.log(`findPhoneNumberSid: ${phoneNumberE164} not in Twilio account`);
+        return null;
+      }
+
+      const sid = matches[0].sid;
+      this.logger.log(`findPhoneNumberSid: ${phoneNumberE164} → ${sid}`);
+      return sid;
+    } catch (error: any) {
+      this.logger.error(`findPhoneNumberSid failed for ${phoneNumberE164}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Add a phone number to a Twilio Messaging Service sender pool.
    * Required for A2P 10DLC compliance.
    */
