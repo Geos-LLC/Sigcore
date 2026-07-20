@@ -652,17 +652,63 @@ export class PhoneNumberProvisioningService {
       throw new NotFoundException('Phone number allocation not found');
     }
 
-    if (!allocation.provisionedViaCallio) {
-      throw new BadRequestException('Cannot release a number that was not provisioned through Callio');
-    }
-
-    // Get Twilio integration
+    // Get Twilio integration up front — needed for both the standard
+    // release path AND the BYO-ghost detection below.
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
     });
 
     if (!integration) {
       throw new BadRequestException('No active Twilio integration found');
+    }
+
+    // BYO / imported number (provisionedViaCallio=false) — the original
+    // guard forbade release outright because we don't own the number in
+    // Twilio. But that leaves stale rows for numbers that were released
+    // in Twilio outside of Sigcore (customer took their number back, a
+    // subaccount migration, admin manual delete). Those become permanent
+    // ghosts in inventory with no way to clean them up.
+    //
+    // Ghost-detection: ask Twilio if the number is actually there. If
+    // Twilio doesn't hold it, it's a genuine ghost — safe to deallocate
+    // locally without touching Twilio. If Twilio DOES hold it, it's a
+    // live customer-owned number and we must not release it; keep the
+    // guard.
+    if (!allocation.provisionedViaCallio) {
+      const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+      const currentSid = await this.twilioProvider.findPhoneNumberSid(
+        credentials,
+        allocation.phoneNumber,
+      );
+      if (currentSid !== null) {
+        throw new BadRequestException('Cannot release a number that was not provisioned through Callio');
+      }
+
+      // Ghost path — Twilio has no record, so nothing to release
+      // externally. Deallocate the local row + record an audit order so
+      // the cleanup is visible in tenant order history.
+      this.logger.warn(
+        `${allocation.phoneNumber} is a BYO ghost (provisionedViaCallio=false, Twilio has no matching number) — deallocating local row`,
+      );
+      const ghostOrder = this.orderRepo.create({
+        workspaceId,
+        tenantId,
+        phoneNumber: allocation.phoneNumber,
+        phoneNumberSid: allocation.providerId,
+        orderType: PhoneNumberOrderType.RELEASE,
+        status: PhoneNumberOrderStatus.RELEASED,
+        tenantPhoneNumberId: undefined,
+        orderedBy,
+        completedAt: new Date(),
+        metadata: {
+          ghostByoDeallocation: true,
+          storedSid: allocation.providerId ?? null,
+          reason: 'provisionedViaCallio=false and phoneNumber not in Twilio account',
+        },
+      });
+      await this.tenantPhoneRepo.remove(allocation);
+      await this.orderRepo.save(ghostOrder);
+      return { success: true, order: ghostOrder };
     }
 
     // Create release order
