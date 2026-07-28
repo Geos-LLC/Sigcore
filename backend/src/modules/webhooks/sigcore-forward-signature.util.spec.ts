@@ -129,7 +129,7 @@ describe('sign', () => {
 
 describe('verify — happy path', () => {
   it('accepts a well-formed voice_inbound envelope', () => {
-    expect(verifyEnvelope(envBase)).toEqual({ ok: true });
+    expect(verifyEnvelope(envBase)).toEqual({ ok: true, nonce: TEST_NONCE });
   });
 
   it('accepts a well-formed voice_recording_status envelope', () => {
@@ -138,7 +138,7 @@ describe('verify — happy path', () => {
       eventType: 'voice_recording_status',
       path: '/webhooks/twilio/voice/recording-status/call-uuid',
     };
-    expect(verifyEnvelope(env)).toEqual({ ok: true });
+    expect(verifyEnvelope(env)).toEqual({ ok: true, nonce: TEST_NONCE });
   });
 
   it('accepts a well-formed voice_call_status envelope', () => {
@@ -147,12 +147,13 @@ describe('verify — happy path', () => {
       eventType: 'voice_call_status',
       path: '/webhooks/twilio/status/ws-a',
     };
-    expect(verifyEnvelope(env)).toEqual({ ok: true });
+    expect(verifyEnvelope(env)).toEqual({ ok: true, nonce: TEST_NONCE });
   });
 
   it('accepts at the exact freshness window boundary', () => {
     expect(verifyEnvelope(envBase, { nowSeconds: NOW + FRESHNESS_WINDOW_SECONDS })).toEqual({
       ok: true,
+      nonce: TEST_NONCE,
     });
   });
 });
