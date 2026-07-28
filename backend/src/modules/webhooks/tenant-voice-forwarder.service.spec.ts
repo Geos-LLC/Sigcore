@@ -136,11 +136,12 @@ describe('TenantVoiceForwarderService.forward', () => {
       await svc.forward(input);
       const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
       const ts = args.headers['x-sigcore-forwarded-timestamp'];
+      const nonce = args.headers['x-sigcore-forwarded-nonce'];
       const receivedSig = args.headers['x-sigcore-forwarded-signature'];
 
       // Independent recomputation — proves interop with any verifier that
-      // follows the documented 8-line canonical form (Task 6B.5C added the
-      // eventType line to prevent cross-route envelope replay).
+      // follows the documented 9-line canonical form (Phase B.1 added the
+      // nonce line between timestamp and workspaceId for replay protection).
       const crypto = require('crypto');
       const bodyHash = crypto.createHash('sha256').update(input.rawBody as string, 'utf8').digest('hex');
       const canonical = [
@@ -148,6 +149,7 @@ describe('TenantVoiceForwarderService.forward', () => {
         '/twilio/inbound', // pathname of https://tenant.example/twilio/inbound
         'voice_inbound',
         ts,
+        nonce,
         'ws-1',
         'tenant-1',
         'CA_test',
