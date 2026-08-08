@@ -34,6 +34,7 @@ import { RecordingStartDto, HangupDto, DialCallDto } from './dto/call-ops.dto';
 import { CallbackForwarderService } from '../webhooks/callback-forwarder.service';
 import { DialIdempotencyService } from './dial-idempotency.service';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { tpnSupportsChannel } from '../../common/util/tpn-channel';
 
 const E164_REGEX = /^\+[1-9]\d{6,14}$/;
 
@@ -354,9 +355,18 @@ export class CallsV1Controller {
         'fromNumber not owned by (workspace, tenant) — cross-workspace caller ID rejected',
       );
     }
-    if (String(tpn.channel) === 'sms') {
+    // Voice-capability check. Historical shape: `both` purchases store
+    // `channel = SMS` in the enum column with the full intent in
+    // `metadata.activeChannels = ['sms','voice']`. Read metadata as the
+    // source of truth; fall back to the column for pre-Wave-2 rows.
+    // See common/util/tpn-channel.ts for the full history.
+    if (!tpnSupportsChannel(tpn, 'voice')) {
       throw new BadRequestException(
-        `fromNumber ${dto.fromNumber} is channel=sms; voice/both required for outbound dial`,
+        `fromNumber ${dto.fromNumber} does not support the voice channel ` +
+          `(activeChannels=${JSON.stringify(
+            (tpn.metadata as { activeChannels?: unknown } | null | undefined)
+              ?.activeChannels ?? tpn.channel,
+          )})`,
       );
     }
     if (String(tpn.provider) !== String(integration.provider)) {
