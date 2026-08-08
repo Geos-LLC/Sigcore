@@ -318,7 +318,7 @@ describe('PhoneNumberProvisioningService.purchaseNumber — channel selector (PR
     expect(meta.activeChannels).toEqual(['voice']);
   });
 
-  it("channel='both' — SMS URL + voice URL + status callback all set, A2P attempted, TPN.channel=SMS, metadata.activeChannels=['sms','voice']", async () => {
+  it("channel='both' — SMS URL + voice URL + status callback all set, A2P attempted, metadata.activeChannels=['sms','voice'] is the source of truth for voice-capability", async () => {
     const ctx = buildService();
     const attach = (ctx.svc as any).attachToMessagingService as jest.Mock;
     const result = await ctx.svc.purchaseNumber(
@@ -330,6 +330,10 @@ describe('PhoneNumberProvisioningService.purchaseNumber — channel selector (PR
       'both',
     );
     expect(result.success).toBe(true);
+    // TPN.channel column stores SMS (single enum slot, no BOTH value).
+    // The dial guard reads metadata.activeChannels — asserted below —
+    // rather than the column, so `both` purchases are voice-capable at
+    // dial-time without a schema migration. See common/util/tpn-channel.
     expect(result.allocation!.channel).toBe(ChannelType.SMS);
     const urls = (ctx.twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
     expect(urls.smsUrl).toBeDefined();
