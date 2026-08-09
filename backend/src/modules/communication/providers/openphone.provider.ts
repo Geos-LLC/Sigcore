@@ -75,6 +75,14 @@ export class OpenPhoneProvider implements CommunicationProvider {
         'Authorization': apiKey,
         'Content-Type': 'application/json',
       },
+      // OpenPhone's OpenAPI schema expects repeat-style array params
+      // (?participants=+X&participants=+Y). Axios 1.x defaults to bracketed
+      // form (?participants[]=+X) which OpenPhone rejects with a 400:
+      //   "/participants: Expected required property"
+      // — the schema parser reads `participants[]` as a different field, so
+      // from its perspective `participants` is missing. `indexes: null` drops
+      // the brackets and produces the repeat form Quo expects.
+      paramsSerializer: { indexes: null },
     });
   }
 
