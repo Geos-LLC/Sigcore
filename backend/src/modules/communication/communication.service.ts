@@ -2870,6 +2870,38 @@ export class CommunicationService {
   }
 
   /**
+   * Get OpenPhone Sona AI summary + next steps for a specific call.
+   * Not cached on the Sigcore side — LB caches on LeadCallConnect.summary.
+   * Kept as a thin proxy so any consumer (LB, dashboard, future Callio) can
+   * fetch the same shape without duplicating OpenPhone-key handling.
+   */
+  async getCallSummary(
+    workspaceId: string,
+    callId: string,
+  ): Promise<{ status: string; summary: string[]; nextSteps: string[] }> {
+    const call = await this.callRepo.findOne({
+      where: { id: callId },
+      relations: ['conversation'],
+    });
+
+    if (!call) {
+      throw new NotFoundException('Call not found');
+    }
+    if (call.conversation.workspaceId !== workspaceId) {
+      throw new NotFoundException('Call not found');
+    }
+    if (!call.providerCallId) {
+      return { status: 'absent', summary: [], nextSteps: [] };
+    }
+
+    const integration = await this.getIntegration(workspaceId);
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+
+    const result = await this.openPhoneProvider.getCallSummary(credentials, call.providerCallId);
+    return result ?? { status: 'error', summary: [], nextSteps: [] };
+  }
+
+  /**
    * Download and cache a recording or voicemail locally.
    * Returns the local path for serving the file.
    */

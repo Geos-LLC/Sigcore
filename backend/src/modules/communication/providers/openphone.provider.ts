@@ -1329,6 +1329,46 @@ export class OpenPhoneProvider implements CommunicationProvider {
   }
 
   /**
+   * Get OpenPhone Sona AI call summary + next steps for a specific call.
+   * Proxies GET /v1/call-summaries/:callId. Not cached here — the caller
+   * (LB) caches on its side to avoid a Sigcore schema change.
+   *
+   * Returns null on unexpected errors; returns { status: 'absent' } for 404
+   * or in-progress statuses so the caller can distinguish "not ready" from
+   * "provider is down".
+   */
+  async getCallSummary(
+    workspaceId: string,
+    providerCallId: string,
+  ): Promise<{ status: string; summary: string[]; nextSteps: string[] } | null> {
+    try {
+      const credentials = JSON.parse(workspaceId) as OpenPhoneCredentials;
+      const client = this.createClient(credentials.apiKey);
+
+      this.logger.log(`Fetching Sona summary for call: ${providerCallId}`);
+
+      const response = await client.get(`/call-summaries/${providerCallId}`);
+      const data = response.data?.data;
+
+      if (!data || data.status !== 'completed') {
+        return { status: data?.status || 'absent', summary: [], nextSteps: [] };
+      }
+
+      const summary = Array.isArray(data.summary) ? data.summary.filter((s: unknown) => typeof s === 'string') : [];
+      const nextSteps = Array.isArray(data.nextSteps) ? data.nextSteps.filter((s: unknown) => typeof s === 'string') : [];
+
+      return { status: 'completed', summary, nextSteps };
+    } catch (error: unknown) {
+      const axiosError = error as { response?: { status?: number }; message?: string };
+      if (axiosError.response?.status === 404) {
+        return { status: 'absent', summary: [], nextSteps: [] };
+      }
+      this.logger.error(`Failed to fetch call summary ${providerCallId}: ${axiosError.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Download a recording or voicemail file from OpenPhone.
    * Returns the audio data as a Buffer.
    */

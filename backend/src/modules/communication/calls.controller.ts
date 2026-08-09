@@ -85,6 +85,21 @@ export class CallsController {
   }
 
   /**
+   * Get OpenPhone Sona AI summary + next steps for a call.
+   * Thin proxy — not cached on Sigcore side. Consumers (LB) cache.
+   * Response shape: { data: { status: 'completed'|'absent'|'in_progress'|'error',
+   *                            summary: string[], nextSteps: string[] } }
+   */
+  @Get(':callId/summary')
+  async getSummary(
+    @Param('callId') callId: string,
+    @WorkspaceId() workspaceId: string,
+  ) {
+    const result = await this.communicationService.getCallSummary(workspaceId, callId);
+    return { data: result };
+  }
+
+  /**
    * Fetch recording URLs for a call from OpenPhone.
    * This is needed because OpenPhone stores recordings separately.
    */
