@@ -84,6 +84,13 @@ export class DebugConversationsController {
 
     const total = await this.conversationRepo.count({ where: { workspaceId } });
 
+    // The correlated subquery for `samplePhoneNumbers` references
+    // `conv.tenant_id` (which IS grouped) but must NOT reference
+    // `conv.workspace_id` (which isn't) — Postgres rejects that with
+    // `subquery uses ungrouped column "conv.workspace_id" from outer
+    // query`. Since the outer query is already scoped to a single
+    // workspace via the WHERE clause, we pin the subquery to the same
+    // bind param instead of an outer column reference.
     const byTenantRaw = await this.conversationRepo
       .createQueryBuilder('conv')
       .select('conv.tenant_id', 'tenant_id')
@@ -91,7 +98,7 @@ export class DebugConversationsController {
       .addSelect('COUNT(DISTINCT conv.phone_number)::int', 'distinct_phone_numbers')
       .addSelect(
         `(ARRAY(SELECT DISTINCT c2.phone_number FROM communication_conversations c2
-                WHERE c2.workspace_id = conv.workspace_id
+                WHERE c2.workspace_id = :workspaceId
                   AND (c2.tenant_id = conv.tenant_id OR (c2.tenant_id IS NULL AND conv.tenant_id IS NULL))
                 LIMIT 5))`,
         'sample_phone_numbers',
