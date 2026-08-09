@@ -285,10 +285,48 @@ export class CommunicationService {
       )
       .where('conv.workspaceId = :workspaceId', { workspaceId });
 
-    // Tenant isolation: filter by tenantId when available
-    // TODO: make mandatory after fixing TypeORM tenant_id persistence on ApiKey entity
+    // Tenant isolation — route by phone number ownership, not by the
+    // conversation's own `tenant_id` column. Reason (Sigcore #47):
+    //
+    // A single OpenPhone workspace is shared across multiple sub-tenants
+    // (Spotless Homes had 5 in one workspace, per the 2026-07-13 incident
+    // notes). The sync loop writes `conversation.tenant_id = <caller>`
+    // for new rows and only backfills when currently NULL — so whichever
+    // tenant syncs first "wins" the tag and every other tenant is
+    // blind to those conversations. Prod evidence: 5926 total workspace
+    // conversations, 455 visible to Spotless Jax, missing 5471 tagged
+    // to sibling tenants.
+    //
+    // Phone-number ownership is the actual boundary for who should see
+    // an SMS thread: a conversation belongs to whichever tenant owns
+    // (or has an active PPA to) the business number on the thread.
+    // That lookup is (a) invariant under sync ordering and (b) matches
+    // the outbound authorization model already in `sendMessageToPhoneNumber`
+    // (PPA-based caller authorization, commit 74530210, 2026-05-11).
+    //
+    // Conversations with NULL/empty phone_number are ambiguous — no
+    // business phone means no way to route. They're excluded from
+    // tenant-scoped reads (same net effect as the old tenant_id filter
+    // when the row was NULL-tagged). Workspace-scoped callers still
+    // see them.
     if (tenantId) {
-      queryBuilder.andWhere('conv.tenantId = :tenantId', { tenantId });
+      queryBuilder.andWhere(
+        `conv.phone_number IN (
+          SELECT tpn.phone_number
+          FROM tenant_phone_numbers tpn
+          WHERE tpn.workspace_id = :workspaceId
+            AND tpn.tenant_id = :tenantId
+          UNION
+          SELECT tpn2.phone_number
+          FROM tenant_phone_numbers tpn2
+          JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+          JOIN communication_profiles cp ON cp.id = ppa.profile_id
+          WHERE tpn2.workspace_id = :workspaceId
+            AND cp.tenant_id = :tenantId
+            AND ppa.active = TRUE
+        )`,
+        { workspaceId, tenantId },
+      );
     }
 
     // Log total conversations before filtering for debugging
@@ -487,15 +525,45 @@ export class CommunicationService {
     await this.messageRepo.update(messageId, { metadata } as any);
   }
 
+  /**
+   * Load a conversation by id + workspace and, when the caller is
+   * tenant-scoped, authorize via phone-number ownership (owned outright
+   * OR active PPA from a profile the tenant owns) rather than the
+   * conversation's `tenant_id` column. Mirrors the read filter in
+   * `getConversations`; see the block comment there for the reasoning.
+   */
+  private async findConversationForTenant(
+    workspaceId: string,
+    conversationId: string,
+    tenantId: string | null | undefined,
+  ): Promise<CommunicationConversation | null> {
+    const conversation = await this.conversationRepo.findOne({
+      where: { id: conversationId, workspaceId },
+    });
+    if (!conversation) return null;
+    if (!tenantId) return conversation; // workspace-scoped callers see everything
+
+    const phones = await this.conversationRepo.query(
+      `SELECT tpn.phone_number FROM tenant_phone_numbers tpn
+        WHERE tpn.workspace_id = $1 AND tpn.tenant_id = $2
+       UNION
+       SELECT tpn2.phone_number FROM tenant_phone_numbers tpn2
+        JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+        JOIN communication_profiles cp ON cp.id = ppa.profile_id
+        WHERE tpn2.workspace_id = $1 AND cp.tenant_id = $2 AND ppa.active = TRUE`,
+      [workspaceId, tenantId],
+    );
+    const allowed = new Set<string>(phones.map((r: { phone_number: string }) => r.phone_number));
+    return allowed.has(conversation.phoneNumber) ? conversation : null;
+  }
+
   async getMessagesForConversation(
     workspaceId: string,
     conversationId: string,
     tenantId?: string | null,
     pagination?: { limit?: number; before?: string },
   ): Promise<CommunicationMessage[]> {
-    const where: any = { id: conversationId, workspaceId };
-    if (tenantId) where.tenantId = tenantId;
-    const conversation = await this.conversationRepo.findOne({ where });
+    const conversation = await this.findConversationForTenant(workspaceId, conversationId, tenantId);
 
     if (!conversation) {
       throw new NotFoundException('Conversation not found');
@@ -1393,9 +1461,7 @@ export class CommunicationService {
     conversationId: string,
     tenantId?: string | null,
   ): Promise<CommunicationCall[]> {
-    const where: any = { id: conversationId, workspaceId };
-    if (tenantId) where.tenantId = tenantId;
-    const conversation = await this.conversationRepo.findOne({ where });
+    const conversation = await this.findConversationForTenant(workspaceId, conversationId, tenantId);
 
     if (!conversation) {
       throw new NotFoundException('Conversation not found');
