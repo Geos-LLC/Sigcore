@@ -29,6 +29,7 @@ import { WorkspacesController } from './workspaces.controller';
 import { WorkspacesService } from './workspaces.service';
 import { PhoneAssignmentsController } from './phone-assignments.controller';
 import { PhoneAssignmentsService } from './phone-assignments.service';
+import { DebugConversationsController } from './debug-conversations.controller';
 
 /**
  * Admin-views module — read paths plus the PR15 phone-assignment write path
@@ -66,6 +67,7 @@ import { PhoneAssignmentsService } from './phone-assignments.service';
     ProfilesController,
     WorkspacesController,
     PhoneAssignmentsController,
+    DebugConversationsController,
   ],
   providers: [
     PlatformsService,

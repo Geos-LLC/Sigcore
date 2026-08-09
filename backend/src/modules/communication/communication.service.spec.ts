@@ -16,6 +16,10 @@ function buildMockRepo() {
     count: jest.fn().mockResolvedValue(0),
     createQueryBuilder: jest.fn(),
     update: jest.fn(),
+    // Raw SQL escape hatch used by the route-by-phone authorization in
+    // `findConversationForTenant` (#47). Default: no phones allowed —
+    // tests that need the caller to be authorized override this.
+    query: jest.fn().mockResolvedValue([]),
   };
 }
 
@@ -132,7 +136,16 @@ describe('CommunicationService – Tenant Isolation', () => {
       return qb;
     }
 
-    it('filters by tenantId when tenant-scoped key is used', async () => {
+    /**
+     * Post-#47 contract: tenant-scoped reads authorize via the caller's
+     * OWNED phones (`tenant_phone_numbers` rows) UNION their PPA-shared
+     * phones (`profile_phone_assignments.active = TRUE`). The
+     * `conv.tenantId = :tenantId` column filter that previously held
+     * this responsibility was removed — it silently hid ~92% of
+     * Spotless Homes Jacksonville's conversations when sibling sub-
+     * tenants happened to sync the workspace first and grabbed the tag.
+     */
+    it('routes by phone ownership (owned UNION PPA-shared) when tenant-scoped', async () => {
       const { service, conversationRepo, messageRepo } = buildService();
       const convA = makeConversation({ id: 'conv-a', tenantId: TENANT_A });
       const qb = setupQueryBuilder([convA], 1);
@@ -147,12 +160,23 @@ describe('CommunicationService – Tenant Isolation', () => {
 
       await service.getConversations(WS_ID, { tenantId: TENANT_A });
 
-      // Verify tenantId filter was applied
       const andWhereCalls = qb.andWhere.mock.calls.map((c: any) => c[0]);
-      expect(andWhereCalls).toContain('conv.tenantId = :tenantId');
+      // No `conv.tenantId = :tenantId` — that was the #47 bug.
+      expect(andWhereCalls).not.toContain('conv.tenantId = :tenantId');
+      // The route-by-phone filter references the two ownership sources
+      // that constitute "phones this tenant can send/receive on."
+      const combined = andWhereCalls.join('\n');
+      expect(combined).toContain('conv.phone_number IN');
+      expect(combined).toContain('tenant_phone_numbers');
+      expect(combined).toContain('profile_phone_assignments');
+      // Parameters are wired via the second andWhere arg
+      const params = qb.andWhere.mock.calls
+        .map((c: any) => c[1])
+        .find((p: any) => p && 'tenantId' in p);
+      expect(params).toEqual({ workspaceId: WS_ID, tenantId: TENANT_A });
     });
 
-    it('does NOT filter by tenantId for workspace-scoped keys', async () => {
+    it('does NOT apply the phone-ownership filter for workspace-scoped keys', async () => {
       const { service, conversationRepo, messageRepo } = buildService();
       const qb = setupQueryBuilder([], 0);
       conversationRepo.createQueryBuilder.mockReturnValue(qb);
@@ -165,8 +189,10 @@ describe('CommunicationService – Tenant Isolation', () => {
 
       await service.getConversations(WS_ID, { tenantId: null });
 
-      const andWhereCalls = qb.andWhere.mock.calls.map((c: any) => c[0]);
+      const andWhereCalls = qb.andWhere.mock.calls.map((c: any) => c[0]).join('\n');
+      // Neither the old tenant_id filter nor the new phone-in filter.
       expect(andWhereCalls).not.toContain('conv.tenantId = :tenantId');
+      expect(andWhereCalls).not.toContain('conv.phone_number IN');
     });
   });
 
@@ -189,31 +215,63 @@ describe('CommunicationService – Tenant Isolation', () => {
       };
     }
 
-    it('returns messages when conversation belongs to the tenant', async () => {
+    /**
+     * Post-#47 contract: the tenant check on per-conversation reads
+     * (messages, calls) uses the same route-by-phone authorization as
+     * `getConversations`. The conversation is loaded without a
+     * `tenantId` where-clause, then a raw SQL UNION over
+     * `tenant_phone_numbers` + `profile_phone_assignments` decides
+     * whether the caller's tenant owns or has-PPA-to the conversation's
+     * `phone_number`. Prior tests pinned the old contract
+     * (`findOne({ tenantId })`) and are updated to the new one here.
+     */
+    it('returns messages when conversation phone is owned by the tenant', async () => {
       const { service, conversationRepo, messageRepo } = buildService();
-      const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
+      const conv = makeConversation({ id: 'conv-1', phoneNumber: '+15551234567', tenantId: TENANT_B });
       conversationRepo.findOne.mockResolvedValue(conv);
+      // Simulate tenant A owning that phone number (owned branch of the UNION).
+      conversationRepo.query.mockResolvedValue([{ phone_number: '+15551234567' }]);
       conversationRepo.createQueryBuilder.mockReturnValue(mockConvQueryBuilder([conv]));
       messageRepo.createQueryBuilder.mockReturnValue(mockMsgQueryBuilder([{ id: 'msg-1', body: 'hello', conversationId: 'conv-1' }]));
 
       const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A);
       expect(messages).toHaveLength(1);
-      // Verify findOne was called with tenantId
+      // findOne no longer takes tenantId in the where — the tenant-id column on
+      // conv can point at a sibling tenant, as it does in prod for Spotless.
       expect(conversationRepo.findOne).toHaveBeenCalledWith({
-        where: { id: 'conv-1', workspaceId: WS_ID, tenantId: TENANT_A },
+        where: { id: 'conv-1', workspaceId: WS_ID },
       });
+      // Authorization went through the phones UNION.
+      expect(conversationRepo.query).toHaveBeenCalledWith(
+        expect.stringContaining('profile_phone_assignments'),
+        [WS_ID, TENANT_A],
+      );
     });
 
-    it('throws NotFoundException when conversation belongs to a different tenant', async () => {
+    it('throws NotFoundException when the tenant owns no matching phone (nor has an active PPA)', async () => {
       const { service, conversationRepo } = buildService();
-      conversationRepo.findOne.mockResolvedValue(null);
+      const conv = makeConversation({ id: 'conv-1', phoneNumber: '+15559999999', tenantId: TENANT_B });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      // Tenant A owns different phones; conv's phone isn't in the allow-set.
+      conversationRepo.query.mockResolvedValue([{ phone_number: '+15551110000' }]);
 
       await expect(
         service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A),
       ).rejects.toThrow(NotFoundException);
     });
 
-    it('returns messages without tenant filter for workspace key', async () => {
+    it('throws NotFoundException when the conversation row does not exist at all', async () => {
+      const { service, conversationRepo } = buildService();
+      conversationRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.getMessagesForConversation(WS_ID, 'conv-1', TENANT_A),
+      ).rejects.toThrow(NotFoundException);
+      // Never got as far as the PPA lookup — the row itself is missing.
+      expect(conversationRepo.query).not.toHaveBeenCalled();
+    });
+
+    it('returns messages without any tenant check for workspace-scoped callers', async () => {
       const { service, conversationRepo, messageRepo } = buildService();
       const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
       conversationRepo.findOne.mockResolvedValue(conv);
@@ -222,15 +280,27 @@ describe('CommunicationService – Tenant Isolation', () => {
 
       const messages = await service.getMessagesForConversation(WS_ID, 'conv-1', null);
       expect(messages).toHaveLength(1);
-      // Verify findOne was called without tenantId
+      // Workspace-scoped callers skip the phones-UNION query entirely.
       expect(conversationRepo.findOne).toHaveBeenCalledWith({
         where: { id: 'conv-1', workspaceId: WS_ID },
       });
+      expect(conversationRepo.query).not.toHaveBeenCalled();
     });
   });
 
   describe('getCallsForConversation – tenant enforcement', () => {
-    it('throws NotFoundException when conversation not found for tenant', async () => {
+    it('throws NotFoundException when the tenant owns no matching phone', async () => {
+      const { service, conversationRepo } = buildService();
+      const conv = makeConversation({ id: 'conv-1', phoneNumber: '+15559999999', tenantId: TENANT_B });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      conversationRepo.query.mockResolvedValue([]); // no allowed phones
+
+      await expect(
+        service.getCallsForConversation(WS_ID, 'conv-1', TENANT_A),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws NotFoundException when the conversation row does not exist', async () => {
       const { service, conversationRepo } = buildService();
       conversationRepo.findOne.mockResolvedValue(null);
 
