@@ -18,6 +18,12 @@ import {
   IntegrationStatus,
 } from '../../database/entities/communication-integration.entity';
 import { TenantIntegration } from '../../database/entities/tenant-integration.entity';
+import {
+  TenantPhoneNumber,
+  PhoneNumberProvider,
+  PhoneNumberAllocationStatus,
+} from '../../database/entities/tenant-phone-number.entity';
+import { ChannelType } from '../../database/entities/sender.entity';
 import { Tenant } from '../../database/entities/tenant.entity';
 import { Workspace } from '../../database/entities/workspace.entity';
 import { ContactIdentity } from '../../database/entities/contact-identity.entity';
@@ -77,6 +83,8 @@ export class IntegrationsService {
     private integrationRepo: Repository<CommunicationIntegration>,
     @InjectRepository(TenantIntegration)
     private tenantIntegrationRepo: Repository<TenantIntegration>,
+    @InjectRepository(TenantPhoneNumber)
+    private tenantPhoneRepo: Repository<TenantPhoneNumber>,
     @InjectRepository(Tenant)
     private tenantRepo: Repository<Tenant>,
     @InjectRepository(Workspace)
@@ -1665,7 +1673,98 @@ export class IntegrationsService {
 
     await this.tenantIntegrationRepo.save(integration);
     this.logger.log(`Connected OpenPhone for tenant ${tenantId} in workspace ${workspaceId}`);
+
+    // Register the discovered OpenPhone workspace numbers as tenant-owned so
+    // /api/conversations phone-ownership scoping (PR #48) can route inbound
+    // Quo conversations back to this tenant. Prior to this step, LB stored
+    // connectedNumbers locally but Sigcore had no tenant_phone_numbers row
+    // for them — every OpenPhone conversation was invisible via /conversations
+    // (Klaus Woodward 2026-08-10). Best-effort: any error registering phones
+    // must NOT fail the connect itself (credentials are already saved).
+    try {
+      await this.registerOpenPhoneNumbersForTenant(workspaceId, tenantId, credentials);
+    } catch (err: any) {
+      this.logger.warn(
+        `[connectOpenPhoneForTenant] phone-registration failed for tenant ${tenantId}: ${err?.message ?? err} — credentials saved, /conversations may 404 until re-registered`,
+      );
+    }
+
     return integration;
+  }
+
+  /**
+   * Register every phone number in the caller's OpenPhone workspace as a
+   * tenant-owned TenantPhoneNumber row. Idempotent — existing rows on the
+   * same tenant get their provider metadata refreshed; rows owned by a
+   * DIFFERENT tenant in the same workspace are skipped with a warn (we
+   * never steal ownership). Called from connectOpenPhoneForTenant and
+   * from a companion backfill script that walks existing
+   * TenantIntegration rows.
+   */
+  async registerOpenPhoneNumbersForTenant(
+    workspaceId: string,
+    tenantId: string,
+    credentials: string,
+  ): Promise<{ registered: number; refreshed: number; conflicted: number }> {
+    const phoneMap = await this.openPhoneProvider.getPhoneNumbersFromCredentials(credentials);
+    const phones = Array.from(phoneMap.values());
+    let registered = 0, refreshed = 0, conflicted = 0;
+
+    for (const pn of phones) {
+      const phoneNumber = pn.number;
+      if (!phoneNumber) continue;
+
+      const existing = await this.tenantPhoneRepo.findOne({
+        where: { workspaceId, phoneNumber },
+      });
+
+      if (existing) {
+        if (existing.tenantId !== tenantId) {
+          this.logger.warn(
+            `[registerOpenPhoneNumbersForTenant] phone ${phoneNumber} in workspace ${workspaceId} already owned by tenant ${existing.tenantId} — skipping (would not overwrite to ${tenantId})`,
+          );
+          conflicted++;
+          continue;
+        }
+        // Same tenant → refresh provider metadata so friendlyName / providerId
+        // stay in sync with OpenPhone-side edits. Preserve everything else
+        // (isDefault, channel, metadata, provisioning state).
+        existing.provider = PhoneNumberProvider.OPENPHONE;
+        existing.providerId = pn.id ?? existing.providerId;
+        existing.friendlyName = pn.name ?? existing.friendlyName;
+        existing.status = PhoneNumberAllocationStatus.ACTIVE;
+        await this.tenantPhoneRepo.save(existing);
+        refreshed++;
+        continue;
+      }
+
+      // OpenPhone numbers support both SMS + voice by default. The schema's
+      // single `channel` column can't express both, so we store 'sms' as
+      // primary (matches Twilio 'both' allocation convention) and record
+      // capabilities in metadata for consumers that need the fuller picture.
+      const allocation = this.tenantPhoneRepo.create({
+        workspaceId,
+        tenantId,
+        phoneNumber,
+        friendlyName: pn.name,
+        provider: PhoneNumberProvider.OPENPHONE,
+        providerId: pn.id,
+        channel: ChannelType.SMS,
+        status: PhoneNumberAllocationStatus.ACTIVE,
+        isDefault: false,
+        metadata: {
+          activeChannels: ['sms', 'voice'],
+          openPhoneCapabilities: pn.capabilities ?? null,
+        },
+      });
+      await this.tenantPhoneRepo.save(allocation);
+      registered++;
+    }
+
+    this.logger.log(
+      `[registerOpenPhoneNumbersForTenant] tenant=${tenantId} workspace=${workspaceId} registered=${registered} refreshed=${refreshed} conflicted=${conflicted} of ${phones.length} phones`,
+    );
+    return { registered, refreshed, conflicted };
   }
 
   /**

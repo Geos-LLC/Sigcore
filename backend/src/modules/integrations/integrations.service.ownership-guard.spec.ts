@@ -54,10 +54,12 @@ function buildService() {
     name: 'W1',
     webhookId: 'wh',
   });
+  const tenantPhoneRepo = { findOne: jest.fn(), save: jest.fn(), create: jest.fn((x: any) => x) } as any;
 
   const service = new IntegrationsService(
     integrationRepo as any,
     tenantIntegrationRepo as any,
+    tenantPhoneRepo as any,
     tenantRepo as any,
     workspaceRepo as any,
     contactIdentityRepo as any,
