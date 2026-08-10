@@ -96,6 +96,16 @@ export class CallConnectSession {
   @Column({ name: 'recording_url', nullable: true })
   recordingUrl: string;
 
+  /**
+   * Whisper-generated transcription of the Twilio bridge recording. Lazily
+   * populated by CallConnectService.getOrGenerateTranscript on the first
+   * consumer request (LB `syncLeadCallConnectTranscripts` calls
+   * `GET /api/internal/call-connect/sessions/:id/transcript`). Once written
+   * this is the cache — subsequent reads skip the Whisper hop.
+   */
+  @Column({ type: 'text', nullable: true })
+  transcript: string | null;
+
   /** Per-session agent whisper (pre-built by caller). Overrides settings.agentWhisperMessage when set. */
   @Column({ name: 'agent_whisper_message', type: 'text', nullable: true })
   agentWhisperMessage: string;

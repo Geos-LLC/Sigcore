@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as twilio from 'twilio';
+import OpenAI from 'openai';
+import { toFile } from 'openai/uploads';
 import { ProviderContextResolver } from '../integrations/provider-context-resolver.service';
 import {
   CallConnectSettings,
@@ -71,6 +73,19 @@ const TERMINAL_STATUSES = new Set<SessionStatus>([
 @Injectable()
 export class CallConnectService {
   private readonly logger = new Logger(CallConnectService.name);
+
+  /**
+   * Lazy OpenAI client for Whisper. Missing OPENAI_API_KEY disables the
+   * transcript path — getOrGenerateTranscript then returns null with a
+   * warn log; caller (LB) will retry on next hydrate.
+   */
+  private _openai: OpenAI | null | undefined;
+  private get openai(): OpenAI | null {
+    if (this._openai !== undefined) return this._openai;
+    const apiKey = this.config.get<string>('OPENAI_API_KEY');
+    this._openai = apiKey ? new OpenAI({ apiKey }) : null;
+    return this._openai;
+  }
 
   /** Resolve the public base URL for Twilio callbacks, with Railway fallback */
   private getBaseUrl(): string {
@@ -1389,6 +1404,135 @@ export class CallConnectService {
     // event — LB's handleWebhookEvent is idempotent on repeated ended events
     // (status stays ENDED, timeline gets one extra entry, recordingUrl written).
     await this.emitEvent(session, WebhookEventType.CALL_CONNECT_ENDED, { recordingUrl });
+  }
+
+  /**
+   * Fetch the Whisper transcription for a Call Connect session, generating
+   * it on demand from the cached Twilio recording. Cached on the session
+   * row after first successful generation.
+   *
+   * Called by consumers (LB `syncLeadCallConnectTranscripts`) that want to
+   * feed the transcript into their own summarizer. Sigcore does NOT
+   * summarize on this side — the summary format lives with the consumer.
+   *
+   * Returns { transcript: null, status: 'absent' } when:
+   *   - session has no recording (never captured / short call)
+   *   - OpenAI is not configured on Sigcore
+   * Returns { transcript: null, status: 'error' } on any transient failure
+   * (Twilio download 5xx, Whisper 5xx) so the consumer can retry on next
+   * hydrate without a stored empty string that would suppress future tries.
+   */
+  async getOrGenerateTranscript(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<{ transcript: string | null; status: 'completed' | 'absent' | 'error' }> {
+    const session = await this.sessionRepo.findOne({
+      where: { id: sessionId, businessId: workspaceId },
+    });
+    if (!session) throw new NotFoundException(`Session ${sessionId} not found`);
+
+    if (session.transcript && session.transcript.trim().length > 0) {
+      return { transcript: session.transcript, status: 'completed' };
+    }
+    if (!session.recordingUrl) {
+      return { transcript: null, status: 'absent' };
+    }
+    if (!this.openai) {
+      this.logger.warn(
+        `[transcribe] OPENAI_API_KEY not configured — cannot generate transcript for session ${sessionId}`,
+      );
+      return { transcript: null, status: 'error' };
+    }
+
+    try {
+      // Resolve Twilio credentials for this session so we can basic-auth
+      // download the recording MP3 — Twilio recording URLs are only
+      // accessible with the account's SID:token pair. Reuse the same
+      // Twilio account selection the outbound legs used so the recording
+      // ownership matches (subaccount vs master handled by resolver).
+      const sel = await this.resolveTwilioSelection(
+        session.businessId,
+        session.tenantId ?? undefined,
+        session.fromNumberE164,
+      );
+
+      // Sigcore's resolveTwilioSelection intentionally does NOT return
+      // the auth token — we need the raw credentials for the audio HTTP
+      // download since Twilio's REST client doesn't expose the recording
+      // bytes directly. Load the integration and decrypt inline; do NOT
+      // log the token.
+      const integration = await this.integrationRepo.findOne({
+        where: { id: sel.integrationId },
+      });
+      if (!integration?.credentialsEncrypted) {
+        this.logger.error(
+          `[transcribe] Session ${sessionId} — integration ${sel.integrationId} has no credentials`,
+        );
+        return { transcript: null, status: 'error' };
+      }
+      const twilioCreds = JSON.parse(
+        this.encryptionService.decrypt(integration.credentialsEncrypted),
+      ) as { accountSid: string; authToken: string };
+
+      // Twilio recording URL comes without a media extension; append .mp3
+      // to get the audio payload (WAV would be `.wav`). Use `mp3` because
+      // Whisper handles it well and the payload is much smaller than WAV.
+      const audioUrl = session.recordingUrl.endsWith('.mp3')
+        ? session.recordingUrl
+        : `${session.recordingUrl}.mp3`;
+      const basicAuth = Buffer.from(
+        `${twilioCreds.accountSid}:${twilioCreds.authToken}`,
+      ).toString('base64');
+
+      this.logger.log(
+        `[transcribe] Session ${sessionId} — fetching Twilio recording (${audioUrl.slice(-40)})`,
+      );
+      const audioResp = await fetch(audioUrl, {
+        headers: { Authorization: `Basic ${basicAuth}` },
+      });
+      if (!audioResp.ok) {
+        this.logger.error(
+          `[transcribe] Session ${sessionId} — Twilio recording download ${audioResp.status}`,
+        );
+        return { transcript: null, status: 'error' };
+      }
+      const audioBuffer = Buffer.from(await audioResp.arrayBuffer());
+
+      this.logger.log(
+        `[transcribe] Session ${sessionId} — Whisper transcribing ${audioBuffer.length} bytes`,
+      );
+      const file = await toFile(audioBuffer, `${sessionId}.mp3`, {
+        type: 'audio/mpeg',
+      });
+      const result = await this.openai.audio.transcriptions.create({
+        model: 'whisper-1',
+        file,
+        response_format: 'text',
+      });
+      const text =
+        typeof result === 'string'
+          ? result
+          : (result as { text?: string })?.text ?? '';
+      const trimmed = text.trim();
+      if (trimmed.length === 0) {
+        this.logger.warn(
+          `[transcribe] Session ${sessionId} — Whisper returned empty transcript`,
+        );
+        return { transcript: null, status: 'error' };
+      }
+
+      session.transcript = trimmed;
+      await this.sessionRepo.save(session);
+      this.logger.log(
+        `[transcribe] Session ${sessionId} — cached ${trimmed.length} chars`,
+      );
+      return { transcript: trimmed, status: 'completed' };
+    } catch (err: any) {
+      this.logger.error(
+        `[transcribe] Session ${sessionId} — failed: ${err?.message ?? err}`,
+      );
+      return { transcript: null, status: 'error' };
+    }
   }
 
   // ──────────────────────────────────────────────────────────────

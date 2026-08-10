@@ -109,4 +109,29 @@ export class CallConnectController {
   ) {
     return this.callConnectService.getSession(workspaceId, sessionId);
   }
+
+  /**
+   * Get the Whisper-generated transcript for a session's Twilio bridge
+   * recording. Generates on-demand from the cached recording URL if not
+   * yet stored; subsequent reads return the cached row.
+   *
+   * GET /api/internal/call-connect/sessions/:sessionId/transcript
+   *
+   * Response: { data: { transcript: string | null,
+   *                     status: 'completed' | 'absent' | 'error' } }
+   *   - completed: transcript ready (cached or freshly generated)
+   *   - absent:    session has no recording OR OpenAI not configured
+   *   - error:     transient Twilio/Whisper failure — retry on next hydrate
+   */
+  @Get('sessions/:sessionId/transcript')
+  async getSessionTranscript(
+    @WorkspaceId() workspaceId: string,
+    @Param('sessionId') sessionId: string,
+  ) {
+    const result = await this.callConnectService.getOrGenerateTranscript(
+      workspaceId,
+      sessionId,
+    );
+    return { data: result };
+  }
 }

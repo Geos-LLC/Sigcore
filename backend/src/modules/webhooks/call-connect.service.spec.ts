@@ -297,6 +297,7 @@ function makeSession(overrides: Partial<CallConnectSession> = {}): CallConnectSe
     recordAgentLeg: false,
     skipAgentWhisper: false,
     timeline: [],
+    transcript: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
