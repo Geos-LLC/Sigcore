@@ -636,9 +636,21 @@ export class WebhooksService {
     // Data is nested inside data.object for OpenPhone webhooks
     const callData = payload.data.object as OpenPhoneCallObject;
 
+    // OpenPhone webhook payload: `to` is a STRING for messages but an ARRAY
+    // for calls (`["+15551234567"]`). Prior code only handled the string
+    // case, so every outgoing call fell through to `participantNumber=''`
+    // and got dumped into a workspace-wide catch-all conversation instead
+    // of the per-participant conv. Result: `/conversations/:id/calls`
+    // returned zero calls for the correct conversation even though the
+    // rows existed. Klaus Woodward 2026-08-10: 913 calls piled into one
+    // orphan conversation before this was traced.
     const participantNumber = callData.direction === 'incoming'
       ? callData.from
-      : (typeof callData.to === 'string' ? callData.to : '');
+      : (typeof callData.to === 'string'
+          ? callData.to
+          : Array.isArray(callData.to)
+          ? (callData.to[0] || '')
+          : '');
 
     let isNewConversation = false;
     let contactName: string | undefined;
