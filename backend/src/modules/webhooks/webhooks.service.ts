@@ -729,7 +729,11 @@ export class WebhooksService {
       direction: callData.direction === 'incoming' ? CallDirection.IN : CallDirection.OUT,
       duration: callData.duration || 0,
       fromNumber: callData.from || '',
-      toNumber: typeof callData.to === 'string' ? callData.to : '',
+      toNumber: typeof callData.to === 'string'
+        ? callData.to
+        : Array.isArray(callData.to)
+        ? (callData.to[0] || '')
+        : '',
       providerCallId: callData.id,
       status: this.mapCallStatus(callData.status, callData.voicemailUrl),
       recordingUrl: callData.recordingUrl,
