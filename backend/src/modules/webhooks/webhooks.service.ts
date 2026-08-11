@@ -77,6 +77,15 @@ export interface OpenPhoneWebhookPayload {
   };
 }
 
+// Discriminated result of resolvePhoneNumber. See issue #50 — 'foreign' MUST
+// cause the handler to REJECT before writing to the DB; 'unresolvable' is
+// transient and must NOT (otherwise we drop legitimate traffic during an
+// OpenPhone outage).
+export type PhoneResolution =
+  | { status: 'owned'; number: string; name: string | null }
+  | { status: 'foreign' }
+  | { status: 'unresolvable'; reason: string };
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
@@ -204,17 +213,23 @@ export class WebhooksService {
   }
 
   // Cache for phone number lookups during webhook processing
-  private phoneNumberCache = new Map<string, { number: string; name: string | null }>();
+  private phoneNumberCache = new Map<string, PhoneResolution>();
 
   /**
    * Resolve a phone number ID to the actual phone number and name.
+   *
+   * Returns a discriminated result so callers can distinguish:
+   *   - 'owned'        → phoneNumberId belongs to this workspace's OpenPhone account
+   *   - 'foreign'      → list succeeded but id is NOT in this account (cross-workspace leak — issue #50)
+   *   - 'unresolvable' → transient failure (no creds / API error) — do NOT treat as foreign
+   *
+   * Handlers MUST reject on 'foreign' before writing to the DB.
    * Uses caching to avoid repeated API calls.
-   * IMPORTANT: Never return the phoneNumberId as the number - always return empty string if resolution fails.
    */
   private async resolvePhoneNumber(
     workspaceId: string,
     phoneNumberId: string,
-  ): Promise<{ number: string; name: string | null }> {
+  ): Promise<PhoneResolution> {
     // Check cache first
     const cacheKey = `${workspaceId}:${phoneNumberId}`;
     const cached = this.phoneNumberCache.get(cacheKey);
@@ -229,7 +244,7 @@ export class WebhooksService {
 
       if (!integration?.credentialsEncrypted) {
         this.logger.warn(`No integration credentials found for workspace ${workspaceId}, cannot resolve phone number ID`);
-        return { number: '', name: null };
+        return { status: 'unresolvable', reason: 'no-credentials' };
       }
 
       const credentialsJson = this.encryptionService.decrypt(integration.credentialsEncrypted);
@@ -245,32 +260,33 @@ export class WebhooksService {
       const response = await client.get('/phone-numbers');
       const phoneNumbers = response.data.data || [];
 
-      // Find the matching phone number
+      // Cache every phone number in the account before returning, so subsequent
+      // lookups for OTHER ids from the same workspace hit the cache.
+      let matched: PhoneResolution | null = null;
       for (const pn of phoneNumbers) {
-        if (pn.id === phoneNumberId) {
-          const result = {
-            number: pn.number || '',  // Never fall back to ID
-            name: pn.name || pn.formattedNumber || null,
-          };
-          this.phoneNumberCache.set(cacheKey, result);
-          return result;
-        }
-      }
-
-      // Cache all phone numbers for future lookups
-      for (const pn of phoneNumbers) {
-        const key = `${workspaceId}:${pn.id}`;
-        this.phoneNumberCache.set(key, {
-          number: pn.number || '',  // Never fall back to ID
+        const owned: PhoneResolution = {
+          status: 'owned',
+          number: pn.number || '',
           name: pn.name || pn.formattedNumber || null,
-        });
+        };
+        this.phoneNumberCache.set(`${workspaceId}:${pn.id}`, owned);
+        if (pn.id === phoneNumberId) matched = owned;
       }
 
-      this.logger.warn(`Phone number ID ${phoneNumberId} not found in OpenPhone account - may have been deleted`);
-      return { number: '', name: null };
+      if (matched) return matched;
+
+      // List succeeded but id is not owned by this workspace. Cache the
+      // foreign verdict so a webhook flood from the same foreign id doesn't
+      // hammer the OpenPhone API.
+      this.logger.warn(`Phone number ID ${phoneNumberId} not found in OpenPhone account for workspace ${workspaceId} — treating as foreign`);
+      const foreign: PhoneResolution = { status: 'foreign' };
+      this.phoneNumberCache.set(cacheKey, foreign);
+      return foreign;
     } catch (error) {
+      // Transient — don't cache, don't reject downstream (avoid dropping
+      // legitimate traffic during an OpenPhone outage).
       this.logger.warn(`Failed to resolve phone number ID ${phoneNumberId}: ${error}`);
-      return { number: '', name: null };
+      return { status: 'unresolvable', reason: (error as Error)?.message ?? 'unknown' };
     }
   }
 
@@ -323,6 +339,22 @@ export class WebhooksService {
     const msgData = payload.data.object as OpenPhoneMessageObject;
 
     this.logger.log(`Processing message webhook: id=${msgData.id}, conversationId=${msgData.conversationId}, from=${msgData.from}, to=${msgData.to}`);
+
+    // Issue #50 — REJECT events whose phoneNumberId isn't owned by this
+    // workspace. Prod evidence: 472 foreign OpenPhone calls piled into a
+    // single Sigcore workspace's DB. 'unresolvable' is transient (no creds /
+    // API error) and must NOT reject — that would drop legitimate traffic
+    // during an OpenPhone outage.
+    if (msgData.phoneNumberId) {
+      const phoneCheck = await this.resolvePhoneNumber(workspaceId, msgData.phoneNumberId);
+      if (phoneCheck.status === 'foreign') {
+        this.logger.warn(
+          `[openphone-webhook] REJECT ${payload.type} externalId=${msgData.id} — ` +
+          `phoneNumberId=${msgData.phoneNumberId} not owned by workspace ${workspaceId}. Dropping.`,
+        );
+        return;
+      }
+    }
 
     const participantNumber = msgData.direction === 'incoming'
       ? msgData.from
@@ -445,14 +477,19 @@ export class WebhooksService {
       if (!currentPhoneNumber || currentPhoneNumber.startsWith('PN') || !metadata.phoneNumberName) {
         this.logger.log(`Updating conversation ${conversation.id} phone number from "${currentPhoneNumber}" (ID: ${msgData.phoneNumberId})`);
         const phoneInfo = await this.resolvePhoneNumber(workspaceId, msgData.phoneNumberId);
-        conversation.phoneNumber = phoneInfo.number;
-        conversation.metadata = {
-          ...metadata,
-          phoneNumberId: msgData.phoneNumberId,
-          phoneNumberName: phoneInfo.name,
-        };
-        await this.conversationRepo.save(conversation);
-        this.logger.log(`Updated conversation ${conversation.id} phone to "${phoneInfo.number}" (name: ${phoneInfo.name})`);
+        if (phoneInfo.status === 'owned') {
+          conversation.phoneNumber = phoneInfo.number;
+          conversation.metadata = {
+            ...metadata,
+            phoneNumberId: msgData.phoneNumberId,
+            phoneNumberName: phoneInfo.name,
+          };
+          await this.conversationRepo.save(conversation);
+          this.logger.log(`Updated conversation ${conversation.id} phone to "${phoneInfo.number}" (name: ${phoneInfo.name})`);
+        }
+        // foreign/unresolvable → do NOT overwrite the existing phoneNumber
+        // with an empty string. The entry-point guard already returned for
+        // 'foreign'; 'unresolvable' means we keep whatever was there.
       }
     }
 
@@ -465,20 +502,24 @@ export class WebhooksService {
       const externalId = msgData.conversationId || `webhook_${msgData.id}`;
       this.logger.log(`Creating new conversation for participant: ${participantNumber}, externalId: ${externalId}`);
 
-      // Resolve the phone number ID to actual phone number and name
+      // Resolve the phone number ID to actual phone number and name.
+      // The entry-point guard has already dropped 'foreign' events, so at
+      // this point we're either 'owned' or 'unresolvable' (transient).
       const phoneInfo = msgData.phoneNumberId
         ? await this.resolvePhoneNumber(workspaceId, msgData.phoneNumberId)
-        : { number: '', name: null };
+        : null;
+      const phoneNumber = phoneInfo?.status === 'owned' ? phoneInfo.number : '';
+      const phoneNumberName = phoneInfo?.status === 'owned' ? phoneInfo.name : null;
 
       conversation = this.conversationRepo.create({
         workspaceId,
         externalId,
         provider: ProviderType.OPENPHONE,
-        phoneNumber: phoneInfo.number,
+        phoneNumber,
         participantPhoneNumber: participantNumber,
         metadata: {
           phoneNumberId: msgData.phoneNumberId,
-          phoneNumberName: phoneInfo.name,
+          phoneNumberName,
         },
       });
 
@@ -636,6 +677,20 @@ export class WebhooksService {
     // Data is nested inside data.object for OpenPhone webhooks
     const callData = payload.data.object as OpenPhoneCallObject;
 
+    // Issue #50 — REJECT events whose phoneNumberId isn't owned by this
+    // workspace. Also covers voicemail events (handleVoicemailEvent delegates
+    // here). 'unresolvable' is transient and must NOT reject.
+    if (callData.phoneNumberId) {
+      const phoneCheck = await this.resolvePhoneNumber(workspaceId, callData.phoneNumberId);
+      if (phoneCheck.status === 'foreign') {
+        this.logger.warn(
+          `[openphone-webhook] REJECT ${payload.type} externalId=${callData.id} — ` +
+          `phoneNumberId=${callData.phoneNumberId} not owned by workspace ${workspaceId}. Dropping.`,
+        );
+        return;
+      }
+    }
+
     // OpenPhone webhook payload: `to` is a STRING for messages but an ARRAY
     // for calls (`["+15551234567"]`). Prior code only handled the string
     // case, so every outgoing call fell through to `participantNumber=''`
@@ -670,34 +725,40 @@ export class WebhooksService {
       if (!currentPhoneNumber || currentPhoneNumber.startsWith('PN') || !metadata.phoneNumberName) {
         this.logger.log(`Updating call conversation ${conversation.id} phone number from "${currentPhoneNumber}"`);
         const phoneInfo = await this.resolvePhoneNumber(workspaceId, callData.phoneNumberId);
-        conversation.phoneNumber = phoneInfo.number;
-        conversation.metadata = {
-          ...metadata,
-          phoneNumberId: callData.phoneNumberId,
-          phoneNumberName: phoneInfo.name,
-        };
-        await this.conversationRepo.save(conversation);
-        this.logger.log(`Updated call conversation ${conversation.id} phone to "${phoneInfo.number}" (name: ${phoneInfo.name})`);
+        if (phoneInfo.status === 'owned') {
+          conversation.phoneNumber = phoneInfo.number;
+          conversation.metadata = {
+            ...metadata,
+            phoneNumberId: callData.phoneNumberId,
+            phoneNumberName: phoneInfo.name,
+          };
+          await this.conversationRepo.save(conversation);
+          this.logger.log(`Updated call conversation ${conversation.id} phone to "${phoneInfo.number}" (name: ${phoneInfo.name})`);
+        }
+        // foreign/unresolvable → do NOT overwrite the existing phoneNumber.
       }
     }
 
     // Contact linking now handled in Callio service
 
     if (!conversation) {
-      // Resolve the phone number ID to actual phone number and name
+      // Resolve the phone number ID to actual phone number and name.
+      // Entry-point guard has already dropped 'foreign' events.
       const phoneInfo = callData.phoneNumberId
         ? await this.resolvePhoneNumber(workspaceId, callData.phoneNumberId)
-        : { number: '', name: null };
+        : null;
+      const phoneNumber = phoneInfo?.status === 'owned' ? phoneInfo.number : '';
+      const phoneNumberName = phoneInfo?.status === 'owned' ? phoneInfo.name : null;
 
       conversation = this.conversationRepo.create({
         workspaceId,
         externalId: `call_${callData.id}`,
         provider: ProviderType.OPENPHONE,
-        phoneNumber: phoneInfo.number,
+        phoneNumber,
         participantPhoneNumber: participantNumber || '',
         metadata: {
           phoneNumberId: callData.phoneNumberId,
-          phoneNumberName: phoneInfo.name,
+          phoneNumberName,
         },
       });
 
