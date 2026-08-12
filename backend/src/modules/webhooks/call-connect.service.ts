@@ -62,6 +62,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
 import { StartCallConnectDto } from './dto/start-call-connect.dto';
 import { UpsertCallConnectSettingsDto } from './dto/upsert-call-connect-settings.dto';
+import { tpnSupportsChannel } from '../../common/util/tpn-channel';
 
 /** Terminal statuses — no further transitions allowed */
 const TERMINAL_STATUSES = new Set<SessionStatus>([
@@ -281,6 +282,55 @@ export class CallConnectService {
     if (!agentPhone) {
       throw new UnprocessableEntityException(
         'Agent phone not configured and no agentHint provided',
+      );
+    }
+
+    // Voice-capability preflight. Call Connect ALWAYS makes voice calls (both
+    // AGENT_FIRST and PARALLEL modes dial the agent + lead via Twilio); if the
+    // resolved `fromNumber`'s TPN doesn't have voice enabled, the session would
+    // be created, SMS-side notifications would fire, and the internal dial
+    // would drop silently — leaving LB with a `CREATED` session that never
+    // advances. Symptom fixed on the caller side (LB's
+    // CALL_CONNECT_MAX_ACTIVE_AGE_MINUTES gate) but the root cause is here:
+    // this endpoint accepts requests it cannot fulfill.
+    //
+    // Globus Service 2026-08-05 through 2026-08-12: ≥15 orphaned CREATED
+    // sessions accumulated because their TPN was provisioned as SMS-only
+    // (metadata.activeChannels=['sms']). Every /call-connect/start returned
+    // 200 with a sessionId, LB recorded a LeadCallConnect row, sat forever.
+    // See docs/AUDIT_TPN_ACTIVECHANNELS_STUCK.md.
+    //
+    // Behavior: read the TPN row for the resolved fromNumber; if it exists
+    // AND `tpnSupportsChannel(tpn, 'voice')` is false, reject synchronously
+    // with a specific error code so the caller can classify + surface it.
+    // If the TPN row is missing (grandfathered integrations that predate
+    // per-number tracking), log a warning but proceed — Twilio itself will
+    // be the ultimate source of truth for those.
+    const fromNumberTpn = await this.tenantPhoneRepo.findOne({
+      where: { workspaceId, phoneNumber: fromNumber },
+      select: ['id', 'channel', 'metadata'],
+    });
+    if (fromNumberTpn && !tpnSupportsChannel(fromNumberTpn, 'voice')) {
+      const active =
+        (fromNumberTpn.metadata as { activeChannels?: unknown } | null | undefined)
+          ?.activeChannels ?? fromNumberTpn.channel;
+      this.logger.warn(
+        `[startSession] REJECT voice_channel_not_enabled workspace=${workspaceId} business=${businessId} lead=${dto.leadId} from=${fromNumber} activeChannels=${JSON.stringify(active)} — refusing to create orphan session`,
+      );
+      throw new UnprocessableEntityException({
+        code: 'voice_channel_not_enabled',
+        message:
+          `TPN ${fromNumber} does not support the voice channel ` +
+          `(activeChannels=${JSON.stringify(active)}). ` +
+          `Call Connect requires voice. Fix via ops SQL on tenant_phone_numbers.metadata.activeChannels ` +
+          `or (once shipped) PATCH /api/tenants/:id/phone-numbers/:allocationId/channels.`,
+        fromNumber,
+        activeChannels: active,
+      });
+    }
+    if (!fromNumberTpn) {
+      this.logger.warn(
+        `[startSession] tpn_not_found workspace=${workspaceId} from=${fromNumber} — proceeding without voice-capability preflight (grandfathered integration or config gap)`,
       );
     }
 

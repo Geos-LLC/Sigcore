@@ -882,3 +882,132 @@ describe('CallConnectService – Twilio account-selection telemetry', () => {
     expect(mask(undefined)).toBe('unknown');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// startSession voice-capability preflight
+//
+// Globus Service 2026-08-05 through 2026-08-12: ≥15 LeadCallConnect rows
+// stuck at CREATED forever because their TPN was provisioned as SMS-only
+// (metadata.activeChannels=['sms']). Sigcore accepted /call-connect/start,
+// created the session, sent SMS notifications, and silently dropped the
+// voice leg. This preflight refuses those requests up front so LB gets an
+// immediate 422 with a specific code instead of an orphaned session.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('CallConnectService – startSession voice-capability preflight', () => {
+  const LEAD_ID = 'lead-preflight-1';
+
+  function primeEnabledSettings(settingsRepo: ReturnType<typeof buildSettingsRepo>) {
+    settingsRepo.findOne.mockResolvedValue(makeSettings({ enabled: true }));
+  }
+
+  function baseStartDto() {
+    return {
+      businessId: ACCOUNT_ID,
+      leadId: LEAD_ID,
+      leadPhoneE164: '+15551234567',
+      leadSummary: 'Test lead',
+      fromNumberHint: BOT_NUMBER,
+      agentHint: AGENT_PHONE,
+    } as any;
+  }
+
+  it('REJECTS with voice_channel_not_enabled when TPN has activeChannels=["sms"]', async () => {
+    const { service, settingsRepo, tenantPhoneRepo, sessionRepo } = buildService();
+    primeEnabledSettings(settingsRepo);
+    sessionRepo.findOne.mockResolvedValue(null); // no idempotent existing session
+    tenantPhoneRepo.findOne.mockResolvedValue({
+      id: 'tpn-1',
+      channel: 'SMS',
+      metadata: { requestedChannel: 'sms', activeChannels: ['sms'] },
+    });
+
+    await expect(
+      service.startSession(WORKSPACE_ID, baseStartDto()),
+    ).rejects.toMatchObject({
+      response: {
+        code: 'voice_channel_not_enabled',
+        fromNumber: BOT_NUMBER,
+        activeChannels: ['sms'],
+      },
+    });
+    // Critical: no session row was created — the whole point of the preflight.
+    expect(sessionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('REJECTS when TPN has legacy channel="sms" (metadata absent, falls back to column)', async () => {
+    const { service, settingsRepo, tenantPhoneRepo, sessionRepo } = buildService();
+    primeEnabledSettings(settingsRepo);
+    sessionRepo.findOne.mockResolvedValue(null);
+    tenantPhoneRepo.findOne.mockResolvedValue({
+      id: 'tpn-legacy',
+      channel: 'sms', // pre-Wave-2 row with no metadata.activeChannels
+      metadata: null,
+    });
+
+    await expect(
+      service.startSession(WORKSPACE_ID, baseStartDto()),
+    ).rejects.toMatchObject({
+      response: { code: 'voice_channel_not_enabled' },
+    });
+    expect(sessionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('PASSES when TPN has activeChannels=["sms","voice"] (channel="both" purchase)', async () => {
+    const { service, settingsRepo, tenantPhoneRepo, sessionRepo, integrationRepo } = buildService();
+    primeEnabledSettings(settingsRepo);
+    sessionRepo.findOne.mockResolvedValue(null);
+    sessionRepo.create.mockImplementation((data: any) => ({ id: 'sess-new-1', ...data }));
+    tenantPhoneRepo.findOne.mockResolvedValue({
+      id: 'tpn-both',
+      channel: 'SMS', // enum stays SMS for both; intent lives in metadata
+      metadata: { requestedChannel: 'both', activeChannels: ['sms', 'voice'] },
+    });
+    // Suppress initiateMode's downstream work — we only care that the
+    // preflight passed and the session got created.
+    integrationRepo.findOne.mockResolvedValue(null);
+    (service as any).initiateMode = jest.fn().mockResolvedValue(undefined);
+
+    const result = await service.startSession(WORKSPACE_ID, baseStartDto());
+    expect(result.status).toBe(SessionStatus.CREATED);
+    expect(sessionRepo.save).toHaveBeenCalled();
+  });
+
+  it('PASSES when TPN has activeChannels=["voice"] (voice-only purchase)', async () => {
+    const { service, settingsRepo, tenantPhoneRepo, sessionRepo, integrationRepo } = buildService();
+    primeEnabledSettings(settingsRepo);
+    sessionRepo.findOne.mockResolvedValue(null);
+    sessionRepo.create.mockImplementation((data: any) => ({ id: 'sess-voice-1', ...data }));
+    tenantPhoneRepo.findOne.mockResolvedValue({
+      id: 'tpn-voice',
+      channel: 'VOICE',
+      metadata: { requestedChannel: 'voice', activeChannels: ['voice'] },
+    });
+    integrationRepo.findOne.mockResolvedValue(null);
+    (service as any).initiateMode = jest.fn().mockResolvedValue(undefined);
+
+    const result = await service.startSession(WORKSPACE_ID, baseStartDto());
+    expect(result.status).toBe(SessionStatus.CREATED);
+    expect(sessionRepo.save).toHaveBeenCalled();
+  });
+
+  it('PROCEEDS with warning when TPN row is missing (grandfathered integration)', async () => {
+    const { service, settingsRepo, tenantPhoneRepo, sessionRepo, integrationRepo } = buildService();
+    primeEnabledSettings(settingsRepo);
+    sessionRepo.findOne.mockResolvedValue(null);
+    sessionRepo.create.mockImplementation((data: any) => ({ id: 'sess-legacy-1', ...data }));
+    tenantPhoneRepo.findOne.mockResolvedValue(null); // no TPN row at all
+    integrationRepo.findOne.mockResolvedValue(null);
+    (service as any).initiateMode = jest.fn().mockResolvedValue(undefined);
+    const warnSpy = jest.spyOn((service as any).logger, 'warn');
+
+    const result = await service.startSession(WORKSPACE_ID, baseStartDto());
+    expect(result.status).toBe(SessionStatus.CREATED);
+    expect(sessionRepo.save).toHaveBeenCalled();
+    // The warning log is the observability handle for grandfathered rows —
+    // ops can grep for tpn_not_found to find integrations that need per-
+    // number tracking backfilled.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('tpn_not_found'),
+    );
+  });
+});
