@@ -87,6 +87,21 @@ export class TwilioVoiceService {
         timeout: input.timeoutSeconds ?? 30,
         record: true,
         recordingChannels: input.recordingChannels ?? 'dual',
+        // Twilio Answering Machine Detection. When enabled, Twilio
+        // adds an `AnsweredBy` field to the outbound-answer webhook
+        // body with one of: 'human', 'machine_start', 'machine_end_beep',
+        // 'machine_end_silence', 'machine_end_other', 'fax', 'unknown'.
+        //
+        // Consumers that ignore AnsweredBy behave identically to
+        // before (extra field, no impact). Consumers that CHECK
+        // AnsweredBy (e.g. MockCustomer's whisper-bridge) can
+        // short-circuit machine-answered calls instead of dumping a
+        // whisper into voicemail. Adds ~1-2s to the answer webhook
+        // latency while Twilio classifies the answerer.
+        //
+        // Twilio bills $0.0075 per detected call. Negligible at
+        // demo/lead-connect volumes.
+        machineDetection: 'Enable',
       };
       if (input.statusCallbackUrl) {
         params.statusCallback = input.statusCallbackUrl;
