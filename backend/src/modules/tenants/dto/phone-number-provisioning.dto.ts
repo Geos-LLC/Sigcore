@@ -59,6 +59,26 @@ export class PurchasePhoneNumberDto {
   channel?: PurchaseChannel;
 }
 
+/**
+ * PATCH /api/tenants/:id/phone-numbers/:allocationId/channels
+ *
+ * Update an existing allocation's channel configuration in-place without
+ * DELETE + repurchase. Written in response to the Globus 2026-08 audit
+ * (see docs/AUDIT_TPN_ACTIVECHANNELS_STUCK.md) — SMS-only TPNs whose
+ * underlying Twilio number supports voice were previously only fixable
+ * via ops SQL or by swapping the phone number entirely.
+ *
+ * Primary use case: upgrading SMS → both when the underlying Twilio
+ * number's capabilities support voice. Downgrades (removing SMS or
+ * voice from an existing allocation) are supported symmetrically for
+ * correctness but should be used cautiously — in-flight conversations
+ * on the removed channel will be silently dropped.
+ */
+export class UpdatePhoneChannelDto {
+  @IsEnum(['sms', 'voice', 'both'] as const)
+  channel: PurchaseChannel;
+}
+
 export class UpdatePricingConfigDto {
   @IsEnum(PricingType)
   @IsOptional()

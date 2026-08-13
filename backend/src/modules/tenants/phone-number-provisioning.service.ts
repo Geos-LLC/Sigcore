@@ -32,6 +32,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { TwilioProvider } from '../communication/providers/twilio.provider';
 import { TwilioSubaccountProvisionerService } from '../integrations/twilio-subaccount-provisioner.service';
 import { ensureOutboundReadyForTenantPhone } from './ensure-outbound-ready.helpers';
+import type { PurchaseChannel } from './dto/phone-number-provisioning.dto';
 
 export interface AvailableNumberWithPricing {
   phoneNumber: string;
@@ -630,6 +631,219 @@ export class PhoneNumberProvisioningService {
       phoneNumberSid,
       urls,
     );
+  }
+
+  /**
+   * Update an existing allocation's channel configuration in-place.
+   *
+   * Fixes the class of bug documented in docs/AUDIT_TPN_ACTIVECHANNELS_STUCK.md
+   * (Globus Service 2026-08 incident): metadata.activeChannels was frozen at
+   * purchase-time with no post-purchase update path, and the only "fix" was
+   * DELETE + repurchase — which swaps the phone number, breaking existing
+   * customer SMS history and any external references. This endpoint fixes
+   * the row in place without touching the phone number identity.
+   *
+   * Behavior:
+   *   1. Loads TPN by (id, workspaceId, tenantId). 404 when not found.
+   *   2. Idempotency: no-op if the requested channel matches the current
+   *      metadata.requestedChannel — returns unchanged allocation.
+   *   3. Capability validation: rejects if trying to add a channel the
+   *      underlying Twilio number doesn't support (per `metadata.capabilities`
+   *      captured at purchase time). Prevents enabling voice on an SMS-only
+   *      Twilio number.
+   *   4. Configures Twilio webhooks for the target channel set (partial
+   *      update via TwilioProvider.updateNumberWebhooks — safe to run
+   *      idempotently). Adds URLs for channels being enabled; leaves
+   *      existing URLs in place for channels being removed (the operator
+   *      can explicitly `release` if they want to decommission fully).
+   *   5. Updates DB row: metadata.activeChannels, metadata.requestedChannel,
+   *      and the `channel` enum column (mirrors purchase-time mapping — see
+   *      persistedChannel logic in purchaseNumber).
+   *   6. When adding SMS, re-runs ensureOutboundReady (idempotent) so the
+   *      CommunicationBusiness → Profile → PPA chain is materialized.
+   *
+   * Never touches Twilio phone-number identity; the underlying provider SID
+   * and the E.164 number are unchanged.
+   */
+  async updateAllocationChannel(
+    workspaceId: string,
+    tenantId: string,
+    allocationId: string,
+    requestedChannel: PurchaseChannel,
+  ): Promise<TenantPhoneNumber> {
+    const allocation = await this.tenantPhoneRepo.findOne({
+      where: { id: allocationId, workspaceId, tenantId },
+    });
+    if (!allocation) {
+      throw new NotFoundException('Phone number allocation not found');
+    }
+
+    const metadata = (allocation.metadata ?? {}) as Record<string, unknown>;
+    const currentRequestedChannel = metadata.requestedChannel as PurchaseChannel | undefined;
+
+    // Idempotency — matches purchase-time metadata shape exactly.
+    if (currentRequestedChannel === requestedChannel) {
+      this.logger.log(
+        `[updateAllocationChannel] no-op — allocation=${allocationId} phone=${allocation.phoneNumber} already at channel=${requestedChannel}`,
+      );
+      return allocation;
+    }
+
+    // Capability validation. `metadata.capabilities` is captured verbatim
+    // from Twilio at purchase time (see purchaseNumber:479) — it's the
+    // authoritative "what CAN this number do" list. Refusing to enable a
+    // channel the number physically can't support prevents landing metadata
+    // that would immediately confuse downstream guards.
+    const capabilities = this.extractCapabilities(metadata);
+    const nextActiveChannels: Array<'sms' | 'voice'> =
+      requestedChannel === 'both' ? ['sms', 'voice'] : [requestedChannel];
+    for (const ch of nextActiveChannels) {
+      if (!capabilities.has(ch)) {
+        throw new BadRequestException(
+          `Cannot enable channel '${ch}' — underlying Twilio number ${allocation.phoneNumber} ` +
+          `does not support it (capabilities=${JSON.stringify([...capabilities])}). ` +
+          `Only channels the physical number supports can be activated.`,
+        );
+      }
+    }
+
+    // Look up Twilio integration to build the webhook URLs. Uses the workspace
+    // Twilio integration — same source-of-truth as purchaseNumber.
+    const integration = await this.integrationRepo.findOne({
+      where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
+    });
+    if (!integration?.credentialsEncrypted) {
+      throw new BadRequestException(
+        `No active Twilio integration in workspace ${workspaceId} — cannot reconfigure webhooks`,
+      );
+    }
+    const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+
+    // Compute + apply Twilio webhook URLs for channels being enabled. Mirrors
+    // the purchase-time URL derivation exactly. We do NOT clear webhooks for
+    // channels being removed — leaving them in place is harmless (Sigcore's
+    // guards will reject those channels going forward), and clearing them
+    // risks losing inbound-signal capture on a channel the operator only
+    // wanted to gate outbound-side.
+    const baseUrl =
+      this.configService.get('BASE_URL') ||
+      process.env.BASE_URL ||
+      (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+    const currentActiveChannels = this.readActiveChannels(metadata);
+    const addingSms = nextActiveChannels.includes('sms') && !currentActiveChannels.has('sms');
+    const addingVoice = nextActiveChannels.includes('voice') && !currentActiveChannels.has('voice');
+    if (baseUrl && (addingSms || addingVoice)) {
+      if (!allocation.providerId) {
+        throw new BadRequestException(
+          `Allocation ${allocationId} has no Twilio provider SID — cannot reconfigure webhooks. ` +
+          `This row predates SID capture; release + repurchase to modernize it.`,
+        );
+      }
+      const urls: { smsUrl?: string; voiceUrl?: string; statusCallbackUrl?: string } = {};
+      if (addingSms) {
+        urls.smsUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`;
+      }
+      if (addingVoice) {
+        urls.voiceUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`;
+        urls.statusCallbackUrl = `${baseUrl}/api/webhooks/twilio/voice/status`;
+      }
+      const twilioResult = await this.twilioProvider.updateNumberWebhooks(
+        credentials,
+        allocation.providerId,
+        urls,
+      );
+      if (!twilioResult.success) {
+        // Do NOT persist metadata when the Twilio-side config failed. If we
+        // stored activeChannels=['sms','voice'] without a voice URL on Twilio,
+        // Sigcore's voice guards would pass but Twilio would fail the actual
+        // call — reintroducing the silent-failure class this whole effort
+        // is trying to eliminate.
+        throw new BadRequestException(
+          `Twilio webhook update failed for ${allocation.phoneNumber}: ${twilioResult.error ?? 'unknown error'}`,
+        );
+      }
+      this.logger.log(
+        `[updateAllocationChannel] Twilio URLs updated allocation=${allocationId} phone=${allocation.phoneNumber} applied=${twilioResult.applied.join(',')}`,
+      );
+    }
+
+    // Persist metadata + column. `channel` enum mirrors purchase-time
+    // convention: 'both' → SMS enum with the true intent in metadata;
+    // 'voice' → VOICE; 'sms' → SMS. See purchaseNumber:457-458 for the
+    // original mapping.
+    const nextColumnChannel =
+      requestedChannel === 'voice' ? ChannelType.VOICE : ChannelType.SMS;
+    allocation.channel = nextColumnChannel;
+    allocation.metadata = {
+      ...metadata,
+      requestedChannel,
+      activeChannels: nextActiveChannels,
+    };
+    await this.tenantPhoneRepo.save(allocation);
+    this.logger.log(
+      `[updateAllocationChannel] allocation=${allocationId} phone=${allocation.phoneNumber} ` +
+      `${currentRequestedChannel ?? 'legacy'} → ${requestedChannel} ` +
+      `activeChannels=${JSON.stringify(nextActiveChannels)}`,
+    );
+
+    // Re-materialize outbound chain when adding SMS. Idempotent — helper
+    // returns changed=false when nothing new gets created. This is the
+    // same call that runs at purchase time; skipping it on channel updates
+    // would leave voice-added-later numbers unable to send SMS if the
+    // CommunicationBusiness/Profile/PPA rows weren't set up at purchase.
+    if (addingSms) {
+      await this.ensureOutboundReady(allocation);
+    }
+
+    return allocation;
+  }
+
+  /**
+   * Extract Twilio capabilities from TPN metadata. Falls back to the union of
+   * (sms, voice) when capabilities is malformed or missing — pre-2026-08 rows
+   * predate the capabilities-capture path but the numbers themselves generally
+   * support both. Conservative: default-open on missing data means legitimate
+   * upgrades work; the channel guard downstream is the real safety net.
+   */
+  private extractCapabilities(
+    metadata: Record<string, unknown>,
+  ): Set<'sms' | 'voice'> {
+    const raw = (metadata as { capabilities?: unknown }).capabilities;
+    if (Array.isArray(raw)) {
+      const out = new Set<'sms' | 'voice'>();
+      for (const v of raw) {
+        if (v === 'sms' || v === 'voice') out.add(v);
+      }
+      if (out.size > 0) return out;
+    }
+    // Object shape from Twilio's Node client: { sms: true, voice: true, mms: true }.
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const obj = raw as Record<string, unknown>;
+      const out = new Set<'sms' | 'voice'>();
+      if (obj.sms === true) out.add('sms');
+      if (obj.voice === true) out.add('voice');
+      if (out.size > 0) return out;
+    }
+    return new Set<'sms' | 'voice'>(['sms', 'voice']);
+  }
+
+  /**
+   * Read the currently-active channel set from TPN metadata. Handles the
+   * legacy shape where the row predates metadata.activeChannels by falling
+   * back to the enum column.
+   */
+  private readActiveChannels(
+    metadata: Record<string, unknown>,
+  ): Set<'sms' | 'voice'> {
+    const raw = (metadata as { activeChannels?: unknown }).activeChannels;
+    if (Array.isArray(raw)) {
+      const out = new Set<'sms' | 'voice'>();
+      for (const v of raw) {
+        if (v === 'sms' || v === 'voice') out.add(v);
+      }
+      return out;
+    }
+    return new Set<'sms' | 'voice'>();
   }
 
   /**

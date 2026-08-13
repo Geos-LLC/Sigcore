@@ -33,6 +33,7 @@ import { IntegrationStatus } from '../../database/entities/communication-integra
 import {
   SearchPhoneNumbersDto,
   PurchasePhoneNumberDto,
+  UpdatePhoneChannelDto,
   UpdatePricingConfigDto,
 } from './dto/phone-number-provisioning.dto';
 
@@ -585,6 +586,36 @@ export class TenantsController {
       workspaceId,
       tenantId,
       allocationId,
+    );
+    return { data: allocation };
+  }
+
+  /**
+   * Update an existing allocation's channel configuration in-place.
+   * Written in response to the Globus 2026-08 audit
+   * (docs/AUDIT_TPN_ACTIVECHANNELS_STUCK.md) so an SMS-only TPN whose
+   * underlying Twilio number supports voice can be fixed via API instead
+   * of ops SQL or DELETE + repurchase. The phone number identity itself
+   * is never touched — only metadata.activeChannels, metadata.requestedChannel,
+   * the enum column, and the Twilio-side webhook URLs.
+   *
+   * PATCH /api/tenants/:id/phone-numbers/:allocationId/channels
+   * Body: { "channel": "sms" | "voice" | "both" }
+   */
+  @Patch(':id/phone-numbers/:allocationId/channels')
+  @HttpCode(HttpStatus.OK)
+  @RequiresWorkspaceScope()
+  async updatePhoneChannel(
+    @WorkspaceId() workspaceId: string,
+    @Param('id') tenantId: string,
+    @Param('allocationId') allocationId: string,
+    @Body() dto: UpdatePhoneChannelDto,
+  ) {
+    const allocation = await this.provisioningService.updateAllocationChannel(
+      workspaceId,
+      tenantId,
+      allocationId,
+      dto.channel,
     );
     return { data: allocation };
   }
