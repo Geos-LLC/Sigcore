@@ -34,6 +34,8 @@ import { RecordingStartDto, HangupDto, DialCallDto } from './dto/call-ops.dto';
 import { CallbackForwarderService } from '../webhooks/callback-forwarder.service';
 import { DialIdempotencyService } from './dial-idempotency.service';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import { ProfilePhoneAssignment } from '../../database/entities/profile-phone-assignment.entity';
+import { CommunicationProfile } from '../../database/entities/communication-profile.entity';
 import {
   CommunicationCall,
   CallDirection,
@@ -296,6 +298,18 @@ export class CallsV1Controller {
     private readonly callRepo: Repository<CommunicationCall>,
     @InjectRepository(CommunicationConversation)
     private readonly conversationRepo: Repository<CommunicationConversation>,
+    // P0-3 (2026-08-15): PPA-based cross-tenant caller-ID authorization.
+    // Brings /v1/calls/dial to parity with the SMS shared-assignment
+    // amendment in communication.service.ts:820-873 (readiness-report
+    // Fix A + 2026-05-11 amendment). The dial endpoint previously did a
+    // strict `(workspaceId, phoneNumber, tenantId)` lookup, denying
+    // cross-tenant sends even when an active PPA legitimately delegated
+    // the TPN to a profile under the caller's tenant. We now do the
+    // same workspace-scoped TPN lookup + PPA check that SMS uses.
+    @InjectRepository(ProfilePhoneAssignment)
+    private readonly ppaRepo: Repository<ProfilePhoneAssignment>,
+    @InjectRepository(CommunicationProfile)
+    private readonly profileRepo: Repository<CommunicationProfile>,
   ) {}
 
   /**
@@ -381,14 +395,49 @@ export class CallsV1Controller {
       integrationId: dto.integrationId,
     });
 
-    // Caller-ID ownership — fromNumber must be a tenant_phone_numbers row
-    // owned by (workspaceId, tenantId) with a voice channel.
+    // Caller-ID authorization — mirrors the SMS path's shared-assignment
+    // model (communication.service.ts:820-873; 2026-05-11 amendment).
+    //
+    // Lookup is workspace-scoped because (workspace_id, phone_number) is
+    // the unique constraint on tenant_phone_numbers — a phone belongs to
+    // exactly one tenant within a workspace. Cross-workspace use is
+    // impossible by construction (the row simply won't be found).
+    //
+    // If the TPN is owned by a DIFFERENT tenant than the authenticated
+    // caller, permit the dial ONLY when an active profile_phone_assignment
+    // links the TPN to an active profile under the caller's tenant. This
+    // is the canonical shared-TPN model: one number can legitimately
+    // serve multiple tenants in the same workspace when each has an
+    // explicit PPA. Same-tenant callers skip the PPA check entirely.
     const tpn = await this.tpnRepo.findOne({
-      where: { workspaceId, phoneNumber: dto.fromNumber, tenantId },
+      where: { workspaceId, phoneNumber: dto.fromNumber },
     });
     if (!tpn) {
       throw new ForbiddenException(
-        'fromNumber not owned by (workspace, tenant) — cross-workspace caller ID rejected',
+        'fromNumber not owned by any tenant in this workspace',
+      );
+    }
+    if (tpn.tenantId !== tenantId) {
+      const sharedAssignment = await this.ppaRepo
+        .createQueryBuilder('ppa')
+        .innerJoin(CommunicationProfile, 'p', 'p.id = ppa.profile_id')
+        .where('ppa.tenant_phone_number_id = :tpnId', { tpnId: tpn.id })
+        .andWhere('ppa.active = TRUE')
+        .andWhere('p.workspace_id = :workspaceId', { workspaceId })
+        .andWhere('p.tenant_id = :callerTenant', { callerTenant: tenantId })
+        .andWhere("p.status = 'active'")
+        .limit(1)
+        .getRawOne();
+      if (!sharedAssignment) {
+        this.v1Logger.warn(
+          `[dial] cross-tenant fromNumber rejected: caller=${tenantId} tpn=${tpn.id} tpn.tenantId=${tpn.tenantId} fromNumber=${dto.fromNumber} (no active profile_phone_assignment)`,
+        );
+        throw new ForbiddenException(
+          `fromNumber ${dto.fromNumber} is not authorized for the calling tenant`,
+        );
+      }
+      this.v1Logger.log(
+        `[dial] cross-tenant fromNumber allowed via PPA: caller=${tenantId} tpn=${tpn.id} tpn.tenantId=${tpn.tenantId} fromNumber=${dto.fromNumber}`,
       );
     }
     // Voice-capability check. Historical shape: `both` purchases store

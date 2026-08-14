@@ -92,6 +92,18 @@ function makeCtrl(opts: {
     create: jest.fn((x: any) => ({ id: 'conv-new', ...x })),
     save: jest.fn(async (row: any) => ({ id: row.id ?? 'conv-new', ...row })),
   };
+  // P0-3: PPA repos — permissive mocks; none of the stamp scenarios test
+  // cross-tenant paths (see calls.dial-ppa-auth.spec.ts for that coverage).
+  const ppaRepo: any = {
+    createQueryBuilder: jest.fn(() => ({
+      innerJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => ({ id: 'ppa-mock' })),
+    })),
+  };
+  const profileRepo: any = {};
 
   const ctrl = new CallsV1Controller(
     twilioVoiceService,
@@ -102,6 +114,8 @@ function makeCtrl(opts: {
     tpnRepo,
     callRepo,
     conversationRepo,
+    ppaRepo,
+    profileRepo,
   );
   return { ctrl, callRepo, conversationRepo, dialOutbound };
 }
