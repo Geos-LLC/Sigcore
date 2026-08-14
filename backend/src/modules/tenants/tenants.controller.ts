@@ -616,6 +616,7 @@ export class TenantsController {
       tenantId,
       allocationId,
       dto.channel,
+      { preserveWebhooks: dto.preserveWebhooks === true },
     );
     return { data: allocation };
   }

@@ -77,6 +77,25 @@ export class PurchasePhoneNumberDto {
 export class UpdatePhoneChannelDto {
   @IsEnum(['sms', 'voice', 'both'] as const)
   channel: PurchaseChannel;
+
+  /**
+   * When true, skip the Twilio-side webhook update entirely. Sigcore's
+   * `metadata.activeChannels`, `metadata.requestedChannel`, `metadata.capabilities`
+   * and the enum column still get updated, but Twilio's `smsUrl`, `voiceUrl`,
+   * and `statusCallback` are preserved exactly.
+   *
+   * Purpose: metadata-only normalization for legacy BYO TPN rows (created
+   * before Wave-2 PR 4 introduced `metadata.activeChannels`/`capabilities`).
+   * The number's carrier capabilities are verified via a live Twilio SID
+   * fetch before write — if metadata claims a channel Twilio doesn't
+   * actually support, the request is rejected.
+   *
+   * Not for enabling inbound routing. Rewriting the Twilio voiceUrl is a
+   * separate concern (needs its own inbound-agent rollout).
+   */
+  @IsBoolean()
+  @IsOptional()
+  preserveWebhooks?: boolean;
 }
 
 export class UpdatePricingConfigDto {

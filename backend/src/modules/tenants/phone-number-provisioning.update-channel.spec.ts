@@ -21,6 +21,7 @@ function buildService(opts: {
   twilioUpdateSucceeds?: boolean;
   twilioUpdateApplied?: string[];
   integrationMissing?: boolean;
+  twilioFetchResult?: { phoneNumber: string; capabilities: { voice: boolean; sms: boolean; mms: boolean } } | null;
 } = {}) {
   const allocation = opts.integrationMissing || opts.allocationMetadata === 'missing'
     ? null
@@ -31,11 +32,15 @@ function buildService(opts: {
         phoneNumber: PHONE,
         providerId: PROVIDER_SID,
         channel: opts.allocationChannel ?? ChannelType.SMS,
-        metadata: opts.allocationMetadata ?? {
-          requestedChannel: 'sms',
-          activeChannels: ['sms'],
-          capabilities: ['sms', 'voice'],
-        },
+        // Use hasOwnProperty (not ??) so an explicit `null` from a test
+        // (legacy-BYO shape) is preserved and doesn't fall back to the default.
+        metadata: Object.prototype.hasOwnProperty.call(opts, 'allocationMetadata')
+          ? opts.allocationMetadata
+          : {
+              requestedChannel: 'sms',
+              activeChannels: ['sms'],
+              capabilities: ['sms', 'voice'],
+            },
       };
 
   const tenantPhoneRepo = {
@@ -62,6 +67,11 @@ function buildService(opts: {
       applied: opts.twilioUpdateApplied ?? ['voiceUrl', 'statusCallbackUrl'],
       error: opts.twilioUpdateSucceeds === false ? 'twilio_error' : undefined,
     })),
+    fetchPhoneNumberBySid: jest.fn(async (_c: string, sid: string) =>
+      opts.twilioFetchResult === undefined
+        ? { sid, phoneNumber: PHONE, friendlyName: 'test', capabilities: { voice: true, sms: true, mms: true } }
+        : opts.twilioFetchResult,
+    ),
   };
   const configService: any = {
     get: jest.fn((k: string) => (k === 'BASE_URL' ? 'https://sigcore.test' : undefined)),
@@ -220,5 +230,89 @@ describe('PhoneNumberProvisioningService.updateAllocationChannel', () => {
       svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both'),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(tenantPhoneRepo.save).not.toHaveBeenCalled();
+  });
+
+  // ─── preserveWebhooks (metadata-only normalization for legacy BYO TPNs) ──
+  //
+  // 2026-08-14 Spotless Homes case: TPN 0a0a5951 created 2026-03-08,
+  // metadata=null (predates Wave-2 PR 4), Twilio caps=voice/sms/mms.
+  // Need to backfill Sigcore metadata to reflect Twilio reality WITHOUT
+  // rewriting the Twilio-side voiceUrl (which points at a demo route and
+  // whose replacement is the separate inbound-agent rollout's concern).
+  describe('preserveWebhooks (metadata-only normalize)', () => {
+    it('SKIPS Twilio webhook update when preserveWebhooks=true; metadata is written and capabilities backfilled from live Twilio fetch', async () => {
+      const { svc, tenantPhoneRepo, twilioProvider } = buildService({
+        // Legacy TPN: null metadata, all defaults.
+        allocationMetadata: null,
+      });
+      const result = await svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', {
+        preserveWebhooks: true,
+      });
+      // Twilio webhooks NOT touched.
+      expect(twilioProvider.updateNumberWebhooks).not.toHaveBeenCalled();
+      // Twilio SID fetch WAS invoked to authoritatively backfill capabilities.
+      expect(twilioProvider.fetchPhoneNumberBySid).toHaveBeenCalledWith(
+        'creds-json',
+        PROVIDER_SID,
+      );
+      // DB write happened with capabilities backfilled from Twilio.
+      expect(tenantPhoneRepo.save).toHaveBeenCalled();
+      expect(result.metadata).toMatchObject({
+        activeChannels: ['sms', 'voice'],
+        requestedChannel: 'both',
+        capabilities: ['sms', 'voice'],
+      });
+    });
+
+    it('DOES NOT skip Twilio webhook update when preserveWebhooks is absent or false (existing behavior)', async () => {
+      const { svc, twilioProvider } = buildService({
+        allocationMetadata: {
+          requestedChannel: 'sms',
+          activeChannels: ['sms'],
+          capabilities: ['sms', 'voice'],
+        },
+      });
+      await svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both');
+      expect(twilioProvider.updateNumberWebhooks).toHaveBeenCalled();
+    });
+
+    it('REJECTS in preserveWebhooks mode when Twilio SID resolves to a different phone number (identity mismatch)', async () => {
+      const { svc, tenantPhoneRepo } = buildService({
+        allocationMetadata: null,
+        twilioFetchResult: {
+          phoneNumber: '+15555550000', // different from PHONE
+          capabilities: { voice: true, sms: true, mms: true },
+        },
+      });
+      await expect(
+        svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', { preserveWebhooks: true }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tenantPhoneRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS in preserveWebhooks mode when Twilio fetch returns null (no authoritative caps → refuse to claim voice)', async () => {
+      const { svc, tenantPhoneRepo } = buildService({
+        allocationMetadata: null,
+        twilioFetchResult: null,
+      });
+      await expect(
+        svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', { preserveWebhooks: true }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tenantPhoneRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('REJECTS in preserveWebhooks mode when Twilio caps do not include the requested channel', async () => {
+      const { svc, tenantPhoneRepo } = buildService({
+        allocationMetadata: null,
+        twilioFetchResult: {
+          phoneNumber: PHONE,
+          capabilities: { voice: false, sms: true, mms: true },
+        },
+      });
+      await expect(
+        svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', { preserveWebhooks: true }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(tenantPhoneRepo.save).not.toHaveBeenCalled();
+    });
   });
 });

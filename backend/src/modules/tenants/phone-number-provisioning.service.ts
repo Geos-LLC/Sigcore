@@ -670,7 +670,9 @@ export class PhoneNumberProvisioningService {
     tenantId: string,
     allocationId: string,
     requestedChannel: PurchaseChannel,
+    opts?: { preserveWebhooks?: boolean },
   ): Promise<TenantPhoneNumber> {
+    const preserveWebhooks = opts?.preserveWebhooks === true;
     const allocation = await this.tenantPhoneRepo.findOne({
       where: { id: allocationId, workspaceId, tenantId },
     });
@@ -689,26 +691,12 @@ export class PhoneNumberProvisioningService {
       return allocation;
     }
 
-    // Capability validation. `metadata.capabilities` is captured verbatim
-    // from Twilio at purchase time (see purchaseNumber:479) — it's the
-    // authoritative "what CAN this number do" list. Refusing to enable a
-    // channel the number physically can't support prevents landing metadata
-    // that would immediately confuse downstream guards.
-    const capabilities = this.extractCapabilities(metadata);
     const nextActiveChannels: Array<'sms' | 'voice'> =
       requestedChannel === 'both' ? ['sms', 'voice'] : [requestedChannel];
-    for (const ch of nextActiveChannels) {
-      if (!capabilities.has(ch)) {
-        throw new BadRequestException(
-          `Cannot enable channel '${ch}' — underlying Twilio number ${allocation.phoneNumber} ` +
-          `does not support it (capabilities=${JSON.stringify([...capabilities])}). ` +
-          `Only channels the physical number supports can be activated.`,
-        );
-      }
-    }
 
-    // Look up Twilio integration to build the webhook URLs. Uses the workspace
-    // Twilio integration — same source-of-truth as purchaseNumber.
+    // Load Twilio integration — needed for both webhook rewrite AND the
+    // optional live-capability fetch used when this legacy row is missing
+    // metadata.capabilities.
     const integration = await this.integrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE },
     });
@@ -719,12 +707,78 @@ export class PhoneNumberProvisioningService {
     }
     const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
 
+    // Capability source of truth:
+    //   1) metadata.capabilities if present (fast path — set at purchase time by Wave-2 PR 4)
+    //   2) Twilio live fetch (when metadata.capabilities is absent AND we have a providerId).
+    //      Used for legacy BYO rows (created before Wave-2) whose metadata is null.
+    //   3) default-permissive fallback (extractCapabilities default) — matches the
+    //      existing behavior for legacy rows that also lack a providerId.
+    let capabilities = this.extractCapabilities(metadata);
+    let capabilitiesArrayForWrite: string[] | undefined =
+      (metadata as { capabilities?: unknown }).capabilities as string[] | undefined;
+    const capsAlreadyInMetadata =
+      Array.isArray((metadata as { capabilities?: unknown }).capabilities) &&
+      ((metadata as { capabilities?: unknown[] }).capabilities as unknown[]).length > 0;
+    if (!capsAlreadyInMetadata && allocation.providerId) {
+      const pn = await this.twilioProvider.fetchPhoneNumberBySid(
+        credentials,
+        allocation.providerId,
+      );
+      if (pn) {
+        // Trust Twilio phone-number identity — refuse if the SID resolves to a
+        // different E.164 than the row we're editing (defense against stale SID).
+        if (pn.phoneNumber !== allocation.phoneNumber) {
+          throw new BadRequestException(
+            `Twilio SID ${allocation.providerId} resolves to ${pn.phoneNumber}, ` +
+            `not ${allocation.phoneNumber}. Refusing to normalize on mismatched identity.`,
+          );
+        }
+        const twilioCaps = new Set<'sms' | 'voice'>();
+        if (pn.capabilities.sms) twilioCaps.add('sms');
+        if (pn.capabilities.voice) twilioCaps.add('voice');
+        capabilities = twilioCaps;
+        capabilitiesArrayForWrite = [...twilioCaps];
+        this.logger.log(
+          `[updateAllocationChannel] backfilled capabilities from Twilio allocation=${allocationId} ` +
+          `phone=${allocation.phoneNumber} sid=${allocation.providerId} caps=${JSON.stringify(capabilitiesArrayForWrite)}`,
+        );
+      } else if (preserveWebhooks) {
+        // In metadata-normalize mode, refusing to write "voice=true" without
+        // authoritative carrier verification is the whole point. Refuse.
+        throw new BadRequestException(
+          `Twilio SID lookup failed for ${allocation.phoneNumber}. Refusing to normalize ` +
+          `metadata without authoritative capability verification.`,
+        );
+      }
+      // If preserveWebhooks=false AND Twilio fetch failed, fall through to
+      // the default-permissive extractCapabilities behavior (existing
+      // backward-compat behavior for non-preserve callers).
+    }
+
+    // Capability validation. Refuses channels the number physically can't support.
+    for (const ch of nextActiveChannels) {
+      if (!capabilities.has(ch)) {
+        throw new BadRequestException(
+          `Cannot enable channel '${ch}' — underlying Twilio number ${allocation.phoneNumber} ` +
+          `does not support it (capabilities=${JSON.stringify([...capabilities])}). ` +
+          `Only channels the physical number supports can be activated.`,
+        );
+      }
+    }
+
     // Compute + apply Twilio webhook URLs for channels being enabled. Mirrors
     // the purchase-time URL derivation exactly. We do NOT clear webhooks for
     // channels being removed — leaving them in place is harmless (Sigcore's
     // guards will reject those channels going forward), and clearing them
     // risks losing inbound-signal capture on a channel the operator only
     // wanted to gate outbound-side.
+    //
+    // SKIPPED ENTIRELY when preserveWebhooks=true — metadata-only path.
+    // Purpose (2026-08-14 legacy-TPN normalize): backfill Sigcore metadata
+    // for BYO rows whose Twilio-side webhooks may point at intentional
+    // routes (e.g. a demo/inbound-agent URL) that we do NOT want to
+    // overwrite in this narrow-scope operation. Inbound routing is a
+    // separate concern owned by the inbound-agent rollout.
     const baseUrl =
       this.configService.get('BASE_URL') ||
       process.env.BASE_URL ||
@@ -732,7 +786,13 @@ export class PhoneNumberProvisioningService {
     const currentActiveChannels = this.readActiveChannels(metadata);
     const addingSms = nextActiveChannels.includes('sms') && !currentActiveChannels.has('sms');
     const addingVoice = nextActiveChannels.includes('voice') && !currentActiveChannels.has('voice');
-    if (baseUrl && (addingSms || addingVoice)) {
+    if (preserveWebhooks && (addingSms || addingVoice)) {
+      this.logger.log(
+        `[updateAllocationChannel] preserveWebhooks=true — skipping Twilio webhook update ` +
+        `for allocation=${allocationId} phone=${allocation.phoneNumber} ` +
+        `(would have set ${addingSms ? 'smsUrl ' : ''}${addingVoice ? 'voiceUrl statusCallbackUrl' : ''})`,
+      );
+    } else if (baseUrl && (addingSms || addingVoice)) {
       if (!allocation.providerId) {
         throw new BadRequestException(
           `Allocation ${allocationId} has no Twilio provider SID — cannot reconfigure webhooks. ` +
@@ -778,12 +838,14 @@ export class PhoneNumberProvisioningService {
       ...metadata,
       requestedChannel,
       activeChannels: nextActiveChannels,
+      ...(capabilitiesArrayForWrite ? { capabilities: capabilitiesArrayForWrite } : {}),
     };
     await this.tenantPhoneRepo.save(allocation);
     this.logger.log(
       `[updateAllocationChannel] allocation=${allocationId} phone=${allocation.phoneNumber} ` +
       `${currentRequestedChannel ?? 'legacy'} → ${requestedChannel} ` +
-      `activeChannels=${JSON.stringify(nextActiveChannels)}`,
+      `activeChannels=${JSON.stringify(nextActiveChannels)} ` +
+      `preserveWebhooks=${preserveWebhooks}`,
     );
 
     // Re-materialize outbound chain when adding SMS. Idempotent — helper

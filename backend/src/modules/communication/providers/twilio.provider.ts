@@ -865,6 +865,48 @@ export class TwilioProvider implements CommunicationProvider {
   }
 
   /**
+   * Fetch a single Twilio IncomingPhoneNumber by SID and return the raw
+   * capability + phone-number fields. Used by the metadata-normalization
+   * path in PhoneNumberProvisioningService to backfill legacy TPN rows
+   * (`metadata: null`) with authoritative carrier-side capabilities.
+   * Read-only — no state changes on Twilio.
+   *
+   * Returns null when the SID isn't found or Twilio rejects the fetch
+   * (e.g. wrong subaccount). Caller decides how to react — the metadata
+   * backfill path treats null as fatal because it needs authoritative
+   * verification before writing an `activeChannels: ['voice']` claim.
+   */
+  async fetchPhoneNumberBySid(
+    credentialsString: string,
+    sid: string,
+  ): Promise<{
+    sid: string;
+    phoneNumber: string;
+    friendlyName: string;
+    capabilities: { voice: boolean; sms: boolean; mms: boolean };
+  } | null> {
+    try {
+      const credentials = JSON.parse(credentialsString) as TwilioCredentials;
+      const client = this.createClient(credentials);
+      const pn = await client.incomingPhoneNumbers(sid).fetch();
+      return {
+        sid: pn.sid,
+        phoneNumber: pn.phoneNumber,
+        friendlyName: pn.friendlyName ?? '',
+        capabilities: {
+          voice: pn.capabilities?.voice ?? false,
+          sms: pn.capabilities?.sms ?? false,
+          mms: pn.capabilities?.mms ?? false,
+        },
+      };
+    } catch (error) {
+      const err = error as Error;
+      this.logger.warn(`[fetchPhoneNumberBySid] Failed for SID ${sid}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Get recordings for a call.
    */
   async getCallRecordings(
