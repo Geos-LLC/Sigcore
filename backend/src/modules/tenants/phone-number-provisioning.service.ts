@@ -670,9 +670,15 @@ export class PhoneNumberProvisioningService {
     tenantId: string,
     allocationId: string,
     requestedChannel: PurchaseChannel,
-    opts?: { preserveWebhooks?: boolean },
+    opts?: { preserveWebhooks?: boolean; reconcile?: boolean },
   ): Promise<TenantPhoneNumber> {
     const preserveWebhooks = opts?.preserveWebhooks === true;
+    const reconcile = opts?.reconcile === true;
+    if (preserveWebhooks && reconcile) {
+      throw new BadRequestException(
+        'preserveWebhooks and reconcile are mutually exclusive — the whole point of reconcile is to write webhooks.',
+      );
+    }
     const allocation = await this.tenantPhoneRepo.findOne({
       where: { id: allocationId, workspaceId, tenantId },
     });
@@ -684,7 +690,12 @@ export class PhoneNumberProvisioningService {
     const currentRequestedChannel = metadata.requestedChannel as PurchaseChannel | undefined;
 
     // Idempotency — matches purchase-time metadata shape exactly.
-    if (currentRequestedChannel === requestedChannel) {
+    // Reconcile mode bypasses this so carrier drift (metadata says one thing,
+    // Twilio says another) can be repaired. In reconcile mode, the Twilio-write
+    // stage below itself diffs current vs. desired and writes zero URLs when
+    // Twilio is already correct — so reconcile against an already-correct
+    // number remains a no-op end-to-end.
+    if (!reconcile && currentRequestedChannel === requestedChannel) {
       this.logger.log(
         `[updateAllocationChannel] no-op — allocation=${allocationId} phone=${allocation.phoneNumber} already at channel=${requestedChannel}`,
       );
@@ -786,26 +797,93 @@ export class PhoneNumberProvisioningService {
     const currentActiveChannels = this.readActiveChannels(metadata);
     const addingSms = nextActiveChannels.includes('sms') && !currentActiveChannels.has('sms');
     const addingVoice = nextActiveChannels.includes('voice') && !currentActiveChannels.has('voice');
+
+    // Compute the write payload for Twilio. Two modes:
+    //
+    //   preserveWebhooks=true  — never write Twilio (metadata-only path).
+    //   reconcile=true         — write only URLs whose Twilio-side actual value
+    //                            differs from desired. Idempotent against an
+    //                            already-correct number.
+    //   default                — pre-existing "adding-channels" gate: write
+    //                            only URLs for channels being newly added.
+    let urls: { smsUrl?: string; voiceUrl?: string; statusCallbackUrl?: string } = {};
+    let twilioWriteReason = '';
+
     if (preserveWebhooks && (addingSms || addingVoice)) {
       this.logger.log(
         `[updateAllocationChannel] preserveWebhooks=true — skipping Twilio webhook update ` +
         `for allocation=${allocationId} phone=${allocation.phoneNumber} ` +
         `(would have set ${addingSms ? 'smsUrl ' : ''}${addingVoice ? 'voiceUrl statusCallbackUrl' : ''})`,
       );
-    } else if (baseUrl && (addingSms || addingVoice)) {
+    } else if (reconcile && baseUrl) {
       if (!allocation.providerId) {
         throw new BadRequestException(
-          `Allocation ${allocationId} has no Twilio provider SID — cannot reconfigure webhooks. ` +
-          `This row predates SID capture; release + repurchase to modernize it.`,
+          `Allocation ${allocationId} has no Twilio provider SID — cannot reconcile without live carrier state.`,
         );
       }
-      const urls: { smsUrl?: string; voiceUrl?: string; statusCallbackUrl?: string } = {};
+      // Fetch current Twilio state for the diff. Reject if the SID resolves
+      // to a different number (defence against stale SID).
+      const currentTwilio = await this.twilioProvider.fetchPhoneNumberBySid(
+        credentials,
+        allocation.providerId,
+      );
+      if (!currentTwilio) {
+        throw new BadRequestException(
+          `Twilio SID lookup failed for ${allocation.phoneNumber}. Refusing to reconcile without authoritative live state.`,
+        );
+      }
+      if (currentTwilio.phoneNumber !== allocation.phoneNumber) {
+        throw new BadRequestException(
+          `Twilio SID ${allocation.providerId} resolves to ${currentTwilio.phoneNumber}, ` +
+          `not ${allocation.phoneNumber}. Refusing to reconcile on mismatched identity.`,
+        );
+      }
+      const desiredSmsUrl = nextActiveChannels.includes('sms')
+        ? `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`
+        : undefined;
+      const desiredVoiceUrl = nextActiveChannels.includes('voice')
+        ? `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`
+        : undefined;
+      const desiredStatusCallback = nextActiveChannels.includes('voice')
+        ? `${baseUrl}/api/webhooks/twilio/voice/status`
+        : undefined;
+
+      if (desiredSmsUrl && currentTwilio.smsUrl !== desiredSmsUrl) {
+        urls.smsUrl = desiredSmsUrl;
+      }
+      if (desiredVoiceUrl && currentTwilio.voiceUrl !== desiredVoiceUrl) {
+        urls.voiceUrl = desiredVoiceUrl;
+      }
+      if (desiredStatusCallback && currentTwilio.statusCallback !== desiredStatusCallback) {
+        urls.statusCallbackUrl = desiredStatusCallback;
+      }
+      twilioWriteReason = `reconcile diff — desired=${JSON.stringify({
+        sms: desiredSmsUrl,
+        voice: desiredVoiceUrl,
+        statusCb: desiredStatusCallback,
+      })} actual=${JSON.stringify({
+        sms: currentTwilio.smsUrl,
+        voice: currentTwilio.voiceUrl,
+        statusCb: currentTwilio.statusCallback,
+      })}`;
+    } else if (baseUrl && (addingSms || addingVoice)) {
       if (addingSms) {
         urls.smsUrl = `${baseUrl}/api/webhooks/twilio/sms/${workspaceId}`;
       }
       if (addingVoice) {
         urls.voiceUrl = `${baseUrl}/api/webhooks/twilio/voice/${workspaceId}`;
         urls.statusCallbackUrl = `${baseUrl}/api/webhooks/twilio/voice/status`;
+      }
+      twilioWriteReason = `adding sms=${addingSms} voice=${addingVoice}`;
+    }
+
+    const urlKeys = Object.keys(urls);
+    if (urlKeys.length > 0) {
+      if (!allocation.providerId) {
+        throw new BadRequestException(
+          `Allocation ${allocationId} has no Twilio provider SID — cannot reconfigure webhooks. ` +
+          `This row predates SID capture; release + repurchase to modernize it.`,
+        );
       }
       const twilioResult = await this.twilioProvider.updateNumberWebhooks(
         credentials,
@@ -823,7 +901,12 @@ export class PhoneNumberProvisioningService {
         );
       }
       this.logger.log(
-        `[updateAllocationChannel] Twilio URLs updated allocation=${allocationId} phone=${allocation.phoneNumber} applied=${twilioResult.applied.join(',')}`,
+        `[updateAllocationChannel] Twilio URLs updated allocation=${allocationId} phone=${allocation.phoneNumber} applied=${twilioResult.applied.join(',')} reason=${twilioWriteReason}`,
+      );
+    } else if (reconcile) {
+      this.logger.log(
+        `[updateAllocationChannel] reconcile: no Twilio writes — carrier state already matches desired ` +
+        `for allocation=${allocationId} phone=${allocation.phoneNumber}`,
       );
     }
 
@@ -831,22 +914,36 @@ export class PhoneNumberProvisioningService {
     // convention: 'both' → SMS enum with the true intent in metadata;
     // 'voice' → VOICE; 'sms' → SMS. See purchaseNumber:457-458 for the
     // original mapping.
+    //
+    // In reconcile mode, skip the DB write when metadata + column are
+    // already at the target shape. Keeps reconcile against an already-
+    // consistent row a true no-op.
     const nextColumnChannel =
       requestedChannel === 'voice' ? ChannelType.VOICE : ChannelType.SMS;
-    allocation.channel = nextColumnChannel;
-    allocation.metadata = {
-      ...metadata,
-      requestedChannel,
-      activeChannels: nextActiveChannels,
-      ...(capabilitiesArrayForWrite ? { capabilities: capabilitiesArrayForWrite } : {}),
-    };
-    await this.tenantPhoneRepo.save(allocation);
-    this.logger.log(
-      `[updateAllocationChannel] allocation=${allocationId} phone=${allocation.phoneNumber} ` +
-      `${currentRequestedChannel ?? 'legacy'} → ${requestedChannel} ` +
-      `activeChannels=${JSON.stringify(nextActiveChannels)} ` +
-      `preserveWebhooks=${preserveWebhooks}`,
-    );
+    const currentActiveSorted = [...currentActiveChannels].sort();
+    const nextActiveSorted = [...nextActiveChannels].sort();
+    const metadataUnchanged =
+      reconcile &&
+      currentRequestedChannel === requestedChannel &&
+      allocation.channel === nextColumnChannel &&
+      currentActiveSorted.length === nextActiveSorted.length &&
+      currentActiveSorted.every((c, i) => c === nextActiveSorted[i]);
+    if (!metadataUnchanged) {
+      allocation.channel = nextColumnChannel;
+      allocation.metadata = {
+        ...metadata,
+        requestedChannel,
+        activeChannels: nextActiveChannels,
+        ...(capabilitiesArrayForWrite ? { capabilities: capabilitiesArrayForWrite } : {}),
+      };
+      await this.tenantPhoneRepo.save(allocation);
+      this.logger.log(
+        `[updateAllocationChannel] allocation=${allocationId} phone=${allocation.phoneNumber} ` +
+        `${currentRequestedChannel ?? 'legacy'} → ${requestedChannel} ` +
+        `activeChannels=${JSON.stringify(nextActiveChannels)} ` +
+        `preserveWebhooks=${preserveWebhooks} reconcile=${reconcile}`,
+      );
+    }
 
     // Re-materialize outbound chain when adding SMS. Idempotent — helper
     // returns changed=false when nothing new gets created. This is the

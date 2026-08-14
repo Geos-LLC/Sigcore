@@ -96,6 +96,29 @@ export class UpdatePhoneChannelDto {
   @IsBoolean()
   @IsOptional()
   preserveWebhooks?: boolean;
+
+  /**
+   * Carrier reconciliation mode. When true, bypass the metadata
+   * idempotency early-exit and instead diff the CURRENT Twilio-side
+   * webhooks against the desired state derived from `channel`. Writes
+   * only mismatches. Does not touch metadata unless `channel` differs
+   * from `metadata.requestedChannel`.
+   *
+   * Purpose: repair carrier drift where Sigcore's metadata already
+   * claims (say) `requestedChannel=both` but Twilio's actual voiceUrl
+   * or statusCallback are wrong. Discovered on Spotless's TPN
+   * +19045778584 on 2026-08-14 — metadata was `both` but voiceUrl
+   * still pointed at `https://demo.twilio.com/welcome/voice/`.
+   *
+   * Preserves idempotency: repeated reconciliation against an already-
+   * correct Twilio number produces zero writes.
+   *
+   * Interaction with `preserveWebhooks`: mutually exclusive. Setting
+   * both is rejected at the service layer.
+   */
+  @IsBoolean()
+  @IsOptional()
+  reconcile?: boolean;
 }
 
 export class UpdatePricingConfigDto {

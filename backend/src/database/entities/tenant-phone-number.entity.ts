@@ -115,6 +115,20 @@ export class TenantPhoneNumber {
   @Index()
   communicationIntegrationId?: string | null;
 
+  /**
+   * Wave-2 2026-08-14 — deterministic per-TPN inbound routing override.
+   *
+   * When set, the inbound Twilio voice router forwards to this number
+   * without consulting call_connect_settings. Deterministic even when
+   * multiple SavedAccounts share one bot number (Spotless: 33 CC rows on
+   * +19045778584, all valid, no natural pick from CC alone).
+   *
+   * NULL leaves existing routing behavior intact (deterministic CC pick,
+   * then tenant.metadata.callForwardingNumber, then voicemail).
+   */
+  @Column({ name: 'inbound_agent_phone_e164', type: 'varchar', nullable: true })
+  inboundAgentPhoneE164?: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

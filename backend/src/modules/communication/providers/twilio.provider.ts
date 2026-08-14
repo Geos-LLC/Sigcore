@@ -884,6 +884,14 @@ export class TwilioProvider implements CommunicationProvider {
     phoneNumber: string;
     friendlyName: string;
     capabilities: { voice: boolean; sms: boolean; mms: boolean };
+    // Added 2026-08-14 for carrier reconciliation: consumers can diff
+    // current Twilio-side URLs against desired to decide whether to write.
+    voiceUrl: string;
+    voiceMethod: string;
+    smsUrl: string;
+    smsMethod: string;
+    statusCallback: string;
+    statusCallbackMethod: string;
   } | null> {
     try {
       const credentials = JSON.parse(credentialsString) as TwilioCredentials;
@@ -898,6 +906,12 @@ export class TwilioProvider implements CommunicationProvider {
           sms: pn.capabilities?.sms ?? false,
           mms: pn.capabilities?.mms ?? false,
         },
+        voiceUrl: pn.voiceUrl ?? '',
+        voiceMethod: pn.voiceMethod ?? '',
+        smsUrl: pn.smsUrl ?? '',
+        smsMethod: pn.smsMethod ?? '',
+        statusCallback: pn.statusCallback ?? '',
+        statusCallbackMethod: pn.statusCallbackMethod ?? '',
       };
     } catch (error) {
       const err = error as Error;

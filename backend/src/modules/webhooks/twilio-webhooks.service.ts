@@ -767,62 +767,91 @@ export class TwilioWebhooksService {
     // ── ROUTING DECISION TRACE ──────────────────────────────────────────────
     this.logger.log(`[ROUTING] CallSid=${payload.CallSid} ourNumber=${ourNumber} workspaceId=${workspaceId}`);
 
-    // Check if a Call Connect configuration exists for this bot number (any state).
-    // CC settings are authoritative: they map botNumberE164 → agentPhoneE164 and are
-    // stored per-business (not per-workspace), so they survive tenant re-provisioning
-    // without requiring any cross-workspace lookup.
-    // IMPORTANT: if CC settings EXIST for this number (even disabled), we NEVER fall
-    // through to the legacy callForwardingNumber path — doing so would send calls to an
-    // unintended BYO phone. Only fully-configured + enabled settings get forwarded;
-    // everything else goes to voicemail.
-    // When multiple CC settings share the same botNumber (e.g., per-account
-    // isolation created new rows while legacy rows remain), prefer the most
-    // recently updated row — it has the freshest agent phone number.
-    const ccSettings = await this.ccSettingsRepo.findOne({
-      where: { botNumberE164: ourNumber },
-      order: { updatedAt: 'DESC' },
-    });
-    this.logger.log(
-      `[ROUTING] CC settings lookup for botNumberE164=${ourNumber}: ` +
-      (ccSettings
-        ? `FOUND businessId=${ccSettings.businessId} enabled=${ccSettings.enabled} agentPhoneE164=${ccSettings.agentPhoneE164 ?? 'null'}`
-        : 'NOT FOUND'),
-    );
-    if (ccSettings) {
-      if (ccSettings.enabled && ccSettings.agentPhoneE164) {
-        // Ownership audit log only — CC settings are the authoritative source (they are
-        // written per-businessId and survive tenant re-provisioning). Do not block here:
-        // tenant_phone_numbers.tenantId can be stale after re-provisioning epochs, and
-        // blocking on it would prevent forwarding to the correct agent number.
-        const ownerAllocation = await this.tenantPhoneNumberRepo.findOne({
-          where: { workspaceId, phoneNumber: ourNumber, tenantId: ccSettings.businessId },
-        });
-        if (!ownerAllocation) {
-          this.logger.warn(
-            `[ROUTING] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${ccSettings.businessId} (stale allocation — proceeding with CC settings)`,
-          );
-        }
-        this.logger.log(
-          `[ROUTING] → CC path: forwarding to agentPhoneE164=${ccSettings.agentPhoneE164} (businessId=${ccSettings.businessId})`,
-        );
-        return this.generateForwardTwiML(ccSettings.agentPhoneE164, ourNumber);
-      }
-      // CC settings exist but not actionable — do NOT fall through to legacy forwarding.
-      this.logger.log(
-        `[ROUTING] → CC settings exist but not actionable ` +
-        `(enabled=${ccSettings.enabled}, agentPhone=${ccSettings.agentPhoneE164 ?? 'null'}) — returning voicemail`,
-      );
-      return this.generateVoicemailTwiML();
-    }
-
-    // No CC settings for this number — use legacy tenant metadata forwarding.
+    // Load TPN allocation up front — needed for both the TPN-level override
+    // (step 1 below) and the tenant-metadata fallback further down.
     const phoneAllocation = await this.tenantPhoneNumberRepo.findOne({
       where: { workspaceId, phoneNumber: ourNumber },
     });
     this.logger.log(
       `[ROUTING] phoneAllocation for workspaceId=${workspaceId} phoneNumber=${ourNumber}: ` +
-      (phoneAllocation ? `FOUND tenantId=${phoneAllocation.tenantId}` : 'NOT FOUND'),
+      (phoneAllocation
+        ? `FOUND tenantId=${phoneAllocation.tenantId} inboundAgent=${phoneAllocation.inboundAgentPhoneE164 ?? 'null'}`
+        : 'NOT FOUND'),
     );
+
+    // ── [Step 1] Per-TPN inbound override (added 2026-08-14) ───────────────
+    // Deterministic per-TPN destination. Wins over any CC row. Set this
+    // column via ops when a workspace shares one bot number across many
+    // SavedAccounts (Spotless: 33 CC rows on +19045778584) and the
+    // pre-existing "ORDER BY updated_at DESC" CC pick is non-deterministic.
+    if (phoneAllocation?.inboundAgentPhoneE164) {
+      this.logger.log(
+        `[ROUTING] → TPN override: forwarding to inboundAgentPhoneE164=${phoneAllocation.inboundAgentPhoneE164}`,
+      );
+      return this.generateForwardTwiML(phoneAllocation.inboundAgentPhoneE164, ourNumber);
+    }
+
+    // ── [Step 2] Deterministic CC pick ─────────────────────────────────────
+    // The pre-existing `findOne WHERE bot_number ORDER BY updated_at DESC`
+    // picks arbitrarily when multiple SavedAccounts share one bot number.
+    // New rule: only forward when exactly one enabled+agent row exists.
+    // Otherwise apply the strictest safe fallback:
+    //
+    //   1 actionable row → forward (preserves single-tenant behavior)
+    //   >1 actionable rows → shared-bot; fall through to step 3
+    //       (never pick arbitrarily — set tpn.inbound_agent_phone_e164 or
+    //        tenant.metadata.callForwardingNumber to make it deterministic)
+    //   0 actionable rows + ANY CC row exists (enabled or disabled) → voicemail
+    //       (preserves the pre-existing "CC EXISTS → never fall through to
+    //        BYO forwarding" contract — protects intended-BYO workspaces)
+    //   0 CC rows at all → fall through to step 3
+    //       (pre-existing "No CC settings" path)
+    const allCc = await this.ccSettingsRepo.find({
+      where: { botNumberE164: ourNumber },
+    });
+    const actionableCc = allCc.filter(
+      (cc) => cc.enabled && Boolean(cc.agentPhoneE164),
+    );
+    this.logger.log(
+      `[ROUTING] CC settings for botNumberE164=${ourNumber}: total=${allCc.length} actionable=${actionableCc.length}`,
+    );
+    if (actionableCc.length === 1) {
+      const cc = actionableCc[0];
+      // Ownership audit log only — CC settings are the authoritative source
+      // in the single-tenant path (they are written per-businessId and
+      // survive tenant re-provisioning). Do not block here: tpn.tenantId
+      // can be stale after re-provisioning epochs.
+      const ownerAllocation = await this.tenantPhoneNumberRepo.findOne({
+        where: { workspaceId, phoneNumber: ourNumber, tenantId: cc.businessId },
+      });
+      if (!ownerAllocation) {
+        this.logger.warn(
+          `[ROUTING] Ownership audit: ${ourNumber} not in tenant_phone_numbers for businessId=${cc.businessId} (stale allocation — proceeding with CC settings)`,
+        );
+      }
+      this.logger.log(
+        `[ROUTING] → CC path: forwarding to agentPhoneE164=${cc.agentPhoneE164} (businessId=${cc.businessId})`,
+      );
+      return this.generateForwardTwiML(cc.agentPhoneE164, ourNumber);
+    }
+    if (actionableCc.length > 1) {
+      // Shared-bot case (multiple SavedAccounts on one TPN). Fall through
+      // to tenant metadata below. Use tpn.inbound_agent_phone_e164 to
+      // override deterministically.
+      this.logger.log(
+        `[ROUTING] CC settings ambiguous (${actionableCc.length} actionable rows for bot ${ourNumber}) — ` +
+        `falling through to tenant metadata / voice_inbound_url. Set tenant_phone_numbers.inbound_agent_phone_e164 for a deterministic override.`,
+      );
+    } else if (allCc.length > 0) {
+      // actionableCc === 0 AND allCc > 0: CC rows exist but none are
+      // actionable. Preserve pre-existing BYO-protection contract.
+      this.logger.log(
+        `[ROUTING] → CC rows exist but not actionable (total=${allCc.length}, actionable=0) — returning voicemail`,
+      );
+      return this.generateVoicemailTwiML();
+    }
+    // Remaining cases: actionableCc > 1 (falls through below) OR allCc === 0
+    // (pre-existing "No CC settings" fall-through). phoneAllocation loaded above.
     if (phoneAllocation) {
       const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
       const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;

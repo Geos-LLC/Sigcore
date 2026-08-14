@@ -84,7 +84,12 @@ function build(opts: {
   });
   callRepo.create.mockImplementation((x: any) => x);
   callRepo.save.mockImplementation(async (x: any) => x);
+  // Legacy findOne + new find() mocks — 2026-08-14 deterministic-precedence
+  // change moved to find() but existing tests still model the single-row shape.
   ccSettingsRepo.findOne.mockResolvedValue(opts.ccSettings ?? null);
+  ccSettingsRepo.find.mockResolvedValue(
+    opts.ccSettings ? [opts.ccSettings] : [],
+  );
   tenantPhoneNumberRepo.findOne.mockResolvedValue(opts.phoneAllocation ?? null);
   tenantRepo.findOne.mockResolvedValue(opts.tenant ?? null);
 
