@@ -848,13 +848,48 @@ export class PhoneNumberProvisioningService {
         ? `${baseUrl}/api/webhooks/twilio/voice/status`
         : undefined;
 
-      if (desiredSmsUrl && currentTwilio.smsUrl !== desiredSmsUrl) {
+      // Trust rule (added 2026-08-14 after Spotless +19045778584 near-miss):
+      // Sigcore has multiple legitimate SMS/voice webhook variants
+      // (BYO `sms/:webhookId`, LB tenant `sms/lb/:tenantId`, voice
+      // `voice/:workspaceId`, and possibly future per-tenant shapes). If the
+      // current Twilio URL already points at the Sigcore host, treat it
+      // as a valid variant and DO NOT overwrite — reconcile writes only
+      // when the URL is empty OR points at a non-Sigcore host (real drift).
+      //
+      // The desired URL is what a fresh purchase would set. The trust rule
+      // only relaxes the WRITE gate — desiredUrl is still computed so we
+      // have a canonical target when the current URL genuinely is wrong.
+      const sigcoreHost = (() => {
+        try { return new URL(baseUrl as string).host; }
+        catch { return ''; }
+      })();
+      const pointsAtSigcore = (u: string | null | undefined): boolean => {
+        if (!u) return false;
+        try { return new URL(u).host === sigcoreHost; }
+        catch { return false; }
+      };
+
+      if (
+        desiredSmsUrl &&
+        currentTwilio.smsUrl !== desiredSmsUrl &&
+        !pointsAtSigcore(currentTwilio.smsUrl)
+      ) {
         urls.smsUrl = desiredSmsUrl;
       }
-      if (desiredVoiceUrl && currentTwilio.voiceUrl !== desiredVoiceUrl) {
+      if (
+        desiredVoiceUrl &&
+        currentTwilio.voiceUrl !== desiredVoiceUrl &&
+        !pointsAtSigcore(currentTwilio.voiceUrl)
+      ) {
         urls.voiceUrl = desiredVoiceUrl;
       }
-      if (desiredStatusCallback && currentTwilio.statusCallback !== desiredStatusCallback) {
+      // statusCallback: repair unless it already points at Sigcore. Empty
+      // string is NOT a Sigcore host — reconcile fills that gap.
+      if (
+        desiredStatusCallback &&
+        currentTwilio.statusCallback !== desiredStatusCallback &&
+        !pointsAtSigcore(currentTwilio.statusCallback)
+      ) {
         urls.statusCallbackUrl = desiredStatusCallback;
       }
       twilioWriteReason = `reconcile diff — desired=${JSON.stringify({
@@ -865,6 +900,10 @@ export class PhoneNumberProvisioningService {
         sms: currentTwilio.smsUrl,
         voice: currentTwilio.voiceUrl,
         statusCb: currentTwilio.statusCallback,
+      })} sigcoreTrustSkipped=${JSON.stringify({
+        sms: pointsAtSigcore(currentTwilio.smsUrl),
+        voice: pointsAtSigcore(currentTwilio.voiceUrl),
+        statusCb: pointsAtSigcore(currentTwilio.statusCallback),
       })}`;
     } else if (baseUrl && (addingSms || addingVoice)) {
       if (addingSms) {

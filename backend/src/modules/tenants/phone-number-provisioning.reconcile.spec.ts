@@ -197,6 +197,51 @@ describe('PhoneNumberProvisioningService.updateAllocationChannel — reconcile m
     expect(urls.statusCallbackUrl).toBeUndefined();
   });
 
+  it('[test 3b] SMS URL alt-Sigcore variant (e.g. sms/lb/:tenantId) preserved during voice reconciliation', async () => {
+    // Regression: on 2026-08-14 the Spotless +19045778584 reconcile
+    // overwrote sms_url=sms/lb/6a4eeca9-... with the canonical
+    // sms/:workspaceId shape, which routes to a different service and
+    // would have broken LB inbound SMS. Reconcile must trust any
+    // Sigcore-hosted URL as a valid variant even if it isn't the exact
+    // canonical shape.
+    const LB_SMS_VARIANT = `${BASE_URL}/api/webhooks/twilio/sms/lb/6a4eeca9-7620-4a1c-bb9b-14401c126563`;
+    const { svc, twilioProvider } = buildService({
+      twilioFetch: twilioState({
+        voiceUrl: 'https://demo.twilio.com/welcome/voice/', // WRONG
+        smsUrl: LB_SMS_VARIANT, // Sigcore-hosted but non-canonical
+        statusCallback: '',
+      }),
+    });
+    await svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', {
+      reconcile: true,
+    });
+    const urls = (twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    // Voice repaired, statusCallback filled, SMS UNTOUCHED (Sigcore-trust rule).
+    expect(urls.voiceUrl).toBe(DESIRED_VOICE_URL);
+    expect(urls.statusCallbackUrl).toBe(DESIRED_STATUS_CB);
+    expect(urls.smsUrl).toBeUndefined();
+  });
+
+  it('[test 3c] voiceUrl pointing at a different Sigcore path is trusted (no overwrite)', async () => {
+    // Symmetric rule for voice: if voice_url already points at Sigcore
+    // (even a non-canonical shape), reconcile does NOT overwrite. Only
+    // status_callback (empty) gets repaired.
+    const ALT_SIGCORE_VOICE = `${BASE_URL}/api/webhooks/twilio/voice/some-legacy-tenant-shape/xyz`;
+    const { svc, twilioProvider } = buildService({
+      twilioFetch: twilioState({
+        voiceUrl: ALT_SIGCORE_VOICE,
+        smsUrl: DESIRED_SMS_URL,
+        statusCallback: '',
+      }),
+    });
+    await svc.updateAllocationChannel(WS, TENANT_ID, ALLOC_ID, 'both', {
+      reconcile: true,
+    });
+    const urls = (twilioProvider.updateNumberWebhooks as jest.Mock).mock.calls[0][2];
+    expect(urls.voiceUrl).toBeUndefined();
+    expect(urls.statusCallbackUrl).toBe(DESIRED_STATUS_CB);
+  });
+
   it('[test 4] wrong/missing statusCallback → statusCallback repaired even when voiceUrl is already correct', async () => {
     const { svc, twilioProvider } = buildService({
       twilioFetch: twilioState({
