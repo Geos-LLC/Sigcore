@@ -64,6 +64,9 @@ describe('CallsV1Controller — happy paths', () => {
       // Wave-4 PR #1: callRepo + conversationRepo (unused in these tests)
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
+      // P0-3 (2026-08-15): ppaRepo + profileRepo (unused in non-dial tests)
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
     );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
@@ -98,6 +101,9 @@ describe('CallsV1Controller — happy paths', () => {
       // Wave-4 PR #1: callRepo + conversationRepo (unused in these tests)
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
+      // P0-3 (2026-08-15): ppaRepo + profileRepo (unused in non-dial tests)
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
     );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
@@ -224,6 +230,9 @@ describe('TwilioVoiceService failure surface', () => {
       // Wave-4 PR #1: callRepo + conversationRepo (unused in these tests)
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
       { findOne: jest.fn(), create: jest.fn((x: any) => x), save: jest.fn(async (x: any) => x) } as any,
+      // P0-3 (2026-08-15): ppaRepo + profileRepo (unused in non-dial tests)
+      { createQueryBuilder: jest.fn() } as any,
+      {} as any,
     );
     const req: any = {
       resource: { workspaceId: WS, tenantId: TENANT, integration: { id: INT_ID } },
