@@ -34,6 +34,16 @@ import { RecordingStartDto, HangupDto, DialCallDto } from './dto/call-ops.dto';
 import { CallbackForwarderService } from '../webhooks/callback-forwarder.service';
 import { DialIdempotencyService } from './dial-idempotency.service';
 import { TenantPhoneNumber } from '../../database/entities/tenant-phone-number.entity';
+import {
+  CommunicationCall,
+  CallDirection,
+  CallStatus,
+} from '../../database/entities/communication-call.entity';
+import {
+  CommunicationConversation,
+} from '../../database/entities/communication-conversation.entity';
+import { ProviderType } from '../../database/entities/communication-integration.entity';
+import { Logger } from '@nestjs/common';
 import { tpnSupportsChannel } from '../../common/util/tpn-channel';
 
 const E164_REGEX = /^\+[1-9]\d{6,14}$/;
@@ -267,6 +277,8 @@ export class CallsController {
 @Controller('v1/calls')
 @UseGuards(SigcoreAuthGuard)
 export class CallsV1Controller {
+  private readonly v1Logger = new Logger(CallsV1Controller.name);
+
   constructor(
     private readonly twilioVoiceService: TwilioVoiceService,
     private readonly callbackForwarder: CallbackForwarderService,
@@ -275,6 +287,15 @@ export class CallsV1Controller {
     private readonly integrationResourceGuard: IntegrationResourceGuardService,
     @InjectRepository(TenantPhoneNumber)
     private readonly tpnRepo: Repository<TenantPhoneNumber>,
+    // Wave-4 PR #1 (2026-08-14): stamp `communication_calls.communication_integration_id`
+    // at dial time so post-call ops (recording/hangup/status) can resolve the
+    // owning Twilio integration deterministically from providerCallSid — no
+    // race against Twilio's status callback creating the row later, no
+    // AccountSid-prefix fallback in IntegrationResourceGuard Check 4.
+    @InjectRepository(CommunicationCall)
+    private readonly callRepo: Repository<CommunicationCall>,
+    @InjectRepository(CommunicationConversation)
+    private readonly conversationRepo: Repository<CommunicationConversation>,
   ) {}
 
   /**
@@ -498,8 +519,149 @@ export class CallsV1Controller {
       throw err;
     }
 
+    // Wave-4 PR #1: stamp `communication_calls.communication_integration_id`
+    // at dial time so downstream ops resolve the owning Twilio integration
+    // deterministically. Best-effort — the Twilio call already exists; a
+    // failure to persist locally must NOT fail the request. handleCallStatus
+    // will still find + update the row when Twilio's first status callback
+    // fires (it looks up by providerCallSid).
+    //
+    // Uses find-then-insert with a duplicate-safe fallback: if another
+    // request created the row concurrently (extremely rare — Twilio's
+    // status callback typically fires seconds after dial returns), the
+    // second insert catches the DB error and skips silently — the existing
+    // row already carries the correct integrationId.
+    try {
+      await this.upsertOutboundCallRow({
+        workspaceId,
+        integrationId: dto.integrationId,
+        fromNumber: dto.fromNumber,
+        toNumber: dto.toNumber,
+        providerCallSid: result.providerCallSid,
+        answerMode,
+      });
+    } catch (err) {
+      // Log-and-swallow. Never fail the dial response — the PSTN call is
+      // already placed and remote systems (Twilio) will retry the status
+      // callback until success.
+      this.v1Logger.warn(
+        `[dial] communication_calls persistence best-effort failed for providerCallSid=${result.providerCallSid}: ${
+          (err as Error).message
+        }`,
+      );
+    }
+
     this.dialIdempotency.remember(workspaceId, idempotencyKey, bodyHash, result);
     return { data: result };
+  }
+
+  /**
+   * Wave-4 PR #1 — dial-time upsert of the outbound `communication_calls`
+   * row. Idempotent w.r.t. the Twilio status callback that will fire soon
+   * after and update the same row via `handleCallStatus`.
+   *
+   * Design notes:
+   *   - Conversation is find-or-create keyed on
+   *     `(workspaceId, phoneNumber=fromNumber, participantPhoneNumber=toNumber)`.
+   *     Mirrors the pattern in `twilio-webhooks.service.handleOutgoingCall`
+   *     (browser SDK outbound). We deliberately reuse the same shape so
+   *     both server-initiated (v1 dial) and browser-initiated outbound
+   *     calls land in the same conversation graph.
+   *   - `communicationIntegrationId` is what Wave 4 needs. Once set here,
+   *     `handleCallStatus` will preserve it on updates.
+   *   - `metadata.origin` distinguishes this from browser calls for
+   *     analytics.
+   */
+  private async upsertOutboundCallRow(opts: {
+    workspaceId: string;
+    integrationId: string;
+    fromNumber: string;
+    toNumber: string;
+    providerCallSid: string;
+    answerMode: 'hangup' | 'twiml_url' | 'media_stream';
+  }): Promise<void> {
+    // 1. Existing row (defense against race with Twilio callback)?
+    const existing = await this.callRepo.findOne({
+      where: { providerCallId: opts.providerCallSid },
+    });
+    if (existing) {
+      // Row exists — ensure integrationId is stamped.
+      if (!existing.communicationIntegrationId) {
+        existing.communicationIntegrationId = opts.integrationId;
+        existing.metadata = {
+          ...(existing.metadata ?? {}),
+          integrationId: opts.integrationId,
+          origin: (existing.metadata?.origin as string | undefined) ?? 'sigcore_v1_dial',
+          dialTimeStampBackfilled: true,
+        };
+        await this.callRepo.save(existing);
+        this.v1Logger.log(
+          `[dial] back-stamped integrationId=${opts.integrationId} on existing row for providerCallSid=${opts.providerCallSid}`,
+        );
+      }
+      return;
+    }
+
+    // 2. Find or create conversation.
+    const externalId = `${opts.fromNumber}:${opts.toNumber}`;
+    let conversation = await this.conversationRepo.findOne({
+      where: { workspaceId: opts.workspaceId, externalId },
+    });
+    if (!conversation) {
+      conversation = this.conversationRepo.create({
+        workspaceId: opts.workspaceId,
+        externalId,
+        provider: ProviderType.TWILIO,
+        phoneNumber: opts.fromNumber,
+        participantPhoneNumber: opts.toNumber,
+        participantPhoneNumbers: [opts.toNumber],
+        metadata: {},
+      });
+      await this.conversationRepo.save(conversation);
+    }
+
+    // 3. Create the call row with dial-time integrationId stamp.
+    const call = this.callRepo.create({
+      conversationId: conversation.id,
+      direction: CallDirection.OUT,
+      duration: 0,
+      fromNumber: opts.fromNumber,
+      toNumber: opts.toNumber,
+      providerCallId: opts.providerCallSid,
+      // handleCallStatus overwrites this with the terminal status when
+      // Twilio's callback fires. Initial COMPLETED matches the existing
+      // pattern in handleOutgoingCall — TypeORM default requires SOMETHING.
+      status: CallStatus.COMPLETED,
+      startedAt: new Date(),
+      communicationIntegrationId: opts.integrationId,
+      metadata: {
+        origin: 'sigcore_v1_dial',
+        answerMode: opts.answerMode,
+        integrationId: opts.integrationId,
+      },
+    });
+    try {
+      await this.callRepo.save(call);
+      this.v1Logger.log(
+        `[dial] created communication_calls row (integrationId=${opts.integrationId}) for providerCallSid=${opts.providerCallSid}`,
+      );
+    } catch (err) {
+      // Concurrent status-callback insert lost the race — that row will
+      // already carry integrationId from the fallback resolution path;
+      // OR both inserts landed via the same providerCallSid path and one
+      // is a unique-violation. Either way, safe to swallow — the state
+      // we want (integrationId stamped) is achieved.
+      const existingAfterRace = await this.callRepo.findOne({
+        where: { providerCallId: opts.providerCallSid },
+      });
+      if (existingAfterRace && !existingAfterRace.communicationIntegrationId) {
+        existingAfterRace.communicationIntegrationId = opts.integrationId;
+        await this.callRepo.save(existingAfterRace);
+      }
+      this.v1Logger.log(
+        `[dial] insert race resolved for providerCallSid=${opts.providerCallSid}: ${(err as Error).message}`,
+      );
+    }
   }
 
   @Post(':providerCallSid/recording/start')
