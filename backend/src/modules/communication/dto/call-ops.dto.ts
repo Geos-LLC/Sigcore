@@ -159,6 +159,31 @@ export class DialCallDto {
   @IsString()
   @IsOptional()
   statusCallbackUrl?: string;
+
+  /**
+   * P0-2 (2026-08-15) — per-call opt-in Twilio Answering Machine
+   * Detection (AMD). Default: disabled (preserves existing behavior;
+   * dial-wide AMD was reverted 2026-08-12 due to iOS-Call-Screening
+   * false positives — see twilio-voice.service.ts:82-100).
+   *
+   * When set to 'enabled', Sigcore requests Twilio's ASYNC AMD:
+   *   machineDetection = 'DetectMessageEnd'
+   *   asyncAmd = 'true'
+   *   asyncAmdStatusCallback = <same wrapped URL as statusCallbackUrl>
+   * so Twilio POSTs an additional callback carrying `AnsweredBy` when
+   * detection completes. This never blocks the call — the media stream
+   * opens as usual on 'answered' and the caller (Callio's orchestrator)
+   * decides at first-turn whether to speak normally or switch to
+   * voicemail-message mode based on the AnsweredBy value.
+   *
+   * Consumers (LB Wave-4 AI-outbound) opt in per call. All other dial
+   * paths (MockCustomer whisper-bridge, canary dials, ad-hoc ops)
+   * leave this unset and see identical behavior to today.
+   */
+  @IsString()
+  @IsOptional()
+  @IsIn(['enabled', 'disabled'])
+  machineDetection?: 'enabled' | 'disabled';
 }
 
 export interface DialCallResult {

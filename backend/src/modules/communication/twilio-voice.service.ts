@@ -75,6 +75,15 @@ export class TwilioVoiceService {
       statusCallbackUrl?: string;
       recordingChannels?: 'mono' | 'dual';
       timeoutSeconds?: number;
+      /**
+       * P0-2 (2026-08-15) — per-call opt-in async AMD. When true, Sigcore
+       * asks Twilio to run answering-machine detection and POST the
+       * result to the same signed statusCallbackUrl (Twilio distinguishes
+       * these by including `AnsweredBy` in the AMD callback body).
+       *
+       * Default: absent → no AMD (preserves the 2026-08-12 revert).
+       */
+      machineDetection?: boolean;
     },
   ): Promise<DialCallResult> {
     const client = this.clientForIntegration(integration);
@@ -88,16 +97,10 @@ export class TwilioVoiceService {
         record: true,
         recordingChannels: input.recordingChannels ?? 'dual',
       };
-      // NOTE: machineDetection was set to 'Enable' briefly (commit
-      // bff87fc3) so MockCustomer's whisper-bridge could short-circuit
-      // voicemail answers. Reverted 2026-08-12 after operator report:
-      // Twilio's AMD over-classified iOS-Call-Screening answers +
-      // brief-hesitation human answers as 'machine_start', triggering
-      // the short-circuit hangup on legitimate calls (visitor's phone
-      // showed a missed call and rolled to voicemail from the
-      // hang-up event, not from the carrier). Callers that need AMD
-      // should opt in explicitly via input flag rather than making
-      // it dial-wide.
+      // Historical note: machineDetection was briefly dial-wide (commit
+      // bff87fc3), reverted 2026-08-12 after iOS-Call-Screening false
+      // positives on legitimate human answers. Opt-in per call from here
+      // on — see the `machineDetection` input flag below.
 
       if (input.statusCallbackUrl) {
         params.statusCallback = input.statusCallbackUrl;
@@ -105,6 +108,31 @@ export class TwilioVoiceService {
         // Ask Twilio for the full lifecycle set, not just the completed default.
         params.statusCallbackEvent = ['initiated', 'ringing', 'answered', 'completed'];
       }
+
+      // P0-2 — async AMD when the caller opts in per-call. `DetectMessageEnd`
+      // waits for the machine greeting to end AND the beep before firing
+      // (so `AnsweredBy=machine_end_beep` gives us a clean cue to leave
+      // the voicemail message). `asyncAmd='true'` decouples detection
+      // from the call answer — Twilio POSTs the AMD result to the same
+      // statusCallbackUrl as an additional callback carrying `AnsweredBy`
+      // + `AmdStatus`. Callio's orchestrator branches at first-turn on
+      // that value.
+      //
+      // We deliberately DO NOT hang up on `machine_start` (mid-greeting)
+      // — that was the 08-12 false-positive footgun. Waiting for
+      // `_end_beep` / `_end_silence` avoids cutting off human answers
+      // with hesitation.
+      if (input.machineDetection && input.statusCallbackUrl) {
+        params.machineDetection = 'DetectMessageEnd';
+        params.asyncAmd = 'true';
+        params.asyncAmdStatusCallback = input.statusCallbackUrl;
+        params.asyncAmdStatusCallbackMethod = 'POST';
+        // Cap the AMD wait so a live human who doesn't speak immediately
+        // still gets to the media stream. Twilio default is 30s; 15s is
+        // a reasonable balance for outbound cold-calls.
+        params.machineDetectionTimeout = 15;
+      }
+
       const call = await client.calls.create(params);
       this.logger.log(
         `[dialOutbound] ok providerCallSid=${call.sid} from=${input.fromNumber} to=${input.toNumber} status=${call.status}`,

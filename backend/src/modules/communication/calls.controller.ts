@@ -562,6 +562,13 @@ export class CallsV1Controller {
         statusCallbackUrl: wrappedStatusUrl,
         recordingChannels: dto.recordingChannels,
         timeoutSeconds: dto.timeoutSeconds,
+        // P0-2 (2026-08-15) — per-call opt-in async AMD. Explicit
+        // 'enabled' only; anything else (undefined / 'disabled') keeps
+        // AMD off. Signed statusCallbackUrl is reused as the async AMD
+        // callback destination, so no additional forwarding token is
+        // needed; Callio's status webhook distinguishes AMD callbacks
+        // by the presence of `AnsweredBy` in the body.
+        machineDetection: dto.machineDetection === 'enabled',
       });
     } catch (err) {
       this.dialIdempotency.release(workspaceId, idempotencyKey);
