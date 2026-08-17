@@ -19,13 +19,32 @@
  *     decrypts creds until one whose accountSid matches the URL's Account
  *     SID is found. Backwards-compatible with pre-Task-6B.5D callers.
  *
- *  2. **Scoped mode (Task 6B.5D)** — used by Callio for voice recordings.
- *     The caller also supplies `x-sigcore-integration-id` +
- *     `x-sigcore-tenant-id` headers. Sigcore verifies the full ownership
- *     chain — workspace-owns-tenant, integration-belongs-to-workspace,
- *     integration.provider=TWILIO, integration.accountSid=URL-accountSid —
- *     BEFORE using the integration's stored credentials. Rejects with 403
- *     on any mismatch.
+ *  2. **Scoped mode (Task 6B.5D + Incident 2026-07-14 Phase 3a)** — used
+ *     by Callio for voice recordings. The caller supplies
+ *     `x-sigcore-integration-id` + `x-sigcore-tenant-id`, and (Phase 3a)
+ *     `x-sigcore-workspace-id`. Sigcore verifies the full ownership chain:
+ *
+ *       - integration exists
+ *       - tenant exists
+ *       - integration.provider === TWILIO
+ *       - tenant.workspaceId === integration.workspaceId
+ *       - (Phase 3a, when `x-sigcore-workspace-id` supplied)
+ *         integration.workspaceId === callerWorkspaceId
+ *       - integration.credentials.accountSid === URL's accountSid
+ *
+ *     Any mismatch → 403.
+ *
+ *     Note: this path deliberately does NOT invoke
+ *     `ProviderContextResolver` to enforce "the caller's integrationId
+ *     must equal the resolver's default for (workspace, tenant, provider)".
+ *     That check is legitimate for outbound dial / status callbacks, but
+ *     for recording playback the load-bearing security guarantees are
+ *     workspace-ownership and account_sid_match — a caller with valid
+ *     service key + valid workspace claim should be able to play back a
+ *     recording routed via ANY integration they own, including one whose
+ *     scope doesn't match the resolver's per-(workspace, provider)
+ *     default (e.g. cross-workspace shared numbers provisioned by another
+ *     integration).
  *
  * Range: an incoming `Range` header is forwarded verbatim to Twilio. The
  * upstream status (200 full or 206 partial), `Content-Range`, and
@@ -48,7 +67,6 @@ import {
   ForbiddenException,
   Logger,
   InternalServerErrorException,
-  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -61,7 +79,6 @@ import {
   Tenant,
 } from '../../database/entities';
 import { EncryptionService } from '../../common/services/encryption.service';
-import { ProviderContextResolver } from '../integrations/provider-context-resolver.service';
 
 const TWILIO_URL_ACCOUNT_SID = /\/Accounts\/(AC[a-f0-9]{32})\//i;
 const TWILIO_ORIGIN = 'https://api.twilio.com';
@@ -82,15 +99,6 @@ export class InternalTwilioProxyController {
     private readonly tenantRepo: Repository<Tenant>,
     private readonly encryptionService: EncryptionService,
     private readonly configService: ConfigService,
-    /**
-     * Incident 2026-07-14 Phase 3a — cross-workspace integrationId hint
-     * validation. When the caller supplies `x-sigcore-workspace-id`, the
-     * resolver double-checks that `x-sigcore-integration-id` belongs to that
-     * workspace before we hand out its Twilio credentials. Optional so the
-     * two existing spec builders don't have to be rewritten in this PR.
-     */
-    @Optional()
-    private readonly providerContextResolver?: ProviderContextResolver,
   ) {}
 
   @Get('recording-proxy')
@@ -211,8 +219,13 @@ export class InternalTwilioProxyController {
    *   3. integration.provider === TWILIO
    *   4. tenant.workspaceId === integration.workspaceId (workspace-owns-tenant
    *      AND integration-belongs-to-workspace collapse into this equality)
-   *   5. integration.credentials decrypt → accountSid === url.accountSid
+   *   5. (Phase 3a) integration.workspaceId === callerWorkspaceId, when the
+   *      caller supplied `x-sigcore-workspace-id`
+   *   6. integration.credentials decrypt → accountSid === url.accountSid
    *      (recording physically belongs to this integration's subaccount)
+   *
+   * This method deliberately does NOT invoke `ProviderContextResolver`.
+   * See the class-level comment for the security rationale.
    *
    * Never surfaces the decrypted secret or Twilio auth token in errors/logs.
    */
@@ -246,11 +259,24 @@ export class InternalTwilioProxyController {
       throw new ForbiddenException('workspace does not own tenant');
     }
     // Incident 2026-07-14 Phase 3a — validate caller-supplied workspaceId
-    // against the resolved integration's workspaceId. Inline check first
-    // (cheap, deterministic), then let the ProviderContextResolver run its
-    // full hint-mismatch semantics for defense in depth + telemetry when it's
-    // wired. Skipped entirely when the caller didn't supply the header —
-    // preserves back-compat with Callio's pre-3a proxy calls.
+    // against the resolved integration's workspaceId. Closes the
+    // "attacker supplies (integrationId, tenantId) from another workspace"
+    // gap: caller must prove they belong to the workspace that owns the
+    // integration they're asking Sigcore to decrypt. Skipped when the
+    // caller didn't supply the header (pre-3a back-compat).
+    //
+    // 2026-08-17 (recording-proxy cross-integration fix) — an earlier
+    // iteration also called `providerContextResolver.resolve()` for extra
+    // hint-mismatch enforcement, but that check assumes the caller
+    // supplies the integration THE RESOLVER would pick for the given
+    // (workspace, tenant, provider) — which is wrong for the legitimate
+    // cross-workspace-integration case (LB-provisioned numbers where the
+    // pilot workspace's calls are recorded on LB's Twilio subaccount).
+    // The resolver check has been removed here; the security boundary
+    // for recording playback is (a) this workspace-ownership check and
+    // (b) the account_sid_mismatch check further down — the recording's
+    // Twilio URL must resolve against creds the integration actually
+    // holds. Custom hint-mismatch was consistency, not authentication.
     if (input.callerWorkspaceId) {
       if (integration.workspaceId !== input.callerWorkspaceId) {
         this.logger.warn(
@@ -262,18 +288,6 @@ export class InternalTwilioProxyController {
         throw new ForbiddenException(
           'integrationId does not belong to caller workspace',
         );
-      }
-      if (this.providerContextResolver) {
-        // Rule 4 fallthrough (workspace lookup) is fine here — the hint
-        // check runs regardless of which rule fires. Any mismatch throws
-        // 403 with `caller_hint_mismatch` telemetry. NotFound propagates
-        // as the caller genuinely has no Twilio integration.
-        await this.providerContextResolver.resolve({
-          workspaceId: input.callerWorkspaceId,
-          tenantId: input.tenantId,
-          provider: ProviderType.TWILIO,
-          integrationId: input.integrationId,
-        });
       }
     }
     if (!integration.credentialsEncrypted) {
