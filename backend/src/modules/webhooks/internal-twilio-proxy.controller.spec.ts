@@ -70,15 +70,6 @@ function makeCtrl(state: {
   integrations: any[];
   tenants: any[];
   serviceKey?: string | undefined;
-  /**
-   * Incident 2026-07-14 Phase 3a — resolver stub. Signature mirrors the
-   * production `ProviderContextResolver.resolve` for the two axes this
-   * controller exercises: (a) hint-mismatch throws ForbiddenException,
-   * (b) success returns a ProviderContext with the resolved integration.
-   * Omit `resolveImpl` to bind the resolver to `undefined` — proves that
-   * pre-Phase-3a code paths still work when the resolver isn't wired.
-   */
-  resolveImpl?: (input: any) => Promise<any>;
 }) {
   const integrationRepo = {
     findOne: jest.fn(({ where: { id } }: any) =>
@@ -98,15 +89,11 @@ function makeCtrl(state: {
   const configService = {
     get: (k: string) => (k === 'SIGCORE_SERVICE_KEY' ? state.serviceKey ?? SERVICE_KEY : undefined),
   };
-  const providerContextResolver = state.resolveImpl
-    ? ({ resolve: jest.fn(state.resolveImpl) } as any)
-    : undefined;
   return new InternalTwilioProxyController(
     integrationRepo as any,
     tenantRepo as any,
     encryptionService as any,
     configService as any,
-    providerContextResolver,
   );
 }
 
@@ -339,48 +326,13 @@ describe('InternalTwilioProxyController', () => {
       ).rejects.toBeInstanceOf(ForbiddenException);
     });
 
-    it('cross_workspace_integrationId_hint_is_rejected — resolver hint mismatch propagates', async () => {
-      // When the resolver IS wired, its hint-mismatch check runs after the
-      // inline check. Simulate the case where inline check passes (caller
-      // WS matches integration WS) but the resolver — e.g. because a newer
-      // Phase mints the integration into a different scope table — throws.
+    it('same_workspace_integrationId_hint_succeeds', async () => {
+      // Baseline pass: caller supplies matching workspaceId. Stream must
+      // complete and Twilio auth headers must be the integration's real
+      // creds.
       const ctrl = makeCtrl({
         integrations: [validIntegration],
         tenants: [validTenant],
-        resolveImpl: async () => {
-          throw new ForbiddenException(
-            'ProviderContextResolver: caller-supplied integrationId does not match resolved integration',
-          );
-        },
-      });
-      await expect(
-        ctrl.streamRecording(
-          REAL_URL,
-          makeReq({
-            integrationId: 'int_1',
-            tenantId: 'tn_1',
-            workspaceId: 'ws_1',
-          }),
-          makeRes(),
-        ),
-      ).rejects.toBeInstanceOf(ForbiddenException);
-    });
-
-    it('same_workspace_integrationId_hint_succeeds — with resolver wired', async () => {
-      // Baseline pass: caller supplies matching workspaceId AND the resolver
-      // approves. Stream must complete and Twilio auth headers must be the
-      // integration's real creds.
-      const ctrl = makeCtrl({
-        integrations: [validIntegration],
-        tenants: [validTenant],
-        resolveImpl: async () => ({
-          integration: validIntegration,
-          rule: 'by_legacy_workspace_fallback',
-          workspaceId: 'ws_1',
-          tenantId: 'tn_1',
-          provider: 'twilio',
-          legacyFallback: true,
-        }),
       });
       mockedAxios.get.mockResolvedValue(upstreamStream(200));
       const res = makeRes();
@@ -402,10 +354,10 @@ describe('InternalTwilioProxyController', () => {
       );
     });
 
-    it('same_workspace_integrationId_hint_succeeds — resolver optional (back-compat)', async () => {
-      // Pre-Phase-3a callers (Callio today) don't send x-sigcore-workspace-id;
-      // the controller must still work exactly as before — the inline check
-      // is skipped, the pre-3a scoped guards fire, and the stream returns.
+    it('same_workspace_integrationId_hint_succeeds — no workspaceId header (pre-3a back-compat)', async () => {
+      // Pre-Phase-3a callers don't send x-sigcore-workspace-id; the
+      // controller must still work exactly as before — the inline check is
+      // skipped, the scoped guards fire, and the stream returns.
       const ctrl = makeCtrl({
         integrations: [validIntegration],
         tenants: [validTenant],
@@ -418,6 +370,141 @@ describe('InternalTwilioProxyController', () => {
         res,
       );
       expect(res.__inspect().statusCode).toBe(200);
+    });
+
+    // -------------------------------------------------------------------
+    // 2026-08-17 — cross-integration recording playback fix.
+    //
+    // Repro of the prod failure: pilot Callio workspace places calls via
+    // a phone number provisioned by LeadBridge's Sigcore integration. The
+    // call+recording live on LB's Twilio subaccount. Callio's Wave-4
+    // stamps that LB integration on `voice_calls.communication_integration_id`
+    // (so post-call ops route to the right account), and the recording
+    // proxy call correctly forwards it as `x-sigcore-integration-id`.
+    //
+    // The integration and its tenant both live in the pilot workspace
+    // (LB provisioned INTO the pilot workspace), so the inline
+    // caller_workspace_mismatch check passes. The account_sid check also
+    // passes because the integration's creds own the URL's account. But
+    // the previous ProviderContextResolver call would resolve the
+    // "default" integration for the (workspace, tenant, TWILIO) triple
+    // to a DIFFERENT integration (the pilot's own, not LB's), and the
+    // hint-mismatch check would 403.
+    //
+    // With the resolver call removed from this path, cross-integration
+    // playback now succeeds — while the load-bearing security guarantees
+    // (workspace-ownership + account_sid_match) still fire.
+    // -------------------------------------------------------------------
+
+    it('cross_integration_recording_playback_succeeds — LB-provisioned-number regression', async () => {
+      // Two TWILIO integrations exist in ws_1 (pilot workspace):
+      //   - `int_pilot_default` (workspace's own default; NOT the one that owns the recording)
+      //   - `int_lb_provisioned` (LB-provisioned; DOES own the recording's Twilio account)
+      // Callio hints `int_lb_provisioned` — the correct one for THIS
+      // recording, even though the resolver's per-workspace default is
+      // `int_pilot_default`.
+      const lbProvisioned = {
+        id: 'int_lb_provisioned',
+        workspaceId: 'ws_1',
+        provider: ProviderType.TWILIO,
+        credentialsEncrypted: JSON.stringify({
+          accountSid: REAL_ACCOUNT_SID,
+          authToken: 'lb-auth-token',
+        }),
+      };
+      const pilotDefault = {
+        id: 'int_pilot_default',
+        workspaceId: 'ws_1',
+        provider: ProviderType.TWILIO,
+        credentialsEncrypted: JSON.stringify({
+          accountSid: OTHER_ACCOUNT_SID,
+          authToken: 'pilot-auth-token',
+        }),
+      };
+      const ctrl = makeCtrl({
+        integrations: [pilotDefault, lbProvisioned],
+        tenants: [validTenant],
+      });
+      mockedAxios.get.mockResolvedValue(upstreamStream(200));
+      const res = makeRes();
+      await ctrl.streamRecording(
+        REAL_URL,
+        makeReq({
+          integrationId: 'int_lb_provisioned',
+          tenantId: 'tn_1',
+          workspaceId: 'ws_1',
+        }),
+        res,
+      );
+      expect(res.__inspect().statusCode).toBe(200);
+      // Twilio auth uses the LB integration's creds (not the pilot default)
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        REAL_URL,
+        expect.objectContaining({
+          auth: { username: REAL_ACCOUNT_SID, password: 'lb-auth-token' },
+        }),
+      );
+    });
+
+    it('cross_workspace_integration_still_rejected_by_workspace_check', async () => {
+      // Same setup as the fix-scenario above, EXCEPT the caller lies about
+      // workspaceId. The inline caller_workspace_mismatch check must still
+      // fire — removing the resolver check must NOT weaken this defense.
+      const foreignIntegration = {
+        id: 'int_foreign',
+        workspaceId: 'ws_other', // integration lives in a different workspace
+        provider: ProviderType.TWILIO,
+        credentialsEncrypted: JSON.stringify({
+          accountSid: REAL_ACCOUNT_SID,
+          authToken: 'foreign-auth-token',
+        }),
+      };
+      const ctrl = makeCtrl({
+        integrations: [foreignIntegration],
+        tenants: [{ id: 'tn_other', workspaceId: 'ws_other' }],
+      });
+      await expect(
+        ctrl.streamRecording(
+          REAL_URL,
+          makeReq({
+            integrationId: 'int_foreign',
+            tenantId: 'tn_other',
+            workspaceId: 'ws_1', // caller claims to be ws_1 — attacker
+          }),
+          makeRes(),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('cross_integration_with_wrong_account_still_rejected_by_accountSid_check', async () => {
+      // Cross-integration case, but the hinted integration's stored
+      // accountSid does NOT match the URL's account. account_sid_mismatch
+      // must still fire — the load-bearing security check for recording
+      // playback remains intact.
+      const mismatchedIntegration = {
+        id: 'int_wrong_account',
+        workspaceId: 'ws_1',
+        provider: ProviderType.TWILIO,
+        credentialsEncrypted: JSON.stringify({
+          accountSid: OTHER_ACCOUNT_SID, // doesn't match REAL_URL's account
+          authToken: 'x',
+        }),
+      };
+      const ctrl = makeCtrl({
+        integrations: [mismatchedIntegration],
+        tenants: [validTenant],
+      });
+      await expect(
+        ctrl.streamRecording(
+          REAL_URL,
+          makeReq({
+            integrationId: 'int_wrong_account',
+            tenantId: 'tn_1',
+            workspaceId: 'ws_1',
+          }),
+          makeRes(),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 
