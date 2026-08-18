@@ -213,6 +213,44 @@ describe('TenantVoiceForwarderService.forward', () => {
     expect(mockedAxios.request).toHaveBeenCalledTimes(1);
   });
 
+  describe('2026-08-17 — effective-caller header', () => {
+    it('adds x-sigcore-forwarded-effective-caller when effectiveCallerNumber is set', async () => {
+      const svc = build();
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      await svc.forward({ ...baseInput(), effectiveCallerNumber: '+19547163388' });
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      expect(args.headers['x-sigcore-forwarded-effective-caller']).toBe('+19547163388');
+    });
+
+    it('omits the header when effectiveCallerNumber is not set (backward compat)', async () => {
+      const svc = build();
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      await svc.forward(baseInput());
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      expect(args.headers['x-sigcore-forwarded-effective-caller']).toBeUndefined();
+    });
+
+    it('omits the header when effectiveCallerNumber is an empty string', async () => {
+      const svc = build();
+      mockedAxios.request.mockResolvedValueOnce({
+        status: 200,
+        data: validTwiml,
+        headers: {},
+      } as any);
+      await svc.forward({ ...baseInput(), effectiveCallerNumber: '' });
+      const args = (mockedAxios.request as jest.Mock).mock.calls[0][0];
+      expect(args.headers['x-sigcore-forwarded-effective-caller']).toBeUndefined();
+    });
+  });
+
   describe('failure classification', () => {
     const ambiguous = (code: string, reason: string) =>
       it(`code ${code} → ambiguous fallback reason=${reason}`, async () => {
