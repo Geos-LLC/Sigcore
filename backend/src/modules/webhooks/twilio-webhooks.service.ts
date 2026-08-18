@@ -34,6 +34,10 @@ import {
 } from './tenant-voice-forwarder.service';
 import { TenantWebhooksService } from './tenant-webhooks.service';
 import { OutboundWebhooksService } from './outbound-webhooks.service';
+import {
+  resolveEffectiveCaller,
+  EffectiveCallerResult,
+} from './resolve-effective-caller.util';
 import { WebhookEventType } from '../../database/entities/webhook-subscription.entity';
 import { CallConnectService } from './call-connect.service';
 import { ResolveProfileForInboundService } from '../routing/resolve-profile-for-inbound.service';
@@ -88,6 +92,15 @@ export interface TwilioVoiceWebhookPayload {
   CalledState?: string;
   CalledZip?: string;
   CalledCountry?: string;
+  /**
+   * 2026-08-17 — set by Twilio when the call reached us via a SIP-native
+   * forward (REFER/302). Absent on direct calls AND on bridge-style
+   * forwards where the intermediate PBX dials Twilio as a new outbound
+   * leg from its own DID (Quo's current behavior — no ForwardedFrom
+   * populated). Normalized into `effectiveCallerNumber` via
+   * `resolveEffectiveCaller()` in `handleIncomingCall`.
+   */
+  ForwardedFrom?: string;
 }
 
 export interface TwilioCallStatusPayload {
@@ -693,7 +706,44 @@ export class TwilioWebhooksService {
       where: { workspaceId, provider: 'twilio' as any },
     });
 
-    // Create call record
+    // 2026-08-17 — capture forwarded-caller identity from the Twilio
+    // payload. Best-effort tenant lookup here so the `businessForwardingNumber`
+    // rejection branch works even before routing (below) picks the same
+    // tenant. If the lookup fails, resolver still runs — just without the
+    // biz-number filter. NEVER overwrites raw `From` on the call row.
+    let earlyCallerTenant: Tenant | null = null;
+    try {
+      const tpn = await this.tenantPhoneNumberRepo.findOne({
+        where: { workspaceId, phoneNumber: payload.To },
+      });
+      if (tpn?.tenantId) {
+        earlyCallerTenant = await this.tenantRepo.findOne({ where: { id: tpn.tenantId } });
+      }
+    } catch (err) {
+      // Non-fatal; resolver runs with businessForwardingNumber unset.
+      this.logger.warn(
+        `[handleIncomingCall] tenant lookup for forwarded-caller resolution failed: ${(err as Error).message}`,
+      );
+    }
+    const businessForwardingNumber =
+      (earlyCallerTenant?.metadata?.callForwardingNumber as string | undefined) ?? null;
+    const callerResolution: EffectiveCallerResult = resolveEffectiveCaller({
+      from: payload.From,
+      to: payload.To,
+      forwardedFrom: payload.ForwardedFrom,
+      businessForwardingNumber,
+    });
+    this.logger.log(
+      `[inbound-caller] callSid=${payload.CallSid} rawFrom=${callerResolution.rawFrom} ` +
+        `forwardedFrom=${callerResolution.rawForwardedFrom ?? 'null'} ` +
+        `effective=${callerResolution.effectiveCallerNumber} ` +
+        `source=${callerResolution.resolutionSource}` +
+        (callerResolution.reason ? ` reason=${callerResolution.reason}` : ''),
+    );
+
+    // Create call record. `fromNumber` remains the RAW Twilio-observed
+    // `From` — never overwritten. Normalized identity lives in
+    // `metadata.forwardingCapture.effectiveCallerNumber`.
     const call = this.callRepo.create({
       conversationId: conversation.id,
       direction: CallDirection.IN,
@@ -708,6 +758,14 @@ export class TwilioWebhooksService {
         callerState: payload.CallerState,
         callerCountry: payload.CallerCountry,
         ...(inboundIntegration ? { integrationId: inboundIntegration.id } : {}),
+        forwardingCapture: {
+          rawFrom: callerResolution.rawFrom,
+          rawForwardedFrom: callerResolution.rawForwardedFrom,
+          effectiveCallerNumber: callerResolution.effectiveCallerNumber,
+          resolutionSource: callerResolution.resolutionSource,
+          reason: callerResolution.reason,
+          businessForwardingNumber,
+        },
       },
     });
 
@@ -906,6 +964,10 @@ export class TwilioWebhooksService {
               this.configService.get<string>('NODE_ENV') ??
               'unknown',
           },
+          // 2026-08-17 — pass the normalized identity via the Sigcore-signed
+          // envelope so Callio's inbound handler can prefer it over the raw
+          // Twilio `From` for LB/customer lookup + orchestrator session id.
+          effectiveCallerNumber: callerResolution.effectiveCallerNumber,
         };
         const result = await this.voiceForwarder.forward(forwardInput);
         if (result.outcome === 'success') {

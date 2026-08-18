@@ -35,6 +35,22 @@ export interface ForwardInput {
   forwardedHeaders: Record<string, string>;
   /** For log correlation and alerting. */
   correlation: ForwardCorrelation;
+  /**
+   * 2026-08-17 — normalized customer-identity value computed by
+   * `resolveEffectiveCaller()` in twilio-webhooks.service. Sent to
+   * Callio via a Sigcore-signed header (`x-sigcore-forwarded-effective-caller`)
+   * so Callio can key LB/customer lookup + orchestrator session identity
+   * on the customer's real number when SIP-native forwarding surfaces it,
+   * falling back to raw `From` otherwise. Optional — legacy callers that
+   * don't compute it get the pre-existing verbatim-body behavior, and
+   * Callio's consumer treats an absent header as "no override".
+   *
+   * The value is signed as part of the envelope so a downstream attacker
+   * cannot silently substitute a different customer identity between
+   * Sigcore and Callio. See sigcore-forward-signature.util.ts for the
+   * canonical-string binding.
+   */
+  effectiveCallerNumber?: string;
 }
 
 /**
@@ -265,6 +281,15 @@ export class TenantVoiceForwarderService {
       // Kept for diagnostics + downstream correlation. Callio Wave-2 does NOT
       // validate against it — it validates the HMAC envelope below.
       headers['x-twilio-signature'] = input.twilioSignature;
+    }
+    // 2026-08-17 — effective-caller header. See SIGCORE_FORWARD_HEADERS
+    // docstring for the trust-model rationale (not bound to signature by
+    // design — trust inherits from the envelope's outer HMAC).
+    if (
+      typeof input.effectiveCallerNumber === 'string' &&
+      input.effectiveCallerNumber.length > 0
+    ) {
+      headers[SIGCORE_FORWARD_HEADERS.effectiveCaller] = input.effectiveCallerNumber;
     }
     for (const [k, v] of Object.entries(input.forwardedHeaders)) {
       // Only pass through x-forwarded-* per PR 3 spec — never leak arbitrary

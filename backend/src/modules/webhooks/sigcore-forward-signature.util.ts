@@ -66,6 +66,30 @@ export const SIGCORE_FORWARD_HEADERS = {
    * bad_signature (or missing_nonce).
    */
   nonce: 'x-sigcore-forwarded-nonce',
+  /**
+   * 2026-08-17 — normalized customer-identity value computed by Sigcore
+   * (see `resolveEffectiveCaller` in twilio-webhooks). For SIP-native
+   * forwards where Twilio populates `ForwardedFrom` with the original
+   * customer number, this header carries that value; for direct calls
+   * OR bridge-forwards where the identity was stripped, it equals the
+   * raw `From`.
+   *
+   * Trust model: NOT bound to the HMAC signature (kept out of the
+   * canonical string to avoid a version-skew rollout window during
+   * Sigcore/Callio deploy). Trust in this header's value inherits from
+   * the envelope's outer authentication — a request with a valid
+   * `x-sigcore-forwarded-signature` was, by that signature, produced by
+   * an entity holding SIGCORE_VOICE_FORWARD_HMAC_SECRET (i.e. Sigcore).
+   * The between-hops TLS session protects the header from in-flight
+   * mutation. If the threat model tightens to include an on-path
+   * attacker with TLS-session compromise, upgrade to a v2 signature
+   * shape that includes this field in the canonical string.
+   *
+   * Optional on the envelope — Callio treats an absent header as "no
+   * effective-caller override, use the body's From" so pre-2026-08-17
+   * Sigcore builds continue to work identically.
+   */
+  effectiveCaller: 'x-sigcore-forwarded-effective-caller',
 } as const;
 
 /** Event types that Sigcore may forward. Route handlers pin one value each. */
