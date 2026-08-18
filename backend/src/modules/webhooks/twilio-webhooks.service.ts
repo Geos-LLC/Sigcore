@@ -1214,6 +1214,92 @@ export class TwilioWebhooksService {
 
     await this.callRepo.save(call);
     this.logger.log(`Updated call ${payload.CallSid} status to ${call.status}, duration=${call.duration}s`);
+
+    // 2026-08-17 — emit CALL_COMPLETED / CALL_MISSED so downstream
+    // subscribers (Callio's /api/webhooks/sigcore, Service Flow, etc.)
+    // learn the call ended.
+    //
+    // Historical gap: this method only mutated the DB row; the outbound
+    // event pipeline was never triggered from the scoped Twilio status
+    // callback path, so Callio's WebhookSubscription pointing at
+    // /api/webhooks/sigcore never received any call event for calls that
+    // completed via the tenant-forward flow. Only the LB call-forward
+    // and OpenPhone paths were emitting, which don't cover Callio's
+    // inbound-to-browser or inbound-to-AI flows.
+    //
+    // Scope derivation: prefer the number's TPN row → its tenantId
+    // (authoritative for the phone number's ownership), fall back to
+    // the conversation's tenantId (may be null on legacy rows).
+    // Business/profile scope is read off the conversation directly.
+    // Passing scope is load-bearing — tenant-scoped subscriptions are
+    // gated by `scope.tenantId === sub.tenantId` in
+    // `OutboundWebhooksService.loadMatchingSubscriptions`, so an
+    // unscoped emit would silently miss every tenant-scoped Callio /
+    // Service Flow subscription.
+    //
+    // Idempotency: Twilio does not retry on 2xx and Callio's webhook
+    // receiver dedupes by `providerCallId`, so a repeat call to
+    // handleCallStatus is safe. Best-effort try/catch so a scope-lookup
+    // failure never blocks the status-callback response.
+    if (this.outboundWebhooksService) {
+      try {
+        const conversation = await this.conversationRepo.findOne({
+          where: { id: call.conversationId },
+        });
+        if (conversation) {
+          const workspaceId = conversation.workspaceId;
+          const tpn = call.toNumber
+            ? await this.tenantPhoneNumberRepo.findOne({
+                where: { workspaceId, phoneNumber: call.toNumber },
+              })
+            : null;
+          const tenantId =
+            tpn?.tenantId ?? conversation.tenantId ?? undefined;
+
+          const eventType =
+            call.status === CallStatus.COMPLETED
+              ? WebhookEventType.CALL_COMPLETED
+              : WebhookEventType.CALL_MISSED;
+
+          this.outboundWebhooksService
+            .emitEvent(
+              workspaceId,
+              eventType,
+              {
+                callId: call.id,
+                providerCallId: call.providerCallId,
+                conversationId: call.conversationId,
+                direction: call.direction,
+                duration: call.duration,
+                fromNumber: call.fromNumber,
+                toNumber: call.toNumber,
+                status: call.status,
+                recordingUrl: call.recordingUrl ?? null,
+                voicemailUrl: call.voicemailUrl ?? null,
+                startedAt: call.startedAt,
+                endedAt: call.endedAt,
+                createdAt: call.createdAt,
+              },
+              {
+                tenantId,
+                businessId:
+                  conversation.communicationBusinessId ?? undefined,
+                profileId:
+                  conversation.communicationProfileId ?? undefined,
+              },
+            )
+            .catch((err) => {
+              this.logger.error(
+                `Failed to emit ${eventType} webhook for callSid=${payload.CallSid}: ${err.message}`,
+              );
+            });
+        }
+      } catch (err) {
+        this.logger.error(
+          `Failed to derive scope for ${payload.CallSid} status callback emit: ${(err as Error).message}`,
+        );
+      }
+    }
   }
 
   /**
