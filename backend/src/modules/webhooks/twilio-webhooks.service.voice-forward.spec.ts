@@ -147,7 +147,12 @@ function build(opts: {
 }
 
 describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () => {
-  it('CallConnect enabled path still terminates in <Dial> (never reaches [3a])', async () => {
+  // 2026-08-19 (hoist v2) — CC + voiceInboundUrl BOTH present: precedence
+  // inverted. Was: CC-agent Dial (voiceInboundUrl silently shadowed —
+  // Lavanda incident). Now: Callio wins, CC never executes.
+  it('precedence: voiceInboundUrl WINS over actionable CC row (was: CC wins)', async () => {
+    const twimlFromTenant =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Say>callio</Say></Response>';
     const { svc, forwarder } = build({
       flagOn: true,
       ccSettings: {
@@ -162,10 +167,19 @@ describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () 
         tenantId: 'biz-1',
       },
       tenant: { id: 'biz-1', voiceInboundUrl: 'https://tenant/x' },
+      forwarderResult: {
+        outcome: 'success',
+        twiml: twimlFromTenant,
+        statusCode: 200,
+        durationMs: 15,
+        contentType: 'application/xml',
+      },
     });
     const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
-    expect(twiml).toContain('<Dial');
-    expect((forwarder as any).forward).not.toHaveBeenCalled();
+    expect(twiml).toBe(twimlFromTenant);
+    // Legacy CC-agent number MUST NOT appear anywhere in TwiML.
+    expect(twiml).not.toContain('+15550001111');
+    expect((forwarder as any).forward).toHaveBeenCalledTimes(1);
   });
 
   // 2026-08-19 — precedence inversion. This test previously asserted the
@@ -247,17 +261,87 @@ describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () 
     expect((forwarder as any).forward).not.toHaveBeenCalled();
   });
 
-  it('precedence: voiceInboundUrl set + forwarder FAIL → voicemail (NEVER falls back to legacy)', async () => {
-    // Critical safety: if a Callio-migrated tenant's forward fails, we
-    // must NOT silently PSTN-dial the legacy number — that would defeat
-    // the whole migration and re-introduce the pre-2026-08-19 loop.
+  it('precedence: voiceInboundUrl + CC + legacy callForwardingNumber ALL present → Callio wins, none of the legacy tiers execute', async () => {
+    const twimlFromTenant =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Say>callio</Say></Response>';
     const { svc, forwarder } = build({
       flagOn: true,
-      ccSettings: null,
+      ccSettings: {
+        botNumberE164: CALL.To,
+        enabled: true,
+        agentPhoneE164: '+15550001111',
+        businessId: 'biz-1',
+      },
+      phoneAllocation: {
+        workspaceId: 'ws-1',
+        phoneNumber: CALL.To,
+        tenantId: 'biz-1',
+        // TPN-override tier ALSO set — must not fire either.
+        inboundAgentPhoneE164: '+15550002222',
+      },
+      tenant: {
+        id: 'biz-1',
+        metadata: { callForwardingNumber: '+15550003333' },
+        voiceInboundUrl: 'https://tenant/x',
+      },
+      forwarderResult: {
+        outcome: 'success',
+        twiml: twimlFromTenant,
+        statusCode: 200,
+        durationMs: 20,
+        contentType: 'application/xml',
+      },
+    });
+    const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
+    expect(twiml).toBe(twimlFromTenant);
+    // None of the three legacy destinations should leak into the TwiML.
+    expect(twiml).not.toContain('+15550001111'); // CC agent
+    expect(twiml).not.toContain('+15550002222'); // TPN override
+    expect(twiml).not.toContain('+15550003333'); // legacy callForwardingNumber
+    expect((forwarder as any).forward).toHaveBeenCalledTimes(1);
+  });
+
+  it('precedence: no voiceInboundUrl + actionable CC → existing CC <Dial> behavior unchanged', async () => {
+    const { svc, forwarder } = build({
+      flagOn: true,
+      ccSettings: {
+        botNumberE164: CALL.To,
+        enabled: true,
+        agentPhoneE164: '+15550001111',
+        businessId: 'biz-1',
+      },
+      phoneAllocation: {
+        workspaceId: 'ws-1',
+        phoneNumber: CALL.To,
+        tenantId: 'biz-1',
+      },
+      tenant: { id: 'biz-1', metadata: {}, voiceInboundUrl: null },
+    });
+    const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
+    expect(twiml).toContain('<Dial');
+    expect(twiml).toContain('+15550001111');
+    expect((forwarder as any).forward).not.toHaveBeenCalled();
+  });
+
+  it('precedence: voiceInboundUrl set + forwarder FAIL → voicemail, NEVER falls back to CC or legacy', async () => {
+    // Critical safety: if a Callio-migrated tenant's forward fails, we
+    // must NOT silently dial any legacy destination — that would defeat
+    // the migration and could ring an unexpected number. Every legacy
+    // tier (CC agent, TPN override, callForwardingNumber) is set here
+    // to prove none of them fire when Callio degrades.
+    const { svc, forwarder } = build({
+      flagOn: true,
+      ccSettings: {
+        botNumberE164: CALL.To,
+        enabled: true,
+        agentPhoneE164: '+15550008888',
+        businessId: 't-1',
+      },
       phoneAllocation: {
         workspaceId: 'ws-1',
         phoneNumber: CALL.To,
         tenantId: 't-1',
+        inboundAgentPhoneE164: '+15550007777',
       },
       tenant: {
         id: 't-1',
@@ -273,7 +357,9 @@ describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () 
     });
     const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
     expect(twiml).toContain('<Record');
-    expect(twiml).not.toContain('+15550009999');
+    expect(twiml).not.toContain('+15550009999'); // legacy
+    expect(twiml).not.toContain('+15550008888'); // CC agent
+    expect(twiml).not.toContain('+15550007777'); // TPN override
     expect((forwarder as any).forward).toHaveBeenCalledTimes(1);
   });
 
