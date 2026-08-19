@@ -168,7 +168,16 @@ describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () 
     expect((forwarder as any).forward).not.toHaveBeenCalled();
   });
 
-  it('legacy callForwardingNumber path still terminates in <Dial> (never reaches [3a])', async () => {
+  // 2026-08-19 — precedence inversion. This test previously asserted the
+  // opposite (legacy wins). That was the routing precedence bug that
+  // silently shadowed voiceInboundUrl for tenants who had migrated to
+  // Callio (Lavanda incident). Precedence is now:
+  //     voiceInboundUrl set → Wave-2 forward (Callio)
+  //     voiceInboundUrl unset + legacy set → legacy <Dial>
+  //     neither → voicemail
+  it('precedence: voiceInboundUrl WINS over legacy callForwardingNumber when BOTH present', async () => {
+    const twimlFromTenant =
+      '<?xml version="1.0" encoding="UTF-8"?><Response><Say>callio</Say></Response>';
     const { svc, forwarder } = build({
       flagOn: true,
       ccSettings: null,
@@ -182,10 +191,90 @@ describe('TwilioWebhooksService.handleIncomingCall — PR 3 tenant forward', () 
         metadata: { callForwardingNumber: '+15550009999' },
         voiceInboundUrl: 'https://tenant/x',
       },
+      forwarderResult: {
+        outcome: 'success',
+        twiml: twimlFromTenant,
+        statusCode: 200,
+        durationMs: 12,
+        contentType: 'application/xml',
+      },
+    });
+    const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
+    // Byte-for-byte tenant TwiML — legacy PSTN <Dial>+15550009999</Dial> NOT emitted.
+    expect(twiml).toBe(twimlFromTenant);
+    expect(twiml).not.toContain('+15550009999');
+    expect((forwarder as any).forward).toHaveBeenCalledTimes(1);
+  });
+
+  it('precedence: only legacy callForwardingNumber (no voiceInboundUrl) → legacy <Dial> unchanged', async () => {
+    const { svc, forwarder } = build({
+      flagOn: true,
+      ccSettings: null,
+      phoneAllocation: {
+        workspaceId: 'ws-1',
+        phoneNumber: CALL.To,
+        tenantId: 't-1',
+      },
+      tenant: {
+        id: 't-1',
+        metadata: { callForwardingNumber: '+15550009999' },
+        voiceInboundUrl: null,
+      },
     });
     const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
     expect(twiml).toContain('<Dial');
+    expect(twiml).toContain('+15550009999');
     expect((forwarder as any).forward).not.toHaveBeenCalled();
+  });
+
+  it('precedence: neither voiceInboundUrl nor legacy → voicemail fallback unchanged', async () => {
+    const { svc, forwarder } = build({
+      flagOn: true,
+      ccSettings: null,
+      phoneAllocation: {
+        workspaceId: 'ws-1',
+        phoneNumber: CALL.To,
+        tenantId: 't-1',
+      },
+      tenant: {
+        id: 't-1',
+        metadata: {},
+        voiceInboundUrl: null,
+      },
+    });
+    const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
+    expect(twiml).toContain('<Record');
+    expect((forwarder as any).forward).not.toHaveBeenCalled();
+  });
+
+  it('precedence: voiceInboundUrl set + forwarder FAIL → voicemail (NEVER falls back to legacy)', async () => {
+    // Critical safety: if a Callio-migrated tenant's forward fails, we
+    // must NOT silently PSTN-dial the legacy number — that would defeat
+    // the whole migration and re-introduce the pre-2026-08-19 loop.
+    const { svc, forwarder } = build({
+      flagOn: true,
+      ccSettings: null,
+      phoneAllocation: {
+        workspaceId: 'ws-1',
+        phoneNumber: CALL.To,
+        tenantId: 't-1',
+      },
+      tenant: {
+        id: 't-1',
+        metadata: { callForwardingNumber: '+15550009999' },
+        voiceInboundUrl: 'https://tenant/x',
+      },
+      forwarderResult: {
+        outcome: 'fallback',
+        reason: 'response_5xx',
+        category: 'ambiguous',
+        durationMs: 300,
+      },
+    });
+    const twiml = await svc.handleIncomingCall('ws-1', CALL, FORWARD_CTX);
+    expect(twiml).toContain('<Record');
+    expect(twiml).not.toContain('+15550009999');
+    expect((forwarder as any).forward).toHaveBeenCalledTimes(1);
   });
 
   it('CC settings exist but not actionable → voicemail (unchanged; NOT tenant-forward)', async () => {

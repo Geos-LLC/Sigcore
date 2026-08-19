@@ -912,69 +912,86 @@ export class TwilioWebhooksService {
     // (pre-existing "No CC settings" fall-through). phoneAllocation loaded above.
     if (phoneAllocation) {
       const tenant = await this.tenantRepo.findOne({ where: { id: phoneAllocation.tenantId } });
-      const forwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
+      const legacyForwardTo = tenant?.metadata?.callForwardingNumber as string | undefined;
       this.logger.log(
-        `[ROUTING] tenant metadata for tenantId=${phoneAllocation.tenantId}: ` +
-        `callForwardingNumber=${forwardTo ?? 'null'} fullMetadata=${JSON.stringify(tenant?.metadata ?? {})}`,
+        `[ROUTING] tenant for tenantId=${phoneAllocation.tenantId}: ` +
+        `voiceInboundUrl=${tenant?.voiceInboundUrl ?? 'null'} ` +
+        `legacyCallForwardingNumber=${legacyForwardTo ?? 'null'}`,
       );
-      if (forwardTo) {
-        this.logger.log(`[ROUTING] → Legacy path: forwarding to callForwardingNumber=${forwardTo} (tenantId=${tenant!.id})`);
-        return this.generateForwardTwiML(forwardTo, ourNumber);
-      }
 
-      // ── Wave-2 Voice Foundation PR 3 — step [3a] tenant voice forwarding.
+      // ── [Precedence] tenant.voiceInboundUrl WINS over legacy
+      // callForwardingNumber (2026-08-19).
       //
-      // Insertion point: after CallConnect (line 704) and legacy metadata
-      // forwarding (line 731), before voicemail fallback. Preserves both
-      // pre-existing forwarding paths — they still terminate before we get
-      // here. Voicemail below is the fallback of last resort.
+      // Once a tenant migrates to Callio (LB writes voiceInboundUrl via
+      // PUT /v1/tenants/:id/voice-webhook), that decision MUST NOT be
+      // shadowed by a stale legacy PSTN forward. The legacy field is
+      // preserved verbatim for tenants that HAVEN'T migrated
+      // (voiceInboundUrl unset) — their behavior is byte-identical.
       //
-      // Gates (ALL must be true, else skip and voicemail):
-      //   * SIGCORE_VOICE_INBOUND_FORWARD_ENABLED === 'true'
+      // Failure semantics for the migrated case: if voiceInboundUrl is
+      // set but the forward path can't run (flag off, forwarder DI
+      // missing, request context absent) OR fails at the wire, we go to
+      // voicemail — NOT back to legacy callForwardingNumber. Falling back
+      // to a legacy PSTN dial for a Callio-configured tenant would defeat
+      // the migration (AI decisioning, HMAC-signed transport, caller-
+      // aware routing all bypassed). Voicemail is the safer degraded
+      // state; ops can page + fix.
+      //
+      // Wave-2 gates on the migrated branch:
+      //   * SIGCORE_VOICE_INBOUND_FORWARD_ENABLED === 'true' (kill switch)
       //   * TenantVoiceForwarderService is injected (module-level wiring)
       //   * The forwarder input context (rawBody + headers) was passed in
-      //   * The tenant has voice_inbound_url set (persisted by PR 2 API)
       //
-      // On success: return the tenant's TwiML byte-for-byte. Sigcore does
-      // not rewrite, re-encode, or generate TwiML in this path.
-      //
-      // On any failure (definite 4xx OR ambiguous 5xx/timeout/DNS/TLS/etc):
-      // fall through to voicemail below. The forwarder handles alerting.
-      const forwardFlag =
-        (this.configService.get<string>('SIGCORE_VOICE_INBOUND_FORWARD_ENABLED') ??
-          '').toLowerCase() === 'true';
-      if (
-        forwardFlag &&
-        this.voiceForwarder &&
-        forwardCtx &&
-        tenant?.voiceInboundUrl
-      ) {
-        const forwardInput: ForwardInput = {
-          voiceInboundUrl: tenant.voiceInboundUrl,
-          rawBody: forwardCtx.rawBody,
-          contentType: forwardCtx.contentType,
-          twilioSignature: forwardCtx.twilioSignature,
-          forwardedHeaders: forwardCtx.forwardedHeaders,
-          correlation: {
-            workspaceId,
-            tenantId: tenant.id,
-            providerCallSid: payload.CallSid,
-            environment:
-              this.configService.get<string>('RAILWAY_ENVIRONMENT_NAME') ??
-              this.configService.get<string>('NODE_ENV') ??
-              'unknown',
-          },
-          // 2026-08-17 — pass the normalized identity via the Sigcore-signed
-          // envelope so Callio's inbound handler can prefer it over the raw
-          // Twilio `From` for LB/customer lookup + orchestrator session id.
-          effectiveCallerNumber: callerResolution.effectiveCallerNumber,
-        };
-        const result = await this.voiceForwarder.forward(forwardInput);
-        if (result.outcome === 'success') {
-          return result.twiml;
+      // On success the tenant's TwiML is returned byte-for-byte — Sigcore
+      // never rewrites, re-encodes, or generates TwiML in this path.
+      if (tenant?.voiceInboundUrl) {
+        const forwardFlag =
+          (this.configService.get<string>('SIGCORE_VOICE_INBOUND_FORWARD_ENABLED') ??
+            '').toLowerCase() === 'true';
+        if (forwardFlag && this.voiceForwarder && forwardCtx) {
+          this.logger.log(
+            `[ROUTING] → Wave-2 voice_inbound_url path: forwarding to ${tenant.voiceInboundUrl} (tenantId=${tenant.id})`,
+          );
+          const forwardInput: ForwardInput = {
+            voiceInboundUrl: tenant.voiceInboundUrl,
+            rawBody: forwardCtx.rawBody,
+            contentType: forwardCtx.contentType,
+            twilioSignature: forwardCtx.twilioSignature,
+            forwardedHeaders: forwardCtx.forwardedHeaders,
+            correlation: {
+              workspaceId,
+              tenantId: tenant.id,
+              providerCallSid: payload.CallSid,
+              environment:
+                this.configService.get<string>('RAILWAY_ENVIRONMENT_NAME') ??
+                this.configService.get<string>('NODE_ENV') ??
+                'unknown',
+            },
+            // 2026-08-17 — pass normalized identity via the Sigcore-signed
+            // envelope so Callio can prefer it over raw Twilio `From` for
+            // LB/customer lookup + orchestrator session id.
+            effectiveCallerNumber: callerResolution.effectiveCallerNumber,
+          };
+          const result = await this.voiceForwarder.forward(forwardInput);
+          if (result.outcome === 'success') {
+            return result.twiml;
+          }
+          this.logger.warn(
+            `[ROUTING] voice_inbound_url forward failed for tenantId=${tenant.id} — flowing to voicemail (NOT falling back to legacy callForwardingNumber, per Callio migration invariant)`,
+          );
+        } else {
+          this.logger.warn(
+            `[ROUTING] tenantId=${tenant.id} has voiceInboundUrl set but Wave-2 gates failed ` +
+            `(flag=${forwardFlag} forwarder=${!!this.voiceForwarder} ctx=${!!forwardCtx}) — flowing to voicemail`,
+          );
         }
-        // Any failure — flow to voicemail. Forwarder already logged +
-        // alerted; nothing more to do here.
+      } else if (legacyForwardTo) {
+        // Legacy path — for tenants that have NOT migrated to Callio.
+        // Unchanged from pre-Wave-2 behavior.
+        this.logger.log(
+          `[ROUTING] → Legacy path: forwarding to callForwardingNumber=${legacyForwardTo} (tenantId=${tenant!.id})`,
+        );
+        return this.generateForwardTwiML(legacyForwardTo, ourNumber);
       }
     }
     this.logger.log(`[ROUTING] → No forwarding configured — returning voicemail`);
