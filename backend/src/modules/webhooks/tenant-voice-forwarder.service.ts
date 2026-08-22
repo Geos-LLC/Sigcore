@@ -7,6 +7,24 @@ import {
   generateNonce,
   sign as signForwardEnvelope,
 } from './sigcore-forward-signature.util';
+import {
+  mintCallCapability,
+  CSC_HEADER_NAME,
+  CallScopedOperation,
+} from '../../common/guards/call-scoped-capability.util';
+
+/**
+ * G-6 CSC (2026-08-22) — capability TTL and default allowedOps set at
+ * mint time. TTL is 6 hours (Sigcore-decided per milestone signoff:
+ * covers a very long call + post-call recording/hangup admin tail
+ * without stranding legitimate late admin ops on shorter windows).
+ */
+const CSC_TTL_SECONDS = 6 * 3600;
+const CSC_DEFAULT_ALLOWED_OPS: CallScopedOperation[] = [
+  'call.hangup',
+  'call.recording.start',
+  'call.recording.stop',
+];
 
 /**
  * Correlation fields injected into every log line so failed forwards can be
@@ -51,6 +69,25 @@ export interface ForwardInput {
    * canonical-string binding.
    */
   effectiveCallerNumber?: string;
+  /**
+   * G-6 CSC (2026-08-22) — canonical integration identity of the call
+   * being forwarded. MUST equal the integrationId the caller stamped on
+   * `CommunicationCall.metadata.integrationId` when persisting the call
+   * row (see twilio-webhooks.service.ts:760). Used to mint the
+   * X-Sigcore-Call-Capability header Callio will echo on admin ops.
+   *
+   * If absent, no capability is minted and the outbound envelope carries
+   * no capability header. Callio's admin path then falls back to the
+   * legacy workspace-scoped auth (pre-G-6 behavior, byte-identical to
+   * today for tenants like Spotless whose Callio workspace shares the
+   * originating Sigcore workspace).
+   *
+   * The guard's downstream integration-mismatch check (defense in depth)
+   * verifies the minted capability's integrationId matches the persisted
+   * CommunicationCall.metadata.integrationId. So even if this field is
+   * ever wrong at mint time, the guard will refuse to authorize.
+   */
+  originatingIntegrationId?: string | null;
 }
 
 /**
@@ -119,6 +156,13 @@ export class TenantVoiceForwarderService {
   private readonly maxResponseBytes: number;
   private readonly alertEmail: string | undefined;
   private readonly forwardHmacSecret: string | undefined;
+  /**
+   * G-6 CSC (2026-08-22) — Sigcore-only capability-signing secret. Distinct
+   * from the envelope HMAC secret above so key-rotation on either surface
+   * is independent. When unset, no capability is minted (Callio falls
+   * back to legacy workspace-scoped auth on admin ops).
+   */
+  private readonly capabilitySecret: string | undefined;
 
   constructor(
     private readonly configService: ConfigService,
@@ -150,6 +194,18 @@ export class TenantVoiceForwarderService {
     if (!this.forwardHmacSecret) {
       this.logger.warn(
         'SIGCORE_VOICE_FORWARD_HMAC_SECRET not set — forwarded envelopes will NOT include x-sigcore-forwarded-signature. Set this before pointing any tenant voiceInboundUrl at an authenticated receiver (Callio Wave-2).',
+      );
+    }
+    // G-6 CSC (2026-08-22) — Sigcore-only capability secret. Kept distinct
+    // from the envelope HMAC secret so either can rotate independently
+    // and neither key exposes both surfaces. When unset, capability
+    // minting is a no-op — receivers fall back to legacy workspace-scoped
+    // auth on admin ops.
+    this.capabilitySecret =
+      this.configService.get<string>('SIGCORE_CALL_CAPABILITY_SECRET') || undefined;
+    if (!this.capabilitySecret) {
+      this.logger.warn(
+        'SIGCORE_CALL_CAPABILITY_SECRET not set — inbound forwards will NOT include X-Sigcore-Call-Capability. Callio admin ops (recording/start, hangup) will fall back to workspace-scoped auth (403 for cross-workspace tenants until this is set).',
       );
     }
   }
@@ -297,6 +353,51 @@ export class TenantVoiceForwarderService {
       if (k.toLowerCase().startsWith('x-forwarded-')) {
         headers[k.toLowerCase()] = v;
       }
+    }
+    // G-6 CSC (2026-08-22) — mint a per-call capability if Sigcore has
+    // its secret AND the caller supplied the canonical integrationId.
+    // Callio stores this on VoiceCall.metadata and echoes it verbatim on
+    // recording/hangup admin ops. Sigcore is the sole issuer; Callio
+    // never mints.
+    //
+    // The log line NEVER contains the capability, signature, or payload
+    // content — only the outcome (minted / skipped) and the reason.
+    if (
+      this.capabilitySecret &&
+      typeof input.originatingIntegrationId === 'string' &&
+      input.originatingIntegrationId.length > 0 &&
+      typeof input.correlation.providerCallSid === 'string' &&
+      input.correlation.providerCallSid.length > 0
+    ) {
+      try {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const capability = mintCallCapability({
+          callSid: input.correlation.providerCallSid,
+          integrationId: input.originatingIntegrationId,
+          allowedOps: CSC_DEFAULT_ALLOWED_OPS,
+          iat: nowSec,
+          expUnixSeconds: nowSec + CSC_TTL_SECONDS,
+          secret: this.capabilitySecret,
+        });
+        headers[CSC_HEADER_NAME] = capability;
+        this.logger.log(
+          `csc_capability_minted callSid=${input.correlation.providerCallSid} ` +
+            `integration=${input.originatingIntegrationId} ttlSec=${CSC_TTL_SECONDS} ` +
+            `allowedOps=${CSC_DEFAULT_ALLOWED_OPS.length}`,
+        );
+      } catch (err) {
+        // Never fail the forward if capability minting hiccups — Callio
+        // falls back to legacy auth (workspace-scoped 403 for
+        // cross-workspace tenants). Log the reason but not the payload.
+        this.logger.warn(
+          `csc_capability_mint_failed callSid=${input.correlation.providerCallSid} reason=${(err as Error).message}`,
+        );
+      }
+    } else {
+      this.logger.log(
+        `csc_capability_skipped callSid=${input.correlation.providerCallSid} ` +
+          `secret=${!!this.capabilitySecret} integration=${!!input.originatingIntegrationId}`,
+      );
     }
     // Wave-2 B.5 — sign the envelope so an authenticated receiver (Callio)
     // can trust this hop without needing to re-verify Twilio's signature

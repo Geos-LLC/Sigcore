@@ -722,7 +722,10 @@ export class CallsV1Controller {
 
   @Post(':providerCallSid/recording/start')
   @HttpCode(HttpStatus.OK)
-  @UseIntegrationResourceGuard('providerCallSid')
+  // G-6 (2026-08-22) — opts into CSC (Sigcore-issued call capability)
+  // so Callio can authorize per-call
+  // recording without needing to share the LB Sigcore workspace.
+  @UseIntegrationResourceGuard('providerCallSid', 'call.recording.start')
   async startRecording(
     @Param('providerCallSid') providerCallSid: string,
     @Body() dto: RecordingStartDto,
@@ -787,7 +790,10 @@ export class CallsV1Controller {
 
   @Post(':providerCallSid/hangup')
   @HttpCode(HttpStatus.OK)
-  @UseIntegrationResourceGuard('providerCallSid')
+  // G-6 (2026-08-22) — opts into CSC (Sigcore-issued call capability)
+  // so Callio can authorize per-call
+  // hangup without needing to share the LB Sigcore workspace.
+  @UseIntegrationResourceGuard('providerCallSid', 'call.hangup')
   async hangup(
     @Param('providerCallSid') providerCallSid: string,
     @Body() _dto: HangupDto,

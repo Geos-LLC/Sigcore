@@ -890,6 +890,14 @@ export class TwilioWebhooksService {
               'unknown',
           },
           effectiveCallerNumber: callerResolution.effectiveCallerNumber,
+          // G-6 CSC (2026-08-22) — canonical integrationId from the same
+          // resolution the caller just stamped on CommunicationCall.metadata
+          // (line 760 above). Passing it here lets the forwarder mint a
+          // per-call capability Callio can echo on admin ops without
+          // needing to share the LB Sigcore workspace. When null (no
+          // Twilio integration resolved), no capability is minted and
+          // Callio falls back to legacy workspace-scoped auth.
+          originatingIntegrationId: inboundIntegration?.id ?? null,
         };
         const result = await this.voiceForwarder.forward(forwardInput);
         if (result.outcome === 'success') {

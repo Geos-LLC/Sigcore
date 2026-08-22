@@ -132,7 +132,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
   it('rejects_when_workspace_does_not_own_tenant (check=1)', async () => {
     const { svc, tenantRepo } = buildGuardService();
     tenantRepo.findOne.mockResolvedValue(null);
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
 
     await expect(guard.canActivate(mockContext(buildRequest()))).rejects.toMatchObject({
       message: expect.stringContaining('check=1 failed'),
@@ -142,7 +150,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
   it('rejects_when_api_key_tenant_scope_mismatches_body_tenant (check=2)', async () => {
     const { svc, tenantRepo } = buildGuardService();
     tenantRepo.findOne.mockResolvedValue({ id: TENANT, workspaceId: WS });
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req = buildRequest({ integrationId: INT_ID, tenantId: 'other-tenant' });
     req.authType = 'api_key';
     req.authScopeType = 'tenant';
@@ -161,7 +177,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
       provider: ProviderType.TWILIO,
       metadata: { ensure: { tenantId: 'someone-else' } },
     });
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
 
     await expect(guard.canActivate(mockContext(buildRequest()))).rejects.toMatchObject({
       message: expect.stringContaining('check=3 failed'),
@@ -179,7 +203,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
       metadata: { ensure: { tenantId: TENANT } },
     });
     callRepo.findOne.mockResolvedValue(null);
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req = buildRequest();
     // Not a CA-prefixed SID → pilot fallback also fails, forcing check=4.
     req.params.providerCallSid = 'XX_nope';
@@ -191,7 +223,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
 
   it('boundary_missing_providerCallSid_returns_400_not_500', async () => {
     const { svc } = buildGuardService();
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req = buildRequest();
     req.params.providerCallSid = '';
 
@@ -200,7 +240,15 @@ describe('IntegrationResourceGuard — 4 rejection modes for call ops', () => {
 
   it('missing integrationId body → 400 (not 500)', async () => {
     const { svc } = buildGuardService();
-    const guard = new IntegrationResourceGuard(reflector, svc);
+    const guard = new IntegrationResourceGuard(
+      reflector,
+      svc,
+      // G-6 (2026-08-22) — legacy-path tests don't send a proof header, so
+      // CSAP constructor deps are stubbed and never invoked.
+      { get: () => undefined } as any,
+      { findOne: jest.fn() } as any,
+      { findOne: jest.fn() } as any,
+    );
     const req = buildRequest();
     delete (req.body as any).integrationId;
 

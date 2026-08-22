@@ -13,7 +13,10 @@ import { Tenant } from '../../database/entities/tenant.entity';
 import {
   ApiKey,
   CommunicationCall,
+  CommunicationConversation,
   CommunicationIntegration,
+  CommunicationProfile,
+  ProfilePhoneAssignment,
   TenantPhoneNumber,
 } from '../../database/entities';
 
@@ -77,6 +80,13 @@ describe('Task 3 DI graph (real bootstrap)', () => {
         },
         { provide: getRepositoryToken(CommunicationCall), useValue: stubRepo },
         { provide: getRepositoryToken(TenantPhoneNumber), useValue: stubRepo },
+        // 2026-08-22 (G-6 CSAP) — CallsV1Controller also injects
+        // Conversation / ProfilePhoneAssignment / CommunicationProfile
+        // repos as of Task 5c. Stub each so this compile-time DI check
+        // stays green after the controller's constructor grew.
+        { provide: getRepositoryToken(CommunicationConversation), useValue: stubRepo },
+        { provide: getRepositoryToken(ProfilePhoneAssignment), useValue: stubRepo },
+        { provide: getRepositoryToken(CommunicationProfile), useValue: stubRepo },
         // SigcoreAuthGuard (applied to CallsV1Controller via @UseGuards)
         // resolves this repo. Stub because Nest needs to construct the
         // guard when it builds the controller's guard chain.
