@@ -425,8 +425,31 @@ export class TenantsService {
    * Status/deletion checks:
    *   - `getTenant(workspaceId, tenantId, callerTenantId)` — already enforces
    *     workspace scope + caller-tenant scope + not-found → 404.
-   *   - INACTIVE or SUSPENDED tenants reject with 403. Callers cannot flip
-   *     voice routing on a disabled tenant.
+   *
+   * 2026-08-22 (G-2, systemic-provisioning milestone) — the previous
+   * `status !== ACTIVE` guard was removed. Rationale:
+   *   * Setting voice_inbound_url is a pure routing-config write. It
+   *     doesn't reactivate a tenant, doesn't grant new capabilities,
+   *     doesn't change billing. It says "IF a call arrives, forward to
+   *     this URL." Setting it on an INACTIVE or SUSPENDED tenant is
+   *     inert (no calls arrive per policy) but harmless to stage.
+   *   * The guard was an outlier — no other tenant admin field write
+   *     (webhookUrl, metadata.callForwardingNumber, name, etc.)
+   *     requires ACTIVE status. The setVoiceInboundUrl guard was the
+   *     only tenant admin surface that coupled routing metadata to
+   *     activation state.
+   *   * Prod evidence: LB tenants with legacy `status='inactive'` (a
+   *     stale value that predates current lifecycle semantics) were
+   *     still receiving inbound calls via their still-ACTIVE
+   *     tenant_phone_numbers. The guard blocked LB's auto-provisioning
+   *     from writing the correct Callio-forwarding URL and forced
+   *     operators to manually flip tenant.status just to unblock
+   *     routing — bad state semantics per the systemic-provisioning
+   *     milestone directive.
+   *   * If tenant.status should gate call routing in the future, that
+   *     decision belongs at call-arrival time in
+   *     twilio-webhooks.service.ts (should the routing tree even
+   *     fire?), not at config-write time.
    */
   async setVoiceInboundUrl(
     workspaceId: string,
@@ -435,15 +458,10 @@ export class TenantsService {
     voiceInboundUrl: string | null,
   ): Promise<Tenant> {
     const tenant = await this.getTenant(workspaceId, tenantId, callerTenantId);
-    if (tenant.status !== TenantStatus.ACTIVE) {
-      throw new ForbiddenException(
-        `Tenant ${tenantId} is ${tenant.status}; voice endpoint cannot be modified.`,
-      );
-    }
     tenant.voiceInboundUrl = voiceInboundUrl;
     await this.tenantRepo.save(tenant);
     this.logger.log(
-      `setVoiceInboundUrl tenant=${tenantId} configured=${!!voiceInboundUrl}`,
+      `setVoiceInboundUrl tenant=${tenantId} status=${tenant.status} configured=${!!voiceInboundUrl}`,
     );
     return tenant;
   }

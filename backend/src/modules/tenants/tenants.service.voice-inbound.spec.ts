@@ -1,10 +1,16 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { TenantsService } from './tenants.service';
 import { TenantStatus } from '../../database/entities';
 
 // PR 2 — TenantsService.setVoiceInboundUrl + getVoiceInboundConfig.
 // Covers authorization scoping, status enforcement, clear-vs-set semantics,
 // and stale-value guarantee (null persistence).
+//
+// 2026-08-22 (G-2, systemic-provisioning milestone) — the previous
+// "status !== ACTIVE → 403" guard was REMOVED. Setting voice_inbound_url
+// is a pure routing-config write; it doesn't reactivate the tenant.
+// Prior "inactive → 403" and "suspended → 403" tests replaced with
+// positive assertions that the write succeeds for BOTH states.
 
 function repo() {
   return {
@@ -74,26 +80,49 @@ describe('TenantsService.setVoiceInboundUrl', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it('inactive tenant rejected — 403', async () => {
+  // 2026-08-22 (G-2) — the "inactive → 403" and "suspended → 403"
+  // rejections were removed. Routing config is a metadata write.
+  it('inactive tenant: URL write SUCCEEDS (routing config is not gated by tenant status)', async () => {
     const { svc, tenantRepo } = buildService();
     tenantRepo.findOne.mockResolvedValue({
       ...activeTenant(),
       status: TenantStatus.INACTIVE,
     });
-    await expect(
-      svc.setVoiceInboundUrl(WS, T, null, 'https://x'),
-    ).rejects.toThrow(ForbiddenException);
+    const result = await svc.setVoiceInboundUrl(WS, T, null, 'https://example.com/inbound');
+    expect(result.voiceInboundUrl).toBe('https://example.com/inbound');
+    expect(tenantRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TenantStatus.INACTIVE,
+        voiceInboundUrl: 'https://example.com/inbound',
+      }),
+    );
   });
 
-  it('suspended tenant rejected — 403', async () => {
+  it('suspended tenant: URL write SUCCEEDS (routing config staged even for suspended tenants)', async () => {
     const { svc, tenantRepo } = buildService();
     tenantRepo.findOne.mockResolvedValue({
       ...activeTenant(),
       status: TenantStatus.SUSPENDED,
     });
-    await expect(
-      svc.setVoiceInboundUrl(WS, T, null, 'https://x'),
-    ).rejects.toThrow(ForbiddenException);
+    const result = await svc.setVoiceInboundUrl(WS, T, null, 'https://example.com/inbound');
+    expect(result.voiceInboundUrl).toBe('https://example.com/inbound');
+    expect(tenantRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TenantStatus.SUSPENDED,
+        voiceInboundUrl: 'https://example.com/inbound',
+      }),
+    );
+  });
+
+  it('inactive tenant: URL clear (null) SUCCEEDS', async () => {
+    const { svc, tenantRepo } = buildService();
+    tenantRepo.findOne.mockResolvedValue({
+      ...activeTenant(),
+      status: TenantStatus.INACTIVE,
+      voiceInboundUrl: 'https://stale.example',
+    });
+    const result = await svc.setVoiceInboundUrl(WS, T, null, null);
+    expect(result.voiceInboundUrl).toBeNull();
   });
 
   it('sets a valid URL', async () => {
