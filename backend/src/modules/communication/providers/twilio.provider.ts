@@ -1192,8 +1192,16 @@ export class TwilioProvider implements CommunicationProvider {
 
       this.logger.log(`Searching for available numbers in ${country} areaCode=${areaCode || ''} locality=${options?.locality || ''} region=${options?.region || ''}`);
 
+      // 2026-08-24 — always require voice+SMS+MMS capability. Prior
+      // behavior omitted these filters and the Twilio marketplace can
+      // return SMS-only numbers, which then can't receive AI-voice
+      // inbound calls. This is defense-in-depth: LB's flow assumes
+      // both capabilities exist on every provisioned number.
       const searchParams: any = {
         limit: 10,
+        voiceEnabled: true,
+        smsEnabled: true,
+        mmsEnabled: true,
       };
 
       if (areaCode) {
@@ -1243,15 +1251,27 @@ export class TwilioProvider implements CommunicationProvider {
         phoneNumber,
       });
 
+      const capabilities = [
+        purchased.capabilities?.sms && 'sms',
+        purchased.capabilities?.voice && 'voice',
+        purchased.capabilities?.mms && 'mms',
+      ].filter(Boolean) as string[];
+
+      // 2026-08-24 — defense-in-depth. Search step filters for
+      // voice+sms+mms so this SHOULD always be capable, but a Twilio
+      // marketplace race (rare) could still return a partial one.
+      // Log loud so ops notices before AI-voice inbound silently fails.
+      if (!purchased.capabilities?.voice) {
+        this.logger.warn(
+          `[twilio-provisioning] purchased_missing_voice sid=${purchased.sid} phone=${purchased.phoneNumber} caps=[${capabilities.join(',')}]`,
+        );
+      }
+
       return {
         phoneNumber: purchased.phoneNumber,
         sid: purchased.sid,
         friendlyName: purchased.friendlyName || phoneNumber,
-        capabilities: [
-          purchased.capabilities?.sms && 'sms',
-          purchased.capabilities?.voice && 'voice',
-          purchased.capabilities?.mms && 'mms',
-        ].filter(Boolean) as string[],
+        capabilities,
       };
     } catch (error: any) {
       this.logger.error(`Failed to purchase phone number: ${error.message}`);
