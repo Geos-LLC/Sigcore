@@ -26,10 +26,12 @@
     "cleanup:repoint-duplicates:dry-run": "npx ts-node -r tsconfig-paths/register src/scripts/cleanup-repoint-duplicates.ts",
     "cleanup:repoint-duplicates": "npx ts-node -r tsconfig-paths/register src/scripts/cleanup-repoint-duplicates.ts",
     "backfill:cc-recordings:dry-run": "DRY_RUN=1 npx ts-node -r tsconfig-paths/register src/scripts/backfill-cc-recording-urls.ts",
-    "backfill:cc-recordings": "DRY_RUN=0 npx ts-node -r tsconfig-paths/register src/scripts/backfill-cc-recording-urls.ts"
+    "backfill:cc-recordings": "DRY_RUN=0 npx ts-node -r tsconfig-paths/register src/scripts/backfill-cc-recording-urls.ts",
+    "postinstall": "node -e \"if(process.env.RAILWAY_ENVIRONMENT==='prod'){try{require('child_process').execSync('npx --yes @fixprompt/cli deploy-start --status success',{stdio:'inherit'})}catch(e){console.warn('[fixprompt] deploy marker failed:',e.message)}}\""
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
+    "@fixprompt/node": "^0.0.2",
     "@geos/loghub-client": "github:goscha01/geos-loghub-client",
     "@nestjs/common": "^10.3.0",
     "@nestjs/config": "^3.1.1",

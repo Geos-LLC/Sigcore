@@ -2,8 +2,11 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as bodyParser from 'body-parser';
+import { initFixPrompt } from '@fixprompt/node';
 import { AppModule } from './app.module';
 import { LoghubLogger } from '@geos/loghub-client';
+
+initFixPrompt({ key: process.env.FIXPROMPT_KEY });
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
