@@ -6,7 +6,7 @@ import { initFixPrompt } from '@fixprompt/node';
 import { AppModule } from './app.module';
 import { LoghubLogger } from '@geos/loghub-client';
 
-initFixPrompt({ key: process.env.FIXPROMPT_KEY });
+initFixPrompt({ projectKey: process.env.FIXPROMPT_KEY!, source: 'sigcore-api-prod' });
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
