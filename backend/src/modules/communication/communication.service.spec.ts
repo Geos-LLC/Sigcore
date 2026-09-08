@@ -841,3 +841,34 @@ describe('CommunicationService – SyncOptions.tenantId', () => {
     expect(options.tenantId).toBe('tenant-123');
   });
 });
+
+// ---------------------------------------------------------------------------
+// SyncResult.skipReasons — TASKS_2026-09-08_CONVERSATION_SYNC.md Task 3
+// ---------------------------------------------------------------------------
+describe('CommunicationService – SyncResult.skipReasons', () => {
+  it('exposes a typed reason enum + a partial-map skipReasons bucket', () => {
+    // Compile-time contract: every reason must be assignable to SyncSkipReason.
+    const shape: import('./communication.service').SyncResult = {
+      conversationsFromProvider: 3,
+      conversationsSynced: 1,
+      messagesSynced: 0,
+      callsSynced: 0,
+      contactsLinked: 0,
+      contactsCreated: 0,
+      errors: 0,
+      conversationsSkipped: 2,
+      skipReasons: {
+        phone_number_not_owned_by_tenant: 1,
+        no_saved_contact: 1,
+      },
+    };
+    expect(shape.skipReasons.phone_number_not_owned_by_tenant).toBe(1);
+    expect(shape.skipReasons.no_saved_contact).toBe(1);
+    // Sum of buckets should never exceed the flat conversationsSkipped count.
+    const bucketSum = Object.values(shape.skipReasons).reduce<number>(
+      (n, v) => n + (v ?? 0),
+      0,
+    );
+    expect(bucketSum).toBeLessThanOrEqual(shape.conversationsSkipped);
+  });
+});

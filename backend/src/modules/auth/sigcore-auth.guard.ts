@@ -26,14 +26,14 @@ export class SigcoreAuthGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
 
     // Method 1: Service-to-service via X-Sigcore-Key
-    const sigcoreKey = request.headers['x-sigcore-key'];
+    const sigcoreKey = this.readHeader(request, 'x-sigcore-key');
     if (sigcoreKey) {
       const expectedKey = this.configService.get('SIGCORE_SERVICE_KEY');
       if (!expectedKey || sigcoreKey !== expectedKey) {
         throw new UnauthorizedException('Invalid service key');
       }
 
-      const workspaceId = request.headers['x-workspace-id'];
+      const workspaceId = this.readHeader(request, 'x-workspace-id');
       if (!workspaceId) {
         throw new UnauthorizedException('X-Workspace-Id header required');
       }
@@ -48,7 +48,7 @@ export class SigcoreAuthGuard implements CanActivate {
     }
 
     // Method 2: External API key
-    const apiKey = request.headers['x-api-key'];
+    const apiKey = this.readHeader(request, 'x-api-key');
     if (apiKey) {
       const key = await this.apiKeyRepo.findOne({
         where: { key: apiKey, active: true },
@@ -107,6 +107,26 @@ export class SigcoreAuthGuard implements CanActivate {
   }
 
   /**
+   * Case-insensitive header read with whitespace trim. Node normalizes header
+   * names to lowercase already, but we still lookup both the lowercase and
+   * exact-case forms so a proxy or client that preserved case doesn't fail
+   * silently. Empty/whitespace-only values return `null` (treated as missing)
+   * so callers get the "Provide X-Sigcore-Key or x-api-key" 401 instead of
+   * the more confusing "Invalid API key" 401 on empty values. Reason: LB's
+   * probes intermittently sent whitespace-only headers via shell interpolation
+   * and hit "Invalid API key" from `apiKeyRepo.findOne({ where: { key: '' } })`
+   * returning nothing — misleading (looks like a bad key, not a missing one).
+   * See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 4.
+   */
+  private readHeader(request: { headers: Record<string, string | string[] | undefined> }, name: string): string | null {
+    const raw = request.headers[name] ?? request.headers[name.toLowerCase()];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  /**
    * Optional per-user scope for endpoints that mint user-identified tokens
    * (Voice SDK per-user identity). Applied to BOTH auth methods so Callio's
    * `x-api-key`-based proxy and any future `x-sigcore-key`-based caller can
@@ -118,7 +138,8 @@ export class SigcoreAuthGuard implements CanActivate {
     const rawUserId = request.headers['x-user-id'];
     if (rawUserId === undefined) return;
 
-    const userId = Array.isArray(rawUserId) ? rawUserId[0] : rawUserId;
+    const userIdRaw = Array.isArray(rawUserId) ? rawUserId[0] : rawUserId;
+    const userId = typeof userIdRaw === 'string' ? userIdRaw.trim() : userIdRaw;
     if (typeof userId !== 'string' || !VOICE_USER_ID_RE.test(userId)) {
       throw new UnauthorizedException(
         'X-User-Id must be an alphanumeric/dash/underscore string, 1–64 chars',

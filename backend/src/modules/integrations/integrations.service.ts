@@ -1768,6 +1768,99 @@ export class IntegrationsService {
   }
 
   /**
+   * Report OpenPhone connection state for a tenant (or workspace).
+   *
+   * Returns a `{ connected, scope, ... }` summary so LB and other consumers
+   * can render "connected/not connected" without inferring it from
+   * side-channels (e.g. a 404 on `/openphone/numbers`). No secrets, no live
+   * Quo API calls — just DB reads on our own tables:
+   *   - `TenantIntegration` (per-tenant credentials)
+   *   - `CommunicationIntegration` (workspace-level fallback)
+   *   - `TenantPhoneNumber` (count of registered OpenPhone-provider phones
+   *     tied to this tenant — a directly-actionable signal for the Task 2
+   *     "phone_number_not_owned_by_tenant" skip class).
+   *
+   * See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 5.
+   */
+  async getOpenPhoneStatus(
+    workspaceId: string,
+    tenantId: string | null,
+  ): Promise<{
+    connected: boolean;
+    scope: 'tenant' | 'workspace' | 'none';
+    integrationId: string | null;
+    status: IntegrationStatus | null;
+    connectedAt: Date | null;
+    ownedPhoneNumberCount: number;
+    metadata: { messageWebhookRegistered: boolean; callWebhookRegistered: boolean };
+  }> {
+    let integrationId: string | null = null;
+    let status: IntegrationStatus | null = null;
+    let connectedAt: Date | null = null;
+    let scope: 'tenant' | 'workspace' | 'none' = 'none';
+    let messageWebhookRegistered = false;
+    let callWebhookRegistered = false;
+
+    if (tenantId) {
+      const tenantIntegration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider: ProviderType.OPENPHONE },
+      });
+      if (tenantIntegration) {
+        integrationId = tenantIntegration.id;
+        status = tenantIntegration.status;
+        connectedAt = tenantIntegration.createdAt;
+        scope = 'tenant';
+        const meta = (tenantIntegration.metadata ?? {}) as { messageWebhookId?: string; callWebhookId?: string };
+        messageWebhookRegistered = !!meta.messageWebhookId;
+        callWebhookRegistered = !!meta.callWebhookId;
+      }
+    }
+
+    if (!integrationId) {
+      const workspaceIntegration = await this.integrationRepo.findOne({
+        where: { workspaceId, provider: ProviderType.OPENPHONE },
+      });
+      if (workspaceIntegration) {
+        integrationId = workspaceIntegration.id;
+        status = workspaceIntegration.status;
+        connectedAt = workspaceIntegration.createdAt;
+        scope = 'workspace';
+        const meta = (workspaceIntegration.metadata ?? {}) as { messageWebhookId?: string; callWebhookId?: string };
+        messageWebhookRegistered = !!meta.messageWebhookId;
+        callWebhookRegistered = !!meta.callWebhookId;
+      }
+    }
+
+    let ownedPhoneNumberCount = 0;
+    if (tenantId) {
+      ownedPhoneNumberCount = await this.tenantPhoneRepo.count({
+        where: {
+          workspaceId,
+          tenantId,
+          provider: PhoneNumberProvider.OPENPHONE,
+        },
+      });
+    } else {
+      ownedPhoneNumberCount = await this.tenantPhoneRepo.count({
+        where: {
+          workspaceId,
+          provider: PhoneNumberProvider.OPENPHONE,
+        },
+      });
+    }
+
+    return {
+      connected: !!integrationId && status === IntegrationStatus.ACTIVE,
+      scope,
+      integrationId,
+      status,
+      connectedAt,
+      ownedPhoneNumberCount,
+      metadata: { messageWebhookRegistered, callWebhookRegistered },
+    };
+  }
+
+  /**
    * Get OpenPhone phone numbers for a specific tenant.
    */
   async getOpenPhoneNumbersForTenant(

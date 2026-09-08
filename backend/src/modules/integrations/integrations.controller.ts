@@ -119,6 +119,30 @@ export class IntegrationsController {
   }
 
   /**
+   * Report OpenPhone connection state.
+   *
+   * Returns a `{ connected, scope, integrationId, ownedPhoneNumberCount, ... }`
+   * shape so LB and other consumers can render "connected/not connected"
+   * without inferring it from side-channels (e.g. a 404 on
+   * `/openphone/numbers`). Reads only Sigcore-owned DB rows — no live Quo
+   * API calls, no secrets.
+   *
+   * `ownedPhoneNumberCount` is the count of `tenant_phone_numbers` rows on
+   * this tenant with `provider = 'openphone'`. If it's 0 despite a
+   * connected integration, incoming Quo conversation syncs will skip every
+   * conversation with reason `phone_number_not_owned_by_tenant` (Task 2).
+   * See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 5.
+   */
+  @Get('openphone')
+  async getOpenPhoneStatus(
+    @WorkspaceId() workspaceId: string,
+    @TenantId() tenantId: string | null,
+  ) {
+    const status = await this.integrationsService.getOpenPhoneStatus(workspaceId, tenantId);
+    return { data: status };
+  }
+
+  /**
    * Get OpenPhone phone numbers.
    * When called with a tenant API key, returns numbers from TenantIntegration.
    * GET /integrations/openphone/numbers

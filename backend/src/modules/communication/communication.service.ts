@@ -45,6 +45,24 @@ export interface SyncProgress {
   result?: SyncResult;
 }
 
+/**
+ * Reason enum surfaced on `SyncResult.skipReasons` so operators can
+ * diagnose why N of M provider conversations don't land in the DB.
+ * Historically `conversationsSkipped` was a bare number — a 39%-skipped
+ * sync (ABC, 2026-09-08) gave no way to tell whether the drop was a
+ * retention filter, an unowned phone, a saved-contact filter, or a
+ * silent bug. Every branch that decrements the surviving conversation
+ * set MUST both (a) increment `conversationsSkipped` and (b) tally the
+ * matching bucket here. See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 3.
+ */
+export type SyncSkipReason =
+  | 'date_filter_excluded'
+  | 'phone_id_filter_mismatch'
+  | 'no_saved_contact'
+  | 'limit_truncated'
+  | 'phone_number_not_owned_by_tenant'
+  | 'no_participant_phone';
+
 export interface SyncResult {
   // What OpenPhone returned
   conversationsFromProvider: number;
@@ -57,6 +75,7 @@ export interface SyncResult {
   errors: number;
   // Skipped/filtered
   conversationsSkipped: number;
+  skipReasons: Partial<Record<SyncSkipReason, number>>;
 }
 
 export interface SyncOptions {
@@ -1665,6 +1684,12 @@ export class CommunicationService {
       contactsCreated: 0,
       errors: 0,
       conversationsSkipped: 0,
+      skipReasons: {},
+    };
+    const bumpSkip = (reason: SyncSkipReason, by = 1) => {
+      if (by <= 0) return;
+      result.conversationsSkipped += by;
+      result.skipReasons[reason] = (result.skipReasons[reason] ?? 0) + by;
     };
 
     this.updateProgress(workspaceId, {
@@ -1718,7 +1743,7 @@ export class CommunicationService {
           const untilFail = until && activityDate > until;
           if (sinceFail || untilFail) {
             this.logger.debug(`Excluding conversation ${c.externalId}: lastMessageAt=${c.lastMessageAt} | sinceFail=${sinceFail} | untilFail=${untilFail}`);
-            result.conversationsSkipped++;
+            bumpSkip('date_filter_excluded');
           }
           return !sinceFail && !untilFail;
         });
@@ -1732,7 +1757,7 @@ export class CommunicationService {
           const metadata = c.metadata as Record<string, unknown> | undefined;
           return metadata?.phoneNumberId === phoneNumberId;
         });
-        result.conversationsSkipped += beforePhoneFilter - conversations.length;
+        bumpSkip('phone_id_filter_mismatch', beforePhoneFilter - conversations.length);
         this.logger.log(`Filtered to ${conversations.length} conversations for phone number ${phoneNumberId}`);
       }
 
@@ -1834,7 +1859,7 @@ export class CommunicationService {
           // Include only if there's a contact with a real name
           return contact && hasRealName(contact);
         });
-        result.conversationsSkipped += beforeSavedFilter - conversations.length;
+        bumpSkip('no_saved_contact', beforeSavedFilter - conversations.length);
         this.logger.log(`Filtered to ${conversations.length} conversations with saved contacts (excluded ${beforeSavedFilter - conversations.length} unsaved)`);
       } else if (onlySavedContacts && contactsForFiltering.size === 0) {
         this.logger.warn(`onlySavedContacts enabled but no contacts found - syncing all conversations`);
@@ -1842,7 +1867,7 @@ export class CommunicationService {
 
       // Apply limit again in case filtering changed things
       if (limit && limit > 0 && conversations.length > limit) {
-        result.conversationsSkipped += conversations.length - limit;
+        bumpSkip('limit_truncated', conversations.length - limit);
         conversations = conversations.slice(0, limit);
         this.logger.log(`Limited to ${conversations.length} conversations`);
       }
@@ -1875,6 +1900,40 @@ export class CommunicationService {
         }
       }
 
+      // Task 2 (2026-09-08): pre-compute the set of phone numbers this tenant
+      // is authorized to own conversations for — either directly (row in
+      // tenant_phone_numbers with tenant_id = T) OR via an active PPA from a
+      // profile T owns to a shared-sender TPN. Same UNION as
+      // `applyConvTenantPhoneScope` so the sync write path and the read path
+      // agree on scope.
+      //
+      // Without this, `convData.phoneNumber` from Quo could point at a phone
+      // in the OpenPhone workspace that ABOTHER tenant (or nobody) owns —
+      // and the row would still be tagged `tenant_id = <caller>`, breaking
+      // `/conversations` (invisible via the phone-scope read filter) AND
+      // leaving zombie attribution behind. Preserved as null-tenantId when
+      // the phone isn't owned so the row stays visible to workspace-scoped
+      // callers without impersonating a tenant.
+      let tenantOwnedPhones: Set<string> | null = null;
+      if (tenantId) {
+        const rows = await this.conversationRepo.query(
+          `SELECT tpn.phone_number FROM tenant_phone_numbers tpn
+            WHERE tpn.workspace_id = $1 AND tpn.tenant_id = $2
+           UNION
+           SELECT tpn2.phone_number FROM tenant_phone_numbers tpn2
+            JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+            JOIN communication_profiles cp ON cp.id = ppa.profile_id
+            WHERE tpn2.workspace_id = $1 AND cp.tenant_id = $2 AND ppa.active = TRUE`,
+          [workspaceId, tenantId],
+        );
+        tenantOwnedPhones = new Set(
+          rows.map((r: { phone_number: string }) => r.phone_number).filter(Boolean),
+        );
+        this.logger.log(
+          `[SYNC OWN-PHONES] tenant=${tenantId} owns ${tenantOwnedPhones.size} phones (owned OR via PPA) — conversations on other phones will be skipped with reason 'phone_number_not_owned_by_tenant'`,
+        );
+      }
+
       const total = conversations.length;
       this.updateProgress(workspaceId, {
         phase: 'Syncing conversations',
@@ -1903,12 +1962,34 @@ export class CommunicationService {
           message: `Syncing conversation ${i + 1} of ${total}`,
         });
 
+        // Task 2 (2026-09-08) — tenant phone-ownership guard.
+        //
+        // Quo returns conversations for the *Quo workspace*, not for a given
+        // Sigcore tenant. If the caller is tenant-scoped and this conversation
+        // lives on a phone we can't map back to the tenant (owned outright OR
+        // via PPA), do NOT tag it with the caller's tenantId — otherwise the
+        // row lands with `tenant_id = T, phone_number = <not-in-T's-TPNs>`
+        // and every read gets filtered by `applyConvTenantPhoneScope`.
+        // Skip entirely for NEW rows (the caller has no legitimate claim);
+        // leave EXISTING rows unchanged so a prior workspace-scoped sync's
+        // attribution is preserved.
+        const convPhoneOwnedByTenant = tenantOwnedPhones
+          ? tenantOwnedPhones.has(convData.phoneNumber)
+          : true; // workspace-scoped callers see everything, no filter
+
         try {
           let conversation = await this.conversationRepo.findOne({
             where: { workspaceId, externalId: convData.externalId },
           });
 
           if (!conversation) {
+            if (!convPhoneOwnedByTenant) {
+              bumpSkip('phone_number_not_owned_by_tenant');
+              this.logger.debug(
+                `[SYNC SKIP] tenant=${tenantId} conv=${convData.externalId} phone=${convData.phoneNumber} not in tenant-owned set (${tenantOwnedPhones?.size ?? 0} owned)`,
+              );
+              continue;
+            }
             conversation = this.conversationRepo.create({
               workspaceId,
               tenantId, // Always set — hard guard above ensures tenantId is present
@@ -1920,8 +2001,11 @@ export class CommunicationService {
               metadata: convData.metadata,
             });
           } else {
-            // Backfill tenantId on existing conversations during sync
-            if (tenantId && !conversation.tenantId) {
+            // Backfill tenantId on existing conversations during sync — but
+            // ONLY when the phone is actually owned by this tenant. Prevents
+            // a rerun of a mis-scoped sync from re-writing tenantId onto
+            // rows that belong to somebody else in the shared workspace.
+            if (tenantId && !conversation.tenantId && convPhoneOwnedByTenant) {
               conversation.tenantId = tenantId;
             }
             conversation.metadata = convData.metadata;

@@ -125,6 +125,72 @@ describe('SigcoreAuthGuard', () => {
     });
   });
 
+  // ===================== Header hygiene (TASKS_2026-09-08 Task 4) =====================
+  //
+  // LB's ABC probe intermittently reported 401 on `/api/integrations/sync/status`
+  // with the same key that worked on other endpoints. Root cause was shell
+  // interpolation putting a whitespace-only value into the header, which the
+  // old code fell through to `apiKeyRepo.findOne({ where: { key: ' ' } })`
+  // and returned "Invalid API key" — misleading. The guard now treats
+  // whitespace-only values as missing (routes to the more accurate
+  // "Provide X-Sigcore-Key or x-api-key" 401) and trims the value before
+  // any lookup.
+  describe('header hygiene', () => {
+    it('trims whitespace on x-api-key before DB lookup', async () => {
+      const { guard, apiKeyRepo } = buildGuard();
+      apiKeyRepo.findOne.mockResolvedValue({
+        key: 'sc_trim_me',
+        workspaceId: 'ws-1',
+        tenantId: null,
+        scope: 'workspace',
+        active: true,
+        lastUsedAt: null,
+      });
+
+      const ctx = mockContext({ 'x-api-key': '  sc_trim_me  ' });
+      const result = await guard.canActivate(ctx as any);
+
+      expect(result).toBe(true);
+      expect(apiKeyRepo.findOne).toHaveBeenCalledWith({
+        where: { key: 'sc_trim_me', active: true },
+      });
+    });
+
+    it('treats whitespace-only x-api-key as missing (surfaces the "provide auth header" 401 instead of "invalid key")', async () => {
+      const { guard, apiKeyRepo } = buildGuard();
+      const ctx = mockContext({ 'x-api-key': '   ' });
+
+      await expect(guard.canActivate(ctx as any)).rejects.toThrow(
+        /Provide X-Sigcore-Key or x-api-key/,
+      );
+      // Never hit the DB — the header value normalized to null.
+      expect(apiKeyRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('trims whitespace on x-sigcore-key + x-workspace-id', async () => {
+      const { guard } = buildGuard('svc-key');
+      const ctx = mockContext({
+        'x-sigcore-key': '  svc-key  ',
+        'x-workspace-id': '  ws-1  ',
+      });
+
+      const result = await guard.canActivate(ctx as any);
+
+      expect(result).toBe(true);
+      expect(ctx.request.workspaceId).toBe('ws-1');
+    });
+
+    it('treats whitespace-only x-workspace-id as missing on the service path', async () => {
+      const { guard } = buildGuard('svc-key');
+      const ctx = mockContext({
+        'x-sigcore-key': 'svc-key',
+        'x-workspace-id': '   ',
+      });
+
+      await expect(guard.canActivate(ctx as any)).rejects.toThrow(/X-Workspace-Id header required/);
+    });
+  });
+
   // ===================== X-User-Id per-user scope =====================
   // Callio's proxy today authenticates via x-api-key, so X-User-Id must be
   // readable on BOTH paths. Absence is legacy-compatible (workspace-only
