@@ -175,6 +175,35 @@ export class CommunicationService {
   ) {}
 
   /**
+   * Task 2 (2026-09-08) — shared phone-ownership predicate used by:
+   *   - the OpenPhone sync loop's tenant-attribution guard, and
+   *   - linkOpenPhoneParticipant()'s tenant-backfill guard.
+   * Same UNION as applyConvTenantPhoneScope() so write and read paths agree.
+   * Returns true when the phone is owned by tenantId either directly (TPN) or
+   * via an active PPA from a profile the tenant owns. Empty/null phone → false.
+   */
+  private async isPhoneOwnedByTenant(
+    workspaceId: string,
+    tenantId: string,
+    phoneNumber: string | null | undefined,
+  ): Promise<boolean> {
+    if (!phoneNumber) return false;
+    const rows = await this.conversationRepo.query(
+      `SELECT 1 FROM tenant_phone_numbers tpn
+        WHERE tpn.workspace_id = $1 AND tpn.tenant_id = $2 AND tpn.phone_number = $3
+       UNION
+       SELECT 1 FROM tenant_phone_numbers tpn2
+        JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+        JOIN communication_profiles cp ON cp.id = ppa.profile_id
+        WHERE tpn2.workspace_id = $1 AND cp.tenant_id = $2 AND ppa.active = TRUE
+          AND tpn2.phone_number = $3
+       LIMIT 1`,
+      [workspaceId, tenantId, phoneNumber],
+    );
+    return rows.length > 0;
+  }
+
+  /**
    * Source C — link a freshly-saved OpenPhone conversation to its participant.
    * Idempotent. Safe to call on existing conversations (upsert + no-op if already set).
    */
@@ -184,25 +213,47 @@ export class CommunicationService {
     const { e164 } = normalizeToE164(conversation.participantPhoneNumber);
     if (!e164) return;
 
-    // Resolve tenant_id. Null-tenant conversations (legacy / webhook-created) get
-    // attached to the workspace's OpenPhone tenant so a participant can be created.
-    let tenantId = conversation.tenantId;
-    let tenantWasBackfilled = false;
-    if (!tenantId) {
-      tenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
-      if (!tenantId) {
+    // Resolve the tenant that will HOST the participant lookup (participant rows
+    // live under the OpenPhone tenant of the workspace — shared workspaces have
+    // exactly one). This is a *lookup* scope, NOT a conversation-attribution scope.
+    let hostTenantId = conversation.tenantId;
+    if (!hostTenantId) {
+      hostTenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
+      if (!hostTenantId) {
         this.logger.warn(`linkOpenPhoneParticipant: no OpenPhone tenant for workspace ${conversation.workspaceId}, skip conv ${conversation.id}`);
         return;
       }
-      tenantWasBackfilled = true;
     }
+
+    // Task 2 (2026-09-08) — tenant-backfill guard.
+    //
+    // Previously, if conversation.tenantId was null we backfilled it to the
+    // workspace-resolved OpenPhone tenant (`hostTenantId`) unconditionally. In
+    // shared OpenPhone workspaces (multiple LB tenants) this bypassed the sync
+    // loop's phone-ownership guard: a conversation on a sibling tenant's phone
+    // would land with tenant_id = <whichever tenant happened to be the workspace
+    // OpenPhone owner>, mis-attributing rows to the wrong tenant and making
+    // /conversations invisible to the real owner (its phone doesn't match its
+    // tenant_phone_numbers set).
+    //
+    // Fix: only backfill tenantId when the workspace-resolved tenant actually
+    // owns the conversation's phone_number (directly OR via active PPA). Otherwise
+    // leave tenantId null — the row stays workspace-visible; whichever tenant
+    // legitimately owns the phone will backfill it on its own sync run.
+    const shouldBackfillTenantId =
+      !conversation.tenantId &&
+      (await this.isPhoneOwnedByTenant(
+        conversation.workspaceId,
+        hostTenantId,
+        conversation.phoneNumber,
+      ));
 
     try {
       const providerAccountId = (conversation.metadata as Record<string, unknown> | null)?.phoneNumberId as string | undefined
-        ?? await this.openPhoneContactCache.sniffProviderAccountId(conversation.workspaceId, tenantId);
+        ?? await this.openPhoneContactCache.sniffProviderAccountId(conversation.workspaceId, hostTenantId);
       const participant = await this.openPhoneContactCache.upsertParticipantFromConversation({
         workspaceId: conversation.workspaceId,
-        tenantId,
+        tenantId: hostTenantId,
         providerAccountId,
         phoneE164: e164,
         rawPhone: conversation.participantPhoneNumber,
@@ -211,14 +262,14 @@ export class CommunicationService {
       // Self-healing: if we just created a participant with no snapshot match,
       // schedule a background contact sync so the next request has company/name.
       if (!participant.providerContactId) {
-        this.openPhoneContactCache.scheduleBackgroundSync(conversation.workspaceId, tenantId);
+        this.openPhoneContactCache.scheduleBackgroundSync(conversation.workspaceId, hostTenantId);
       }
 
       const updates: Partial<CommunicationConversation> = {};
       if (conversation.participantId !== participant.id) updates.participantId = participant.id;
       if (conversation.participantKey !== participant.participantKey) updates.participantKey = participant.participantKey;
       if (conversation.participantPhoneE164 !== e164) updates.participantPhoneE164 = e164;
-      if (tenantWasBackfilled) updates.tenantId = tenantId;
+      if (shouldBackfillTenantId) updates.tenantId = hostTenantId;
       if (Object.keys(updates).length > 0) {
         await this.conversationRepo.update(conversation.id, updates as any);
         Object.assign(conversation, updates);

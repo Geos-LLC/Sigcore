@@ -56,6 +56,8 @@ function buildService() {
   const openPhoneContactCache = {
     upsertParticipantFromConversation: jest.fn(),
     sniffProviderAccountId: jest.fn().mockResolvedValue(''),
+    resolveOpenPhoneTenant: jest.fn().mockResolvedValue(null),
+    scheduleBackgroundSync: jest.fn(),
   };
 
   const service = new CommunicationService(
@@ -87,6 +89,7 @@ function buildService() {
     openPhoneProvider,
     twilioProvider,
     encryptionService,
+    openPhoneContactCache,
   };
 }
 
@@ -845,6 +848,101 @@ describe('CommunicationService – SyncOptions.tenantId', () => {
 // ---------------------------------------------------------------------------
 // SyncResult.skipReasons — TASKS_2026-09-08_CONVERSATION_SYNC.md Task 3
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// linkOpenPhoneParticipant — TASKS_2026-09-08 Task 2 (post-hoc bug 6 fix)
+// Guard: when a conversation lands with tenantId=null on a shared workspace,
+// don't backfill it to the workspace-resolved OpenPhone tenant unless that
+// tenant actually owns the conversation's phone_number.
+// ---------------------------------------------------------------------------
+describe('CommunicationService – linkOpenPhoneParticipant tenant-backfill guard', () => {
+  const WORKSPACE = 'ws-shared-op';
+  const RESOLVED_TENANT = 'tenant-op-owner'; // workspace's resolveOpenPhoneTenant result
+
+  function convo(overrides: Record<string, any> = {}) {
+    return {
+      id: 'c-1',
+      workspaceId: WORKSPACE,
+      tenantId: null,
+      provider: ProviderType.OPENPHONE,
+      phoneNumber: '+15551111111',
+      participantPhoneNumber: '+15559999999',
+      participantId: null,
+      participantKey: null,
+      participantPhoneE164: null,
+      metadata: { phoneNumberId: 'PN123' },
+      ...overrides,
+    };
+  }
+
+  it('backfills tenantId when resolved tenant owns the phone (query returns rows)', async () => {
+    const { service, conversationRepo, openPhoneContactCache } = buildService();
+    openPhoneContactCache.resolveOpenPhoneTenant.mockResolvedValueOnce(RESOLVED_TENANT);
+    // isPhoneOwnedByTenant UNION returns [{1}] → owned
+    conversationRepo.query.mockResolvedValueOnce([{ '?column?': 1 }]);
+    openPhoneContactCache.upsertParticipantFromConversation.mockResolvedValueOnce({
+      id: 'p-1',
+      participantKey: 'op:PN123:+15559999999',
+      providerContactId: 'op-contact-1',
+    });
+
+    await (service as any).linkOpenPhoneParticipant(convo());
+
+    expect(conversationRepo.update).toHaveBeenCalledWith(
+      'c-1',
+      expect.objectContaining({ tenantId: RESOLVED_TENANT }),
+    );
+  });
+
+  it('does NOT backfill tenantId when resolved tenant does not own the phone (Sigcore Bug 6 regression)', async () => {
+    const { service, conversationRepo, openPhoneContactCache } = buildService();
+    openPhoneContactCache.resolveOpenPhoneTenant.mockResolvedValueOnce(RESOLVED_TENANT);
+    // isPhoneOwnedByTenant UNION returns [] → NOT owned (the bug scenario:
+    // shared workspace, phone belongs to a sibling tenant)
+    conversationRepo.query.mockResolvedValueOnce([]);
+    openPhoneContactCache.upsertParticipantFromConversation.mockResolvedValueOnce({
+      id: 'p-2',
+      participantKey: 'op:PN123:+15559999999',
+      providerContactId: 'op-contact-2',
+    });
+
+    await (service as any).linkOpenPhoneParticipant(convo());
+
+    // Participant fields may still update, but tenantId MUST NOT be in the patch.
+    const updateCalls = conversationRepo.update.mock.calls;
+    for (const [, patch] of updateCalls) {
+      expect(patch).not.toHaveProperty('tenantId');
+    }
+  });
+
+  it('leaves tenantId alone when conversation already has one (never overwrites)', async () => {
+    const { service, conversationRepo, openPhoneContactCache } = buildService();
+    // No resolveOpenPhoneTenant call expected — tenantId already set on the row.
+    openPhoneContactCache.upsertParticipantFromConversation.mockResolvedValueOnce({
+      id: 'p-3',
+      participantKey: 'op:PN123:+15559999999',
+      providerContactId: 'op-contact-3',
+    });
+
+    await (service as any).linkOpenPhoneParticipant(convo({ tenantId: 'tenant-a' }));
+
+    expect(openPhoneContactCache.resolveOpenPhoneTenant).not.toHaveBeenCalled();
+    const updateCalls = conversationRepo.update.mock.calls;
+    for (const [, patch] of updateCalls) {
+      expect(patch).not.toHaveProperty('tenantId'); // no re-write
+    }
+  });
+
+  it('early-returns without touching DB when no OpenPhone tenant is registered for the workspace', async () => {
+    const { service, conversationRepo, openPhoneContactCache } = buildService();
+    openPhoneContactCache.resolveOpenPhoneTenant.mockResolvedValueOnce(null);
+
+    await (service as any).linkOpenPhoneParticipant(convo());
+
+    expect(openPhoneContactCache.upsertParticipantFromConversation).not.toHaveBeenCalled();
+    expect(conversationRepo.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('CommunicationService – SyncResult.skipReasons', () => {
   it('exposes a typed reason enum + a partial-map skipReasons bucket', () => {
     // Compile-time contract: every reason must be assignable to SyncSkipReason.
