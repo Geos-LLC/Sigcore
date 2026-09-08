@@ -286,9 +286,81 @@ describe('CommunicationService – Tenant Isolation', () => {
       });
       expect(conversationRepo.query).not.toHaveBeenCalled();
     });
+
+    /**
+     * Regression for TASKS_2026-09-08_CONVERSATION_SYNC.md Task 1
+     * (Sigcore #48 — cross-tenant leak on GET /conversations/:id/messages).
+     *
+     * Repro shape from the task doc: participant `+14256756379` is
+     * simultaneously ABC's cleaner-agent phone AND a customer contact
+     * for sibling tenant 20013407. Before this fix, the "merge related
+     * conversations by participant phone" step pulled the sibling's
+     * conversation into the message query without any tenant scoping,
+     * leaking rows across tenants.
+     *
+     * Fix: the merge query now applies the same route-by-phone tenant
+     * filter as `getConversations` — only conversations whose business
+     * `phone_number` is owned (or PPA-shared) by the caller's tenant
+     * are eligible for the merge.
+     */
+    it('scopes the related-conversations merge by tenant-owned business phones', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const conv = makeConversation({
+        id: 'conv-abc',
+        phoneNumber: '+15550000001', // ABC's business number
+        participantPhoneNumber: '+14256756379', // shared participant
+        tenantId: TENANT_B, // sibling won the tag on sync
+      });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      // Auth: tenant A owns ABC's business number.
+      conversationRepo.query.mockResolvedValue([{ phone_number: '+15550000001' }]);
+      const relatedQb = mockConvQueryBuilder([conv]);
+      conversationRepo.createQueryBuilder.mockReturnValue(relatedQb);
+      messageRepo.createQueryBuilder.mockReturnValue(
+        mockMsgQueryBuilder([{ id: 'msg-1', body: 'ok', conversationId: 'conv-abc' }]),
+      );
+
+      await service.getMessagesForConversation(WS_ID, 'conv-abc', TENANT_A);
+
+      const andWhereClauses = relatedQb.andWhere.mock.calls.map((c: any) => String(c[0])).join('\n');
+      // The scope subquery must be applied on the merge query.
+      expect(andWhereClauses).toContain('conv.phone_number IN');
+      expect(andWhereClauses).toContain('tenant_phone_numbers');
+      expect(andWhereClauses).toContain('profile_phone_assignments');
+      const scopeParams = relatedQb.andWhere.mock.calls
+        .map((c: any) => c[1])
+        .find((p: any) => p && 'scopeTenantId' in p);
+      expect(scopeParams).toEqual({ scopeWsId: WS_ID, scopeTenantId: TENANT_A });
+    });
+
+    it('does NOT apply the tenant-phone-scope filter to the merge for workspace-scoped callers', async () => {
+      const { service, conversationRepo, messageRepo } = buildService();
+      const conv = makeConversation({ id: 'conv-1', tenantId: TENANT_A });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      const relatedQb = mockConvQueryBuilder([conv]);
+      conversationRepo.createQueryBuilder.mockReturnValue(relatedQb);
+      messageRepo.createQueryBuilder.mockReturnValue(
+        mockMsgQueryBuilder([{ id: 'msg-1', body: 'ok', conversationId: 'conv-1' }]),
+      );
+
+      await service.getMessagesForConversation(WS_ID, 'conv-1', null);
+
+      const andWhereClauses = relatedQb.andWhere.mock.calls.map((c: any) => String(c[0])).join('\n');
+      // Only the participant-phone predicate; no tenant-phone-scope subquery.
+      expect(andWhereClauses).toContain('conv.participantPhoneNumber IN');
+      expect(andWhereClauses).not.toContain('tenant_phone_numbers');
+    });
   });
 
   describe('getCallsForConversation – tenant enforcement', () => {
+    function mockConvQueryBuilder(conversations: any[]) {
+      return {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue(conversations),
+      };
+    }
+
     it('throws NotFoundException when the tenant owns no matching phone', async () => {
       const { service, conversationRepo } = buildService();
       const conv = makeConversation({ id: 'conv-1', phoneNumber: '+15559999999', tenantId: TENANT_B });
@@ -307,6 +379,34 @@ describe('CommunicationService – Tenant Isolation', () => {
       await expect(
         service.getCallsForConversation(WS_ID, 'conv-1', TENANT_A),
       ).rejects.toThrow(NotFoundException);
+    });
+
+    // Regression for TASKS_2026-09-08_CONVERSATION_SYNC.md Task 1
+    // (same leak class as messages: participant-phone merge with no tenant scope).
+    it('scopes the related-conversations merge by tenant-owned business phones', async () => {
+      const { service, conversationRepo, callRepo } = buildService();
+      const conv = makeConversation({
+        id: 'conv-abc',
+        phoneNumber: '+15550000001',
+        participantPhoneNumber: '+14256756379',
+        tenantId: TENANT_B,
+      });
+      conversationRepo.findOne.mockResolvedValue(conv);
+      conversationRepo.query.mockResolvedValue([{ phone_number: '+15550000001' }]);
+      const relatedQb = mockConvQueryBuilder([conv]);
+      conversationRepo.createQueryBuilder.mockReturnValue(relatedQb);
+      callRepo.find.mockResolvedValue([]);
+
+      await service.getCallsForConversation(WS_ID, 'conv-abc', TENANT_A);
+
+      const andWhereClauses = relatedQb.andWhere.mock.calls.map((c: any) => String(c[0])).join('\n');
+      expect(andWhereClauses).toContain('conv.phone_number IN');
+      expect(andWhereClauses).toContain('tenant_phone_numbers');
+      expect(andWhereClauses).toContain('profile_phone_assignments');
+      const scopeParams = relatedQb.andWhere.mock.calls
+        .map((c: any) => c[1])
+        .find((p: any) => p && 'scopeTenantId' in p);
+      expect(scopeParams).toEqual({ scopeWsId: WS_ID, scopeTenantId: TENANT_A });
     });
   });
 

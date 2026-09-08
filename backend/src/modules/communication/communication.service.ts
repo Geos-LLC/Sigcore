@@ -526,6 +526,47 @@ export class CommunicationService {
   }
 
   /**
+   * Add a route-by-phone tenant filter to a conversation query builder
+   * whose alias is `conv`. Matches the semantics of the inline subquery
+   * in `getConversations` (#47): tenant can see conversations whose
+   * business `phone_number` is either owned outright via
+   * `tenant_phone_numbers` OR granted via an active PPA on a profile
+   * the tenant owns. No-op when `tenantId` is null/undefined
+   * (workspace-scoped callers).
+   *
+   * Used by per-conversation reads (`getMessagesForConversation`,
+   * `getCallsForConversation`) to prevent cross-tenant leaks in the
+   * "merge related conversations by participant phone" step: without
+   * this filter, a participant number that also appears in a sibling
+   * tenant's conversation would pull that tenant's messages/calls into
+   * the response. See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 1.
+   */
+  private applyConvTenantPhoneScope(
+    qb: import('typeorm').SelectQueryBuilder<CommunicationConversation>,
+    workspaceId: string,
+    tenantId: string | null | undefined,
+  ): void {
+    if (!tenantId) return;
+    qb.andWhere(
+      `conv.phone_number IN (
+        SELECT tpn.phone_number
+        FROM tenant_phone_numbers tpn
+        WHERE tpn.workspace_id = :scopeWsId
+          AND tpn.tenant_id = :scopeTenantId
+        UNION
+        SELECT tpn2.phone_number
+        FROM tenant_phone_numbers tpn2
+        JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+        JOIN communication_profiles cp ON cp.id = ppa.profile_id
+        WHERE tpn2.workspace_id = :scopeWsId
+          AND cp.tenant_id = :scopeTenantId
+          AND ppa.active = TRUE
+      )`,
+      { scopeWsId: workspaceId, scopeTenantId: tenantId },
+    );
+  }
+
+  /**
    * Load a conversation by id + workspace and, when the caller is
    * tenant-scoped, authorize via phone-number ownership (owned outright
    * OR active PPA from a profile the tenant owns) rather than the
@@ -584,13 +625,16 @@ export class CommunicationService {
 
     let conversationIds = [conversation.id];
     if (participantPhones.length > 0) {
-      const relatedConversations = await this.conversationRepo
+      const relatedQb = this.conversationRepo
         .createQueryBuilder('conv')
         .where('conv.workspaceId = :workspaceId', { workspaceId })
-        .andWhere('conv.participantPhoneNumber IN (:...phones)', { phones: participantPhones })
-        .getMany();
+        .andWhere('conv.participantPhoneNumber IN (:...phones)', { phones: participantPhones });
+      this.applyConvTenantPhoneScope(relatedQb, workspaceId, tenantId);
+      const relatedConversations = await relatedQb.getMany();
 
-      conversationIds = [...new Set(relatedConversations.map(c => c.id))];
+      conversationIds = [
+        ...new Set<string>([conversation.id, ...relatedConversations.map(c => c.id)]),
+      ];
     }
 
     const qb = this.messageRepo
@@ -1483,13 +1527,16 @@ export class CommunicationService {
     // Find all conversations with this participant
     let conversationIds = [conversation.id];
     if (participantPhones.length > 0) {
-      const relatedConversations = await this.conversationRepo
+      const relatedQb = this.conversationRepo
         .createQueryBuilder('conv')
         .where('conv.workspaceId = :workspaceId', { workspaceId })
-        .andWhere('conv.participantPhoneNumber IN (:...phones)', { phones: participantPhones })
-        .getMany();
+        .andWhere('conv.participantPhoneNumber IN (:...phones)', { phones: participantPhones });
+      this.applyConvTenantPhoneScope(relatedQb, workspaceId, tenantId);
+      const relatedConversations = await relatedQb.getMany();
 
-      conversationIds = [...new Set(relatedConversations.map(c => c.id))];
+      conversationIds = [
+        ...new Set<string>([conversation.id, ...relatedConversations.map(c => c.id)]),
+      ];
     }
 
     return this.callRepo.find({
