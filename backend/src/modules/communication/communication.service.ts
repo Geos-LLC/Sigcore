@@ -219,7 +219,14 @@ export class CommunicationService {
     // exactly one). This is a *lookup* scope, NOT a conversation-attribution scope.
     let hostTenantId = conversation.tenantId;
     if (!hostTenantId) {
-      hostTenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
+      // Task 7 audit (2026-09-09) — pass conversation.phoneNumber so shared
+      // OpenPhone workspaces route the participant to the tenant that owns
+      // the phone, not to whichever tenant integration is newest. Falls back
+      // to the newest-tenant heuristic when the phone isn't in any TPN row.
+      hostTenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(
+        conversation.workspaceId,
+        conversation.phoneNumber,
+      );
       if (!hostTenantId) {
         this.logger.warn(`linkOpenPhoneParticipant: no OpenPhone tenant for workspace ${conversation.workspaceId}, skip conv ${conversation.id}`);
         return;
@@ -306,6 +313,47 @@ export class CommunicationService {
     }
 
     return integration;
+  }
+
+  /**
+   * TASKS_2026-09-08 Task 7 (2026-09-09) — tenant-scoped credential resolution.
+   *
+   * Shared OpenPhone workspaces (LB routes multiple tenants through one Sigcore
+   * `workspace_id`) hold ONE row in `communication_integrations` — whichever
+   * tenant's key set the workspace up first "wins". Every tenant that later
+   * connects their own OpenPhone key writes to `tenant_integrations` via
+   * `IntegrationsService.connectOpenPhoneForTenant`. Legacy `getIntegration`
+   * only reads the workspace-level table, so tenant-scoped callers silently
+   * ran against a sibling tenant's key — Quo returned the sibling's
+   * conversations and Task 2's phone-ownership guard rejected all of them,
+   * leaving the caller with 0 attributed rows and hundreds of real
+   * conversations never fetched at all (ABC canary, 2026-09-09).
+   *
+   * Resolution order: (1) active tenant-scoped row if `tenantId + provider`
+   * are supplied; (2) workspace-scoped row via `getIntegration`. Matches the
+   * pattern already used in `sendMessageToPhoneNumber` and
+   * `OpenPhoneContactCacheService.resolveCredentials`.
+   */
+  async resolveIntegrationForCaller(
+    workspaceId: string,
+    tenantId: string | null | undefined,
+    provider?: ProviderType,
+  ): Promise<CommunicationIntegration | TenantIntegration> {
+    if (tenantId && provider) {
+      const tenantIntegration = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider, status: IntegrationStatus.ACTIVE },
+      });
+      if (tenantIntegration) {
+        this.logger.log(
+          `[resolveIntegrationForCaller] using tenant-scoped integration ${tenantIntegration.id} (tenant=${tenantId}, workspace=${workspaceId}, provider=${provider})`,
+        );
+        return tenantIntegration;
+      }
+      this.logger.log(
+        `[resolveIntegrationForCaller] no tenant-scoped integration for tenant=${tenantId} provider=${provider} — falling back to workspace-scoped`,
+      );
+    }
+    return this.getIntegration(workspaceId, provider);
   }
 
   async getConversationById(conversationId: string): Promise<CommunicationConversation | null> {
@@ -1753,7 +1801,7 @@ export class CommunicationService {
       startedAt: new Date(),
     });
 
-    const integration = await this.getIntegration(workspaceId, providerType);
+    const integration = await this.resolveIntegrationForCaller(workspaceId, tenantId, providerType);
     this.logger.log(`Found integration: ${integration.provider}`);
 
     const provider = this.getProvider(integration.provider);

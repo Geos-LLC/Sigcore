@@ -649,9 +649,30 @@ export class OpenPhoneContactCacheService {
    * Resolve the tenant_id that owns the OpenPhone integration for this workspace.
    * Used when a conversation has tenant_id=NULL (legacy rows / webhook-created rows
    * that weren't tagged yet) but we still need to create a tenant-scoped participant.
-   * Picks the tenant_integration with the OpenPhone provider, newest first.
+   *
+   * Task 7 audit (2026-09-09) — when a conversation phone is known, prefer
+   * routing to the tenant that OWNS that phone via `tenant_phone_numbers`.
+   * Shared OpenPhone workspaces host multiple tenant integrations; the
+   * newest-tenant heuristic returns the wrong tenant for conversations on
+   * sibling-tenant phones (ABC + sibling in workspace 1bcbb4e0-…, 2026-09-09).
+   * Falls back to newest-tenant only when no phone context is available
+   * (background contact enrichment) or the phone isn't in any TPN row.
    */
-  async resolveOpenPhoneTenant(workspaceId: string): Promise<string | null> {
+  async resolveOpenPhoneTenant(
+    workspaceId: string,
+    phoneNumber?: string | null,
+  ): Promise<string | null> {
+    if (phoneNumber) {
+      const owners = await this.dataSource.query(
+        `SELECT tenant_id FROM tenant_phone_numbers
+          WHERE workspace_id = $1 AND phone_number = $2 AND provider = 'openphone'
+          LIMIT 1`,
+        [workspaceId, phoneNumber],
+      );
+      if (owners.length > 0 && owners[0].tenant_id) {
+        return owners[0].tenant_id as string;
+      }
+    }
     const ti = await this.tenantIntegrationRepo.findOne({
       where: { workspaceId, provider: ProviderType.OPENPHONE },
       order: { createdAt: 'DESC' },

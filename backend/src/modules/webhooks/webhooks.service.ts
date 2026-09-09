@@ -139,7 +139,13 @@ export class WebhooksService {
     let tenantId = conversation.tenantId;
     let tenantWasBackfilled = false;
     if (!tenantId) {
-      tenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(conversation.workspaceId);
+      // Task 7 audit (2026-09-09) — pass conversation.phoneNumber so shared
+      // OpenPhone workspaces route to the tenant that owns the phone rather
+      // than to the newest tenant integration in the workspace.
+      tenantId = await this.openPhoneContactCache.resolveOpenPhoneTenant(
+        conversation.workspaceId,
+        conversation.phoneNumber,
+      );
       if (!tenantId) return;
       tenantWasBackfilled = true;
     }

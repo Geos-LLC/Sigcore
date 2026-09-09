@@ -993,3 +993,117 @@ describe('CommunicationService – SyncResult.skipReasons', () => {
     // Partial<Record<SyncSkipReason, number>> constraint above.
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASKS_2026-09-08_CONVERSATION_SYNC.md — Task 7 (P1)
+//
+// Shared OpenPhone workspaces route multiple tenants through one Sigcore
+// `workspace_id`. `communication_integrations` holds one workspace-level row
+// (whichever tenant seeded the workspace first "wins"); each tenant that
+// later connects their own OpenPhone key writes to `tenant_integrations`.
+//
+// Pre-fix, `syncConversations` called `getIntegration(workspaceId, provider)`
+// which only reads the workspace-level table, so tenant-scoped syncs silently
+// ran against a sibling tenant's key. Quo returned the sibling's conversations
+// and Task 2's phone-ownership guard rejected all of them → 0 attributed rows
+// and hundreds of real conversations never fetched (ABC canary, 2026-09-09).
+//
+// The regression suite below pins `resolveIntegrationForCaller` — the helper
+// `syncConversations` now goes through — to the tenant-first, workspace-
+// fallback contract already established by `sendMessageToPhoneNumber` and
+// `OpenPhoneContactCacheService.resolveCredentials`.
+// ---------------------------------------------------------------------------
+describe('CommunicationService.resolveIntegrationForCaller (Task 7)', () => {
+  const WORKSPACE = 'workspace-shared';
+  const CALLER_TENANT = 'tenant-abc';
+  const WORKSPACE_INTEGRATION = {
+    id: 'workspace-int-1',
+    workspaceId: WORKSPACE,
+    provider: ProviderType.OPENPHONE,
+    // Sibling tenant's key — what pre-fix syncs incorrectly used.
+    credentialsEncrypted: 'enc:sibling-workspace-key',
+  };
+  const TENANT_INTEGRATION = {
+    id: 'tenant-int-1',
+    workspaceId: WORKSPACE,
+    tenantId: CALLER_TENANT,
+    provider: ProviderType.OPENPHONE,
+    status: IntegrationStatus.ACTIVE,
+    // ABC's real key — what post-fix syncs must use.
+    credentialsEncrypted: 'enc:abc-tenant-key',
+  };
+
+  it('prefers a tenant-scoped integration over the workspace-level one when tenantId + provider are supplied', async () => {
+    const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    tenantIntegrationRepo.findOne.mockResolvedValue(TENANT_INTEGRATION);
+    integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
+
+    const result = await service.resolveIntegrationForCaller(
+      WORKSPACE,
+      CALLER_TENANT,
+      ProviderType.OPENPHONE,
+    );
+
+    // ABC's own row — NOT the workspace-level (sibling's) row.
+    expect(result.id).toBe('tenant-int-1');
+    expect(result.credentialsEncrypted).toBe('enc:abc-tenant-key');
+    // Tenant-scoped lookup ran against the correct composite key + ACTIVE filter.
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledWith({
+      where: {
+        workspaceId: WORKSPACE,
+        tenantId: CALLER_TENANT,
+        provider: ProviderType.OPENPHONE,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+    // No fall-through to the workspace-level repo — that would be the pre-fix bug.
+    expect(integrationRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the workspace-scoped integration when no tenant-scoped row exists', async () => {
+    const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+    integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
+
+    const result = await service.resolveIntegrationForCaller(
+      WORKSPACE,
+      CALLER_TENANT,
+      ProviderType.OPENPHONE,
+    );
+
+    expect(result.id).toBe('workspace-int-1');
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledTimes(1);
+    expect(integrationRepo.findOne).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the tenant-scoped lookup entirely when tenantId is null', async () => {
+    const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
+
+    const result = await service.resolveIntegrationForCaller(
+      WORKSPACE,
+      null,
+      ProviderType.OPENPHONE,
+    );
+
+    expect(result.id).toBe('workspace-int-1');
+    // A workspace-scoped sync must not incur a spurious tenant-integration query.
+    expect(tenantIntegrationRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('skips the tenant-scoped lookup when provider is not specified (composite key requires it)', async () => {
+    const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
+
+    const result = await service.resolveIntegrationForCaller(
+      WORKSPACE,
+      CALLER_TENANT,
+      undefined,
+    );
+
+    expect(result.id).toBe('workspace-int-1');
+    // `tenant_integrations` unique index is (workspaceId, tenantId, provider).
+    // Without provider, we can't do a deterministic tenant-scoped lookup.
+    expect(tenantIntegrationRepo.findOne).not.toHaveBeenCalled();
+  });
+});
