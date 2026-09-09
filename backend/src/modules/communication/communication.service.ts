@@ -61,6 +61,7 @@ export type SyncSkipReason =
   | 'no_saved_contact'
   | 'limit_truncated'
   | 'phone_number_not_owned_by_tenant'
+  | 'phone_number_unresolved'
   | 'no_participant_phone';
 
 export interface SyncResult {
@@ -2013,6 +2014,22 @@ export class CommunicationService {
           message: `Syncing conversation ${i + 1} of ${total}`,
         });
 
+        // Task 6 (2026-09-09) — phone_number extractor resolvability guard.
+        //
+        // The OpenPhone extractor now emits `phoneNumber: null` when the Quo
+        // `/phone-numbers` lookup missed the id (deleted phone, transient 5xx
+        // swallowed by the map fetch, or pagination gap). Historically the
+        // extractor emitted `''` and the update branch below unconditionally
+        // wrote it back — a single flaky resync silently corrupted a
+        // previously-attributable row's `phone_number` to '' and the
+        // Task 1 read-scope filter then dropped the row. Treat both null and
+        // empty-string as "unresolved" and skip; for NEW rows we count it and
+        // bail, for EXISTING rows we leave the stored phone_number intact.
+        const resolvedPhone =
+          typeof convData.phoneNumber === 'string' && convData.phoneNumber.length > 0
+            ? convData.phoneNumber
+            : null;
+
         // Task 2 (2026-09-08) — tenant phone-ownership guard.
         //
         // Quo returns conversations for the *Quo workspace*, not for a given
@@ -2025,7 +2042,7 @@ export class CommunicationService {
         // leave EXISTING rows unchanged so a prior workspace-scoped sync's
         // attribution is preserved.
         const convPhoneOwnedByTenant = tenantOwnedPhones
-          ? tenantOwnedPhones.has(convData.phoneNumber)
+          ? resolvedPhone !== null && tenantOwnedPhones.has(resolvedPhone)
           : true; // workspace-scoped callers see everything, no filter
 
         try {
@@ -2034,10 +2051,17 @@ export class CommunicationService {
           });
 
           if (!conversation) {
+            if (resolvedPhone === null) {
+              bumpSkip('phone_number_unresolved');
+              this.logger.debug(
+                `[SYNC SKIP] conv=${convData.externalId} phone_number unresolved (extractor returned null/empty) — see Task 6`,
+              );
+              continue;
+            }
             if (!convPhoneOwnedByTenant) {
               bumpSkip('phone_number_not_owned_by_tenant');
               this.logger.debug(
-                `[SYNC SKIP] tenant=${tenantId} conv=${convData.externalId} phone=${convData.phoneNumber} not in tenant-owned set (${tenantOwnedPhones?.size ?? 0} owned)`,
+                `[SYNC SKIP] tenant=${tenantId} conv=${convData.externalId} phone=${resolvedPhone} not in tenant-owned set (${tenantOwnedPhones?.size ?? 0} owned)`,
               );
               continue;
             }
@@ -2046,7 +2070,7 @@ export class CommunicationService {
               tenantId, // Always set — hard guard above ensures tenantId is present
               externalId: convData.externalId,
               provider: integration.provider,
-              phoneNumber: convData.phoneNumber,
+              phoneNumber: resolvedPhone,
               participantPhoneNumber: convData.participantPhoneNumber,
               participantPhoneNumbers: convData.participantPhoneNumbers,
               metadata: convData.metadata,
@@ -2060,7 +2084,20 @@ export class CommunicationService {
               conversation.tenantId = tenantId;
             }
             conversation.metadata = convData.metadata;
-            conversation.phoneNumber = convData.phoneNumber;
+            // Task 6 (2026-09-09) — never overwrite a good phone_number with an
+            // unresolved/empty extractor result. Also mirror the tenant-ownership
+            // guard so a workspace-scoped resync can't reassign a stored phone
+            // to a phone that isn't owned by the caller's tenant. The row still
+            // syncs (metadata + participants refresh), so this is NOT a
+            // bumpSkip — invariant `sum(skipReasons) === conversationsSkipped`
+            // only tracks fully-dropped rows.
+            if (resolvedPhone !== null && convPhoneOwnedByTenant) {
+              conversation.phoneNumber = resolvedPhone;
+            } else if (resolvedPhone === null && conversation.phoneNumber) {
+              this.logger.warn(
+                `[SYNC] conv=${convData.externalId} extractor returned null phone_number; preserving stored '${conversation.phoneNumber}' (Task 6 guard)`,
+              );
+            }
             conversation.participantPhoneNumbers = convData.participantPhoneNumbers;
           }
 
@@ -2343,7 +2380,11 @@ export class CommunicationService {
 
             // Update conversation metadata
             dbConv.metadata = opConv.metadata;
-            dbConv.phoneNumber = opConv.phoneNumber;
+            // Task 6 (2026-09-09) — same guard as the main sync loop: preserve
+            // the stored phone_number when the extractor returned null/empty.
+            if (typeof opConv.phoneNumber === 'string' && opConv.phoneNumber.length > 0) {
+              dbConv.phoneNumber = opConv.phoneNumber;
+            }
             await this.conversationRepo.save(dbConv);
             await this.linkOpenPhoneParticipant(dbConv);
 

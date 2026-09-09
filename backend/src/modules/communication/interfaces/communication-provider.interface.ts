@@ -21,7 +21,16 @@ export interface SendMessageResult {
 
 export interface ConversationData {
   externalId: string;
-  phoneNumber: string;
+  /**
+   * Tenant-side phone number for this conversation. `null` when the provider
+   * extractor could not resolve which of the workspace's phones hosts the
+   * conversation (e.g. Quo `/phone-numbers` lookup missed the id: deleted,
+   * paginated out, or a transient 5xx swallowed by the try/catch). The sync
+   * writer MUST treat null as "unresolved" and skip rather than overwriting
+   * a previously-good `phone_number`. See TASKS_2026-09-08_CONVERSATION_SYNC.md
+   * Task 6.
+   */
+  phoneNumber: string | null;
   participantPhoneNumber: string;
   participantPhoneNumbers?: string[];
   createdAt: Date;

@@ -294,9 +294,12 @@ export class OpenPhoneProvider implements CommunicationProvider {
           this.logger.warn(`Phone number ID ${phoneNumberId} not found in OpenPhone - may have been deleted`);
         }
 
+        // Task 6 (2026-09-09): emit `null` instead of `''` when the tenant-side
+        // phone can't be resolved so the sync writer skips ('phone_number_unresolved')
+        // rather than corrupting a previously-good phone_number on the update path.
         return {
           externalId: conv.id as string,
-          phoneNumber: phoneInfo?.number || '',  // Empty string if phone not found, not the ID
+          phoneNumber: phoneInfo?.number ?? null,
           participantPhoneNumber: participants[0] || '',
           participantPhoneNumbers: participants,
           createdAt: new Date(conv.createdAt as string),
@@ -369,7 +372,8 @@ export class OpenPhoneProvider implements CommunicationProvider {
           const latestMsg = messages[0];
           conversations.push({
             externalId: conv.id as string,
-            phoneNumber: phoneInfo?.number || '',
+            // Task 6 (2026-09-09): null when phoneInfo missing — sync writer skips instead of clobbering.
+            phoneNumber: phoneInfo?.number ?? null,
             participantPhoneNumber: participants[0],
             participantPhoneNumbers: participants,
             createdAt: new Date(conv.createdAt as string),

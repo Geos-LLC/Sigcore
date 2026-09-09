@@ -969,4 +969,27 @@ describe('CommunicationService – SyncResult.skipReasons', () => {
     );
     expect(bucketSum).toBeLessThanOrEqual(shape.conversationsSkipped);
   });
+
+  // TASKS_2026-09-08_CONVERSATION_SYNC.md Task 6 — extractor emits `null` for
+  // conversations whose tenant-side phone couldn't be resolved from Quo's
+  // /phone-numbers map. The sync loop bumps `phone_number_unresolved` and
+  // continues rather than corrupting a previously-good stored phone_number.
+  it('includes `phone_number_unresolved` (Task 6) as a valid SyncSkipReason', () => {
+    const shape: import('./communication.service').SyncResult = {
+      conversationsFromProvider: 5,
+      conversationsSynced: 4,
+      messagesSynced: 0,
+      callsSynced: 0,
+      contactsLinked: 0,
+      contactsCreated: 0,
+      errors: 0,
+      conversationsSkipped: 1,
+      skipReasons: {
+        phone_number_unresolved: 1,
+      },
+    };
+    expect(shape.skipReasons.phone_number_unresolved).toBe(1);
+    // Compile-time only — a typo like 'phone_number_unresolvd' would fail the
+    // Partial<Record<SyncSkipReason, number>> constraint above.
+  });
 });
