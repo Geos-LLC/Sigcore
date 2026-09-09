@@ -15,6 +15,7 @@ import { EmailModule } from './modules/email/email.module';
 import { BusinessIdentityModule } from './modules/business-identity/business-identity.module';
 import { AdminViewsModule } from './modules/admin-views/admin-views.module';
 import { RoutingModule } from './modules/routing/routing.module';
+import { LookupsModule } from './modules/lookups/lookups.module';
 import { S3Module } from './shared/storage/s3.module';
 import { APP_GUARD } from '@nestjs/core';
 import { HealthController } from './health.controller';
@@ -68,6 +69,7 @@ import { RequireTenantScopeGuard } from './modules/auth/require-tenant-scope.gua
     BusinessIdentityModule,
     AdminViewsModule,
     RoutingModule,
+    LookupsModule,
     S3Module,
   ],
   controllers: [HealthController, DocsController, BootstrapController],
