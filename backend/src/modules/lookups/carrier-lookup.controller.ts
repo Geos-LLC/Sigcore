@@ -14,7 +14,9 @@ import { CarrierLookupService, CarrierLookupResult } from './carrier-lookup.serv
  * lineType) — the caller (LB) owns the integration-slug policy so we
  * don't need to redeploy Sigcore when a new integration goes live.
  */
-@Controller('api/lookups')
+// Controller path is 'lookups' — the app's global '/api' prefix
+// (main.ts setGlobalPrefix) prepends the '/api'. Final route: GET /api/lookups/carrier.
+@Controller('lookups')
 @UseGuards(SigcoreAuthGuard)
 export class CarrierLookupController {
   constructor(private readonly svc: CarrierLookupService) {}
