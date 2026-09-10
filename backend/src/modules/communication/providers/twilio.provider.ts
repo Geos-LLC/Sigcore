@@ -278,7 +278,7 @@ export class TwilioProvider implements CommunicationProvider {
     // callers can pass it uniformly; here it is intentionally ignored.
     // See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 8.
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _allowedPhoneNumberIds?: Set<string>,
+    _allowedPhoneNumbers?: Set<string>,
   ): Promise<ConversationData[]> {
     try {
       const credentials = JSON.parse(workspaceId) as TwilioCredentials;

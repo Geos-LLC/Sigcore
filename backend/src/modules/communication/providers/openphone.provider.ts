@@ -208,13 +208,13 @@ export class OpenPhoneProvider implements CommunicationProvider {
     limit?: number,
     phoneNumberId?: string,
     since?: Date,
-    allowedPhoneNumberIds?: Set<string>,
+    allowedPhoneNumbers?: Set<string>,
   ): Promise<ConversationData[]> {
     try {
       const credentials = JSON.parse(workspaceId) as OpenPhoneCredentials;
       const client = this.createClient(credentials.apiKey);
 
-      this.logger.log(`Fetching conversations from OpenPhone with pagination... (limit: ${limit || 'none'}, phoneNumberId: ${phoneNumberId || 'all'}, since: ${since?.toISOString() || 'none'}, allowedPhoneNumberIds: ${allowedPhoneNumberIds ? allowedPhoneNumberIds.size : 'none'})`);
+      this.logger.log(`Fetching conversations from OpenPhone with pagination... (limit: ${limit || 'none'}, phoneNumberId: ${phoneNumberId || 'all'}, since: ${since?.toISOString() || 'none'}, allowedPhoneNumbers: ${allowedPhoneNumbers ? allowedPhoneNumbers.size : 'none'})`);
 
       // First, fetch phone numbers to get their display names
       const phoneNumberMap = await this.getPhoneNumbers(client);
@@ -229,18 +229,29 @@ export class OpenPhoneProvider implements CommunicationProvider {
       // path's `applyConvTenantPhoneScope` would then hide the row from the
       // caller (its own tenant_phone_numbers doesn't include that phone).
       //
-      // Solution: strip anything outside the caller's owned providerId set,
+      // Solution: strip anything outside the caller's owned phone-number set,
       // so any lookup miss emits `phoneNumber: null` (Task 6 contract) and the
-      // sync writer skips with reason `phone_number_unresolved`.
-      if (allowedPhoneNumberIds && allowedPhoneNumberIds.size > 0) {
+      // sync writer skips with reason `phone_number_unresolved`. Filtering by
+      // phone number (not `phoneNumberId`) is deliberate — the number is a
+      // guaranteed-populated column on `tenant_phone_numbers`, whereas
+      // `provider_id` is nullable and historically un-backfilled for
+      // pre-`registerOpenPhoneNumbersForTenant` connections (ABC's exact
+      // pathology — commit 859a603 shipped with a provider_id-keyed filter
+      // that reduced ABC's conversationsFromProvider from 4449 → 0).
+      let allowedPhoneIdSet: Set<string> | undefined;
+      if (allowedPhoneNumbers && allowedPhoneNumbers.size > 0) {
         const beforeSize = phoneNumberMap.size;
-        for (const key of Array.from(phoneNumberMap.keys())) {
-          if (!allowedPhoneNumberIds.has(key)) {
+        const keptIds = new Set<string>();
+        for (const [key, info] of Array.from(phoneNumberMap.entries())) {
+          if (info.number && allowedPhoneNumbers.has(info.number)) {
+            keptIds.add(key);
+          } else {
             phoneNumberMap.delete(key);
           }
         }
+        allowedPhoneIdSet = keptIds;
         this.logger.log(
-          `Task 8 phone-map scope: kept ${phoneNumberMap.size}/${beforeSize} phoneNumberId entries (caller-tenant owns ${allowedPhoneNumberIds.size})`,
+          `Task 8 phone-map scope: kept ${phoneNumberMap.size}/${beforeSize} phone-map entries (caller-tenant owns ${allowedPhoneNumbers.size} numbers)`,
         );
       }
 
@@ -248,7 +259,7 @@ export class OpenPhoneProvider implements CommunicationProvider {
       // If a date filter is provided, use the /messages endpoint instead to find active conversations
       if (since && phoneNumberId) {
         this.logger.log(`Using message-based approach to find conversations with activity since ${since.toISOString()}`);
-        return this.getConversationsFromMessages(client, phoneNumberMap, phoneNumberId, since, limit, allowedPhoneNumberIds);
+        return this.getConversationsFromMessages(client, phoneNumberMap, phoneNumberId, since, limit, allowedPhoneIdSet);
       }
 
       // Fetch conversations with pagination
@@ -306,16 +317,30 @@ export class OpenPhoneProvider implements CommunicationProvider {
       // conversations never reach the sync writer — even if Quo's server-side
       // filter (server-side `params.phoneNumbers`) silently no-ops for the
       // tenant's account. Cheap; ~O(N) over the fetched page.
-      if (allowedPhoneNumberIds && allowedPhoneNumberIds.size > 0) {
+      //
+      // `allowedPhoneIdSet` is derived above from `allowedPhoneNumbers` by
+      // matching against phoneNumberMap entries whose `.number` is owned by
+      // the caller tenant.
+      if (allowedPhoneIdSet && allowedPhoneIdSet.size > 0) {
         const beforeCount = allConversations.length;
         const filtered = allConversations.filter((conv) => {
           const id = conv.phoneNumberId as string | undefined;
-          return typeof id === 'string' && allowedPhoneNumberIds.has(id);
+          return typeof id === 'string' && allowedPhoneIdSet!.has(id);
         });
         allConversations.length = 0;
         allConversations.push(...filtered);
         this.logger.log(
-          `Task 8 conv-list scope: kept ${allConversations.length}/${beforeCount} conversations (allowed phoneNumberIds: ${allowedPhoneNumberIds.size})`,
+          `Task 8 conv-list scope: kept ${allConversations.length}/${beforeCount} conversations (allowed phoneNumberId ids resolved from ${allowedPhoneNumbers?.size ?? 0} owned numbers)`,
+        );
+      } else if (allowedPhoneNumbers && allowedPhoneNumbers.size > 0) {
+        // Caller passed an allow-list but none of the tenant's owned numbers
+        // resolved to entries in /phone-numbers. Every conversation is by
+        // definition on a phone the tenant does not own — strip all. Distinct
+        // from the "no allow-list passed" workspace-scoped case above.
+        const beforeCount = allConversations.length;
+        allConversations.length = 0;
+        this.logger.warn(
+          `Task 8 conv-list scope: caller-tenant owns ${allowedPhoneNumbers.size} number(s) but NONE matched any phoneNumberMap entry — stripping all ${beforeCount} conversations. Likely: /phone-numbers didn't return this tenant's phones, or the number formats disagree between tenant_phone_numbers and Quo.`,
         );
       }
 
@@ -392,17 +417,18 @@ export class OpenPhoneProvider implements CommunicationProvider {
     phoneNumberId: string,
     since: Date,
     limit?: number,
-    allowedPhoneNumberIds?: Set<string>,
+    allowedPhoneIdSet?: Set<string>,
   ): Promise<ConversationData[]> {
     this.logger.log(`Finding conversations with activity since ${since.toISOString()} for phone ${phoneNumberId}`);
 
-    // Task 8 (2026-09-10) — if a tenant-scoped `allowedPhoneNumberIds` set is
-    // provided AND the caller-specified `phoneNumberId` is outside it, refuse
-    // to fetch. Caller shouldn't be able to sync a phone the tenant doesn't
-    // own; short-circuiting here saves the round-trip.
-    if (allowedPhoneNumberIds && allowedPhoneNumberIds.size > 0 && !allowedPhoneNumberIds.has(phoneNumberId)) {
+    // Task 8 (2026-09-10) — if a tenant-scoped id set is provided (resolved
+    // from `allowedPhoneNumbers` in the caller) AND the requested
+    // `phoneNumberId` is outside it, refuse to fetch. The caller shouldn't be
+    // able to sync a phone the tenant doesn't own; short-circuit saves the
+    // round-trip.
+    if (allowedPhoneIdSet && allowedPhoneIdSet.size > 0 && !allowedPhoneIdSet.has(phoneNumberId)) {
       this.logger.warn(
-        `Task 8: getConversationsFromMessages called with phoneNumberId=${phoneNumberId} which is not in caller-tenant's allowed set (${allowedPhoneNumberIds.size} owned) — returning []`,
+        `Task 8: getConversationsFromMessages called with phoneNumberId=${phoneNumberId} which is not in caller-tenant's allowed set (${allowedPhoneIdSet.size} owned) — returning []`,
       );
       return [];
     }

@@ -91,17 +91,24 @@ describe('OpenPhoneProvider.getConversations — phone_number extractor (Task 6)
     expect(orphan.phoneNumber).not.toBe('');
   });
 
-  describe('Task 8 — tenant-scoped allowedPhoneNumberIds', () => {
+  describe('Task 8 — tenant-scoped allowedPhoneNumbers', () => {
     /**
      * In a shared OpenPhone workspace the caller-tenant's Quo API key returns
      * `/phone-numbers` rows for phones owned by SIBLING tenants too. Without
      * scoping, the extractor maps a foreign phoneNumberId → foreign phone
      * number and stamps it on `communication_conversations.phone_number`,
      * which the tenant-scoped read filter (`applyConvTenantPhoneScope`) then
-     * hides. Fix: strip the phoneNumberMap to the caller-tenant's owned ids
-     * AND post-filter the conversation list so foreign ids never surface.
+     * hides. Fix: strip the phoneNumberMap to entries whose phone NUMBER is
+     * owned by the caller tenant AND post-filter the conversation list so
+     * foreign phoneNumberIds never surface.
+     *
+     * Filtering by phone number (not phoneNumberId) is deliberate — the
+     * number column on `tenant_phone_numbers` is guaranteed populated, while
+     * `provider_id` is nullable and historically un-backfilled for
+     * pre-`registerOpenPhoneNumbersForTenant` connections. See the 859a603
+     * regression note in TASKS_2026-09-08_CONVERSATION_SYNC.md Task 8.
      */
-    it('scopes phoneNumberMap and conv-list to allowedPhoneNumberIds', async () => {
+    it('scopes phoneNumberMap and conv-list to allowedPhoneNumbers', async () => {
       mockGet.mockImplementation((url: string) => {
         if (url === '/phone-numbers') {
           // Shared workspace: ABC's key returns BOTH ABC's and a sibling's phones
@@ -156,7 +163,7 @@ describe('OpenPhoneProvider.getConversations — phone_number extractor (Task 6)
         return Promise.resolve({ data: {} });
       });
 
-      const allowed = new Set<string>(['PN_owned_A', 'PN_owned_B']);
+      const allowed = new Set<string>(['+14254064045', '+14256756379']);
       const convs = await provider.getConversations(CREDS, undefined, undefined, undefined, allowed);
 
       // Foreign conversations must not surface — post-filter drops them
@@ -217,7 +224,7 @@ describe('OpenPhoneProvider.getConversations — phone_number extractor (Task 6)
         undefined,
         undefined,
         undefined,
-        new Set<string>(['PN_owned_only']),
+        new Set<string>(['+14254064045']),
       );
       expect(convs).toEqual([]);
     });
@@ -273,7 +280,7 @@ describe('OpenPhoneProvider.getConversations — phone_number extractor (Task 6)
         undefined,
         'PN_owned_A',
         undefined,
-        new Set<string>(['PN_owned_A']),
+        new Set<string>(['+14254064045']),
       );
 
       expect(convs).toHaveLength(1);
@@ -282,12 +289,59 @@ describe('OpenPhoneProvider.getConversations — phone_number extractor (Task 6)
     });
 
     /**
-     * When `allowedPhoneNumberIds` is not passed (workspace-scoped caller),
+     * The 859a603 hotfix scenario: caller-tenant owns numbers, but for
+     * whatever reason (Quo returned a stale phone list, number-format
+     * mismatch, phone deleted in Quo), NONE of the tenant's owned numbers
+     * match any entry in `/phone-numbers`. Extractor must strip everything
+     * and log a distinct warning — this is a fatal misconfiguration that
+     * would silently produce empty syncs otherwise.
+     */
+    it('strips everything and warns when tenant owns numbers but none match phoneNumberMap entries', async () => {
+      mockGet.mockImplementation((url: string) => {
+        if (url === '/phone-numbers') {
+          return Promise.resolve({
+            data: {
+              data: [
+                { id: 'PN_foreign_X', number: '+18139212100', restrictions: {} },
+                { id: 'PN_foreign_Y', number: '+16193938869', restrictions: {} },
+              ],
+            },
+          });
+        }
+        if (url === '/conversations') {
+          return Promise.resolve({
+            data: {
+              data: [
+                { id: 'conv-a', phoneNumberId: 'PN_foreign_X', participants: ['+15559999001'], createdAt: '2026-09-01T00:00:00Z', lastActivityAt: '2026-09-09T00:00:00Z' },
+                { id: 'conv-b', phoneNumberId: 'PN_foreign_Y', participants: ['+15559999002'], createdAt: '2026-09-02T00:00:00Z', lastActivityAt: '2026-09-09T01:00:00Z' },
+              ],
+              nextPageToken: null,
+            },
+          });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      const convs = await provider.getConversations(
+        CREDS,
+        undefined,
+        undefined,
+        undefined,
+        // Tenant owns +14254064045, but Quo's /phone-numbers reply returns
+        // foreign phones only — no id in the map maps to a tenant-owned
+        // number, so nothing gets through.
+        new Set<string>(['+14254064045']),
+      );
+      expect(convs).toEqual([]);
+    });
+
+    /**
+     * When `allowedPhoneNumbers` is not passed (workspace-scoped caller),
      * the extractor MUST behave like before: full workspace-wide phone map,
      * no post-filtering. Guards against a regression that would silently
      * change workspace-scoped sync behavior.
      */
-    it('is a no-op when allowedPhoneNumberIds is not provided (workspace-scoped caller)', async () => {
+    it('is a no-op when allowedPhoneNumbers is not provided (workspace-scoped caller)', async () => {
       mockGet.mockImplementation((url: string) => {
         if (url === '/phone-numbers') {
           return Promise.resolve({

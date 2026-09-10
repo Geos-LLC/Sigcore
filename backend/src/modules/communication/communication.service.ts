@@ -1815,49 +1815,62 @@ export class CommunicationService {
         message: `Fetching conversations from ${providerName}...`,
       });
 
-      // Task 8 (2026-09-10) — tenant-scoped allowedPhoneNumberIds.
+      // Task 8 (2026-09-10) — pre-load the caller-tenant's owned phone numbers
+      // (direct ownership OR active PPA) so the OpenPhone extractor can
+      // tenant-scope its phoneNumberMap and post-filter its conversation list.
+      // Same UNION as `applyConvTenantPhoneScope` and Task 2's downstream guard,
+      // ensuring read path, write attribution, and provider extraction agree
+      // on ownership.
       //
-      // For OpenPhone, load the set of Quo `phoneNumberId`s the caller-tenant
-      // owns (tenant_phone_numbers.provider_id where tenant_id = T, provider =
-      // openphone). Pass to the provider so its extractor
-      //   (a) strips foreign entries from its workspace-wide phoneNumberMap
-      //       — preventing a foreign phone from being emitted as this
-      //         conversation's tenant-side phone_number, and
-      //   (b) post-filters conversations by conv.phoneNumberId — belt-and-
-      //       suspenders against Quo's lax server-side filter on shared
-      //       workspaces (verified 2026-09-10: `phoneNumbers=X` and
-      //       `phoneNumbers=Y` returned identical top-5 for ABC's key).
+      // Filtering by phone NUMBER (not by `phoneNumberId`) is deliberate —
+      // `tenant_phone_numbers.phone_number` is a required non-null column,
+      // whereas `provider_id` is nullable and historically un-backfilled for
+      // pre-`registerOpenPhoneNumbersForTenant` connections. The 859a603
+      // regression (ABC's `conversationsFromProvider` dropped from 4449 → 0
+      // after a provider_id-keyed filter returned an empty set) is exactly
+      // that pathology.
       //
-      // Skipped for Twilio (its provider ignores the param) and for
-      // workspace-scoped callers (no tenantId → no scope to derive).
-      let allowedPhoneNumberIds: Set<string> | undefined;
-      if (tenantId && integration.provider === ProviderType.OPENPHONE) {
-        const ownedRows: Array<{ provider_id: string | null }> = await this.tenantPhoneNumberRepo.query(
-          `SELECT provider_id FROM tenant_phone_numbers
-            WHERE workspace_id = $1 AND tenant_id = $2
-              AND provider = 'openphone' AND provider_id IS NOT NULL`,
+      // Downstream, `tenantOwnedPhones` is reused as the sync-writer's
+      // `convPhoneOwnedByTenant` guard — same object, same set semantics.
+      let tenantOwnedPhones: Set<string> | null = null;
+      if (tenantId) {
+        const rows = await this.conversationRepo.query(
+          `SELECT tpn.phone_number FROM tenant_phone_numbers tpn
+            WHERE tpn.workspace_id = $1 AND tpn.tenant_id = $2
+           UNION
+           SELECT tpn2.phone_number FROM tenant_phone_numbers tpn2
+            JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
+            JOIN communication_profiles cp ON cp.id = ppa.profile_id
+            WHERE tpn2.workspace_id = $1 AND cp.tenant_id = $2 AND ppa.active = TRUE`,
           [workspaceId, tenantId],
         );
-        allowedPhoneNumberIds = new Set(
-          ownedRows.map((r) => r.provider_id).filter((v): v is string => typeof v === 'string' && v.length > 0),
+        tenantOwnedPhones = new Set(
+          rows.map((r: { phone_number: string }) => r.phone_number).filter(Boolean),
         );
         this.logger.log(
-          `[SYNC OWN-IDS] tenant=${tenantId} owns ${allowedPhoneNumberIds.size} OpenPhone providerIds — extractor will scope phone-map and conv-list to these`,
+          `[SYNC OWN-PHONES] tenant=${tenantId} owns ${tenantOwnedPhones.size} phones (owned OR via PPA) — conversations on other phones will be skipped with reason 'phone_number_not_owned_by_tenant'`,
         );
-        if (allowedPhoneNumberIds.size === 0) {
-          this.logger.warn(
-            `[SYNC OWN-IDS] tenant=${tenantId} has zero OpenPhone provider_id rows in tenant_phone_numbers — did registerOpenPhoneNumbersForTenant run at connect time? Sync will attribute nothing.`,
-          );
-        }
       }
 
-      // Pass limit, phoneNumberId, since filter, and allowedPhoneNumberIds to
+      // Pass the owned-phone set to the OpenPhone provider (Twilio ignores it).
+      // Workspace-scoped callers (no tenantId) pass undefined for pass-through.
+      const allowedPhoneNumbers =
+        tenantId && integration.provider === ProviderType.OPENPHONE && tenantOwnedPhones
+          ? tenantOwnedPhones
+          : undefined;
+      if (allowedPhoneNumbers && allowedPhoneNumbers.size === 0) {
+        this.logger.warn(
+          `[SYNC OWN-PHONES] tenant=${tenantId} has zero owned phones in tenant_phone_numbers — the OpenPhone extractor will strip every conversation. Verify registerOpenPhoneNumbersForTenant ran at connect time.`,
+        );
+      }
+
+      // Pass limit, phoneNumberId, since filter, and allowedPhoneNumbers to
       // the provider so it can filter at API level and scope tenant ownership.
       // For OpenPhone, passing 'since' enables message-based filtering to work around stale lastActivityAt.
-      let conversations = await provider.getConversations(credentials, limit, phoneNumberId, since, allowedPhoneNumberIds);
+      let conversations = await provider.getConversations(credentials, limit, phoneNumberId, since, allowedPhoneNumbers);
       const conversationsFromProvider = conversations.length;
       result.conversationsFromProvider = conversationsFromProvider;
-      this.logger.log(`Fetched ${conversationsFromProvider} conversations from ${providerName}${phoneNumberId ? ` (filtered by phoneNumberId: ${phoneNumberId})` : ''}${since ? ` since ${since.toISOString()}` : ''}${allowedPhoneNumberIds ? ` (tenant-scoped to ${allowedPhoneNumberIds.size} owned phoneNumberIds)` : ''}`);
+      this.logger.log(`Fetched ${conversationsFromProvider} conversations from ${providerName}${phoneNumberId ? ` (filtered by phoneNumberId: ${phoneNumberId})` : ''}${since ? ` since ${since.toISOString()}` : ''}${allowedPhoneNumbers ? ` (tenant-scoped to ${allowedPhoneNumbers.size} owned phones)` : ''}`);
 
       // Apply date filter if specified (note: this may reduce count below limit)
       if (since || until) {
@@ -2037,39 +2050,11 @@ export class CommunicationService {
         }
       }
 
-      // Task 2 (2026-09-08): pre-compute the set of phone numbers this tenant
-      // is authorized to own conversations for — either directly (row in
-      // tenant_phone_numbers with tenant_id = T) OR via an active PPA from a
-      // profile T owns to a shared-sender TPN. Same UNION as
-      // `applyConvTenantPhoneScope` so the sync write path and the read path
-      // agree on scope.
-      //
-      // Without this, `convData.phoneNumber` from Quo could point at a phone
-      // in the OpenPhone workspace that ABOTHER tenant (or nobody) owns —
-      // and the row would still be tagged `tenant_id = <caller>`, breaking
-      // `/conversations` (invisible via the phone-scope read filter) AND
-      // leaving zombie attribution behind. Preserved as null-tenantId when
-      // the phone isn't owned so the row stays visible to workspace-scoped
-      // callers without impersonating a tenant.
-      let tenantOwnedPhones: Set<string> | null = null;
-      if (tenantId) {
-        const rows = await this.conversationRepo.query(
-          `SELECT tpn.phone_number FROM tenant_phone_numbers tpn
-            WHERE tpn.workspace_id = $1 AND tpn.tenant_id = $2
-           UNION
-           SELECT tpn2.phone_number FROM tenant_phone_numbers tpn2
-            JOIN profile_phone_assignments ppa ON ppa.tenant_phone_number_id = tpn2.id
-            JOIN communication_profiles cp ON cp.id = ppa.profile_id
-            WHERE tpn2.workspace_id = $1 AND cp.tenant_id = $2 AND ppa.active = TRUE`,
-          [workspaceId, tenantId],
-        );
-        tenantOwnedPhones = new Set(
-          rows.map((r: { phone_number: string }) => r.phone_number).filter(Boolean),
-        );
-        this.logger.log(
-          `[SYNC OWN-PHONES] tenant=${tenantId} owns ${tenantOwnedPhones.size} phones (owned OR via PPA) — conversations on other phones will be skipped with reason 'phone_number_not_owned_by_tenant'`,
-        );
-      }
+      // Task 2's `tenantOwnedPhones` set is now hoisted above the getConversations
+      // call (see Task 8 refactor) and reused here as the sync-writer's
+      // `convPhoneOwnedByTenant` guard. Same object, same set semantics —
+      // guarantees the extractor's tenant-scope and the writer's ownership
+      // check can never diverge.
 
       const total = conversations.length;
       this.updateProgress(workspaceId, {

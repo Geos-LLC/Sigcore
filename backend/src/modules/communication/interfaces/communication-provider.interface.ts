@@ -84,15 +84,22 @@ export interface CommunicationProvider {
   sendMessage(input: SendMessageInput): Promise<SendMessageResult>;
 
   /**
-   * `allowedPhoneNumberIds` — when set, providers that key conversations by a
+   * `allowedPhoneNumbers` — when set, providers that key conversations by a
    * workspace-scoped phone-line id (OpenPhone `phoneNumberId`) MUST both
-   *  (a) scope any internal id→phone map to just these ids, so the extractor
-   *      can never emit a foreign tenant's phone number as the tenant-side
-   *      phone, and
-   *  (b) post-filter the returned conversation list so ids outside this set
-   *      never reach the sync writer, even if the provider's own filter is
-   *      lax (Quo returns identical top-N conversations for different
-   *      `phoneNumberId` values on shared workspaces).
+   *  (a) scope any internal id→phone map to entries whose PHONE NUMBER is in
+   *      this set, so the extractor can never emit a foreign tenant's phone
+   *      number as the tenant-side phone, and
+   *  (b) post-filter the returned conversation list so conversations on phones
+   *      outside this set never reach the sync writer, even if the provider's
+   *      own filter is lax (Quo returns identical top-N conversations for
+   *      different `phoneNumberId` values on shared workspaces).
+   *
+   * The set holds E.164-normalized phone numbers (e.g. `+14254064045`). This is
+   * a more reliable signal than a phoneNumberId set because
+   * `tenant_phone_numbers.phone_number` is guaranteed populated whereas
+   * `tenant_phone_numbers.provider_id` is nullable and historically
+   * un-backfilled for pre-`registerOpenPhoneNumbersForTenant` connections.
+   *
    * See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 8.
    */
   getConversations(
@@ -100,7 +107,7 @@ export interface CommunicationProvider {
     limit?: number,
     phoneNumberId?: string,
     since?: Date,
-    allowedPhoneNumberIds?: Set<string>,
+    allowedPhoneNumbers?: Set<string>,
   ): Promise<ConversationData[]>;
 
   getMessages(

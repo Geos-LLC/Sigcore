@@ -390,6 +390,16 @@ curl -sS "https://sigcore-production.up.railway.app/api/conversations?limit=200&
 
 ## Task 8 — ✅ FIX LANDED (2026-09-10) — OpenPhone extractor now tenant-scopes phone map + post-filters conversations
 
+### Hotfix (2026-09-10, post-859a603) — switched allow-list from `provider_id` to phone number
+
+**Regression**: 859a603's first cut used `tenant_phone_numbers.provider_id` as the allow-list key. ABC's TPN rows have `provider_id = NULL` (the column post-dates their connect flow and `registerOpenPhoneNumbersForTenant` never backfilled), so the sync-side query returned zero ids, the extractor's post-filter dropped every conversation, and `conversationsFromProvider` collapsed from 4449 → 0 with `skipReasons: {}`.
+
+**Fix**: `allowedPhoneNumberIds: Set<string>` (provider ids) → `allowedPhoneNumbers: Set<string>` (E.164 phone numbers). Numbers are guaranteed populated on `tenant_phone_numbers.phone_number`. The extractor now scopes its `phoneNumberMap` to entries whose `.number` is in the set, then derives an id-set from the surviving entries for the conversation post-filter. `syncConversations` hoists the existing `tenantOwnedPhones` UNION query (Task 2's ownership predicate — direct + PPA) above the `getConversations` call and passes the same set — guaranteeing the extractor's tenant scope and the sync-writer's `convPhoneOwnedByTenant` guard use identical semantics.
+
+New test: `strips everything and warns when tenant owns numbers but none match phoneNumberMap entries` — pins the failure mode where a shared-workspace tenant's owned numbers don't appear in Quo's `/phone-numbers` reply, plus a distinct warn log so operators can distinguish it from the "no allow-list" case.
+
+Full suite: 95 suites / 1222 tests pass, no regressions.
+
 ### Fix landed (staged, awaiting deploy)
 
 **What shipped** (backend, on current branch, pre-commit):
