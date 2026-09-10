@@ -1062,6 +1062,8 @@ describe('CommunicationService.resolveIntegrationForCaller (Task 7)', () => {
 
   it('falls back to the workspace-scoped integration when no tenant-scoped row exists', async () => {
     const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    // Both the ACTIVE-only lookup AND the diagnostic ANY-status lookup return
+    // null — no tenant row of any status exists for this composite key.
     tenantIntegrationRepo.findOne.mockResolvedValue(null);
     integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
 
@@ -1072,8 +1074,49 @@ describe('CommunicationService.resolveIntegrationForCaller (Task 7)', () => {
     );
 
     expect(result.id).toBe('workspace-int-1');
-    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledTimes(1);
+    // 2 tenant-repo findOne calls: ACTIVE-only, then any-status diagnostic.
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledTimes(2);
     expect(integrationRepo.findOne).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The 2026-09-10 "Definitive finding" pathology. A prior connect/disconnect
+   * left the tenant row with status='inactive'; the ACTIVE-only lookup misses,
+   * so the resolver falls back to the workspace-scoped row — which on shared
+   * OpenPhone workspaces holds a sibling tenant's key. Task 5's status
+   * endpoint doesn't filter by status, so it reports the tenant row as
+   * present, misleading operators into thinking the sync uses tenant creds.
+   *
+   * The resolver now runs a diagnostic ANY-status lookup on the fallback path
+   * so operators can distinguish "no row" from "row exists but wrong status"
+   * from Grafana alone. This test pins that lookup is issued.
+   */
+  it('runs a diagnostic ANY-status tenant lookup when the ACTIVE-only lookup misses', async () => {
+    const { service, integrationRepo, tenantIntegrationRepo } = buildService();
+    // First call (ACTIVE-only): no row. Second call (ANY-status): inactive row.
+    tenantIntegrationRepo.findOne
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ ...TENANT_INTEGRATION, status: IntegrationStatus.INACTIVE });
+    integrationRepo.findOne.mockResolvedValue(WORKSPACE_INTEGRATION);
+
+    const result = await service.resolveIntegrationForCaller(
+      WORKSPACE,
+      CALLER_TENANT,
+      ProviderType.OPENPHONE,
+    );
+
+    // Fallback still went to workspace-scoped — the resolver's contract is
+    // unchanged, we only added observability.
+    expect(result.id).toBe('workspace-int-1');
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledTimes(2);
+    // The second call is the diagnostic — same composite key MINUS the status filter.
+    expect(tenantIntegrationRepo.findOne).toHaveBeenNthCalledWith(2, {
+      where: {
+        workspaceId: WORKSPACE,
+        tenantId: CALLER_TENANT,
+        provider: ProviderType.OPENPHONE,
+      },
+    });
   });
 
   it('skips the tenant-scoped lookup entirely when tenantId is null', async () => {

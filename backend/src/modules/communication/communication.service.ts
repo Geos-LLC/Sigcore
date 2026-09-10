@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { createHash } from 'crypto';
 import { normalizeToE164 } from '../../common/util/phone';
 import { OpenPhoneContactCacheService } from '../integrations/openphone-contact-cache.service';
 import { Repository, In, IsNull } from 'typeorm';
@@ -345,13 +346,29 @@ export class CommunicationService {
       });
       if (tenantIntegration) {
         this.logger.log(
-          `[resolveIntegrationForCaller] using tenant-scoped integration ${tenantIntegration.id} (tenant=${tenantId}, workspace=${workspaceId}, provider=${provider})`,
+          `[resolveIntegrationForCaller] using tenant-scoped integration ${tenantIntegration.id} (tenant=${tenantId}, workspace=${workspaceId}, provider=${provider}, status=${tenantIntegration.status})`,
         );
         return tenantIntegration;
       }
-      this.logger.log(
-        `[resolveIntegrationForCaller] no tenant-scoped integration for tenant=${tenantId} provider=${provider} — falling back to workspace-scoped`,
-      );
+      // 2026-09-10 diagnostic: distinguish "no tenant row at all" from
+      // "row exists but status != ACTIVE" — the latter is the silent-failure
+      // mode where Task 5's status endpoint (which doesn't filter by status)
+      // reports a tenant integration id, but this resolver's ACTIVE-only
+      // filter drops back to the workspace-scoped row (a foreign key on
+      // shared workspaces). Without this distinction operators cannot tell
+      // from logs why the fallback fired.
+      const anyStatusRow = await this.tenantIntegrationRepo.findOne({
+        where: { workspaceId, tenantId, provider },
+      });
+      if (anyStatusRow) {
+        this.logger.warn(
+          `[resolveIntegrationForCaller] tenant-scoped integration EXISTS for tenant=${tenantId} provider=${provider} but status='${anyStatusRow.status}' (id=${anyStatusRow.id}) — resolver requires ACTIVE, falling back to workspace-scoped. Fix: UPDATE tenant_integrations SET status='active' WHERE id='${anyStatusRow.id}' after verifying the row's credentials.`,
+        );
+      } else {
+        this.logger.log(
+          `[resolveIntegrationForCaller] no tenant-scoped integration for tenant=${tenantId} provider=${provider} — falling back to workspace-scoped`,
+        );
+      }
     }
     return this.getIntegration(workspaceId, provider);
   }
@@ -1802,10 +1819,20 @@ export class CommunicationService {
     });
 
     const integration = await this.resolveIntegrationForCaller(workspaceId, tenantId, providerType);
-    this.logger.log(`Found integration: ${integration.provider}`);
+    // 2026-09-10 diagnostic — pin which integration record the sync is
+    // actually using and its credential fingerprint. Enables ops to see from
+    // Grafana alone whether Sigcore decrypted the caller's expected key vs.
+    // a foreign one. Fingerprint = first 8 hex of sha256(plaintext) — enough
+    // to compare against a known-good key without leaking the secret.
+    const isTenantScoped = (integration as TenantIntegration).tenantId != null;
+    this.logger.log(
+      `Found integration: id=${integration.id} scope=${isTenantScoped ? 'tenant' : 'workspace'} provider=${integration.provider} status=${integration.status}${isTenantScoped ? ` tenantId=${(integration as TenantIntegration).tenantId}` : ''}`,
+    );
 
     const provider = this.getProvider(integration.provider);
     const credentials = this.encryptionService.decrypt(integration.credentialsEncrypted);
+    const credFingerprint = createHash('sha256').update(credentials).digest('hex').slice(0, 8);
+    this.logger.log(`[sync] credential fingerprint sha256[0:8]=${credFingerprint} (compare against caller's expected key fingerprint)`);
 
     try {
       // First, fetch conversations to know which contacts we need
