@@ -1757,7 +1757,45 @@ export class CommunicationService {
   }
 
   async syncConversations(workspaceId: string, options: SyncOptions = {}): Promise<SyncResult> {
-    const { limit, since, until, syncMessages = true, forceRefresh = false, phoneNumberId, onlySavedContacts = true, provider: providerType, tenantId } = options;
+    const { limit, since, until, syncMessages = true, forceRefresh = false, phoneNumberId, onlySavedContacts = true, tenantId } = options;
+    let { provider: providerType } = options;
+
+    // 2026-09-10 Task 7 gap-close — the sync controllers (`integrations`,
+    // `tenants`) only forward `provider` when the operator explicitly picks
+    // one. When a tenant-scoped api key hits `POST /integrations/sync`
+    // without a provider param, `providerType` is undefined here.
+    // `resolveIntegrationForCaller` then skips its tenant-scoped branch
+    // (`if (tenantId && provider)`) and falls straight through to the
+    // workspace-scoped `getIntegration` — which on shared OpenPhone
+    // workspaces returns a sibling tenant's credentials. Root cause of
+    // ABC's diag showing `scope=workspace id=5b65d391…` under commit fd5c5bc,
+    // despite an ACTIVE tenant row (eea2f538…) existing for the same
+    // (workspaceId, tenantId, provider) triple.
+    //
+    // Fix: if the caller is tenant-scoped and didn't specify a provider,
+    // infer it from `tenant_integrations` (there is at most one ACTIVE row
+    // per (workspaceId, tenantId, provider), and typically one row per
+    // (workspaceId, tenantId) — one tenant = one provider = one Sigcore-
+    // mediated conversation source). If multiple exist, prefer OpenPhone —
+    // matching what Twilio Direct + a manual `provider=twilio` request would
+    // do explicitly.
+    if (tenantId && !providerType) {
+      const tenantRows = await this.tenantIntegrationRepo.find({
+        where: { workspaceId, tenantId, status: IntegrationStatus.ACTIVE },
+      });
+      if (tenantRows.length > 0) {
+        const preferred =
+          tenantRows.find((r) => r.provider === ProviderType.OPENPHONE) ?? tenantRows[0];
+        providerType = preferred.provider;
+        this.logger.log(
+          `[syncConversations] tenantId=${tenantId} without explicit provider — inferred provider=${providerType} from tenant_integrations.${preferred.id} (${tenantRows.length} active row(s) available)`,
+        );
+      } else {
+        this.logger.warn(
+          `[syncConversations] tenantId=${tenantId} without explicit provider AND no ACTIVE tenant_integrations row — resolver will fall back to workspace-scoped integration (may pick a sibling tenant's credentials on shared workspaces)`,
+        );
+      }
+    }
 
     // TODO: re-enable hard guard after fixing TypeORM tenant_id persistence on ApiKey entity
 

@@ -1147,6 +1147,120 @@ describe('CommunicationService.resolveIntegrationForCaller (Task 7)', () => {
     expect(result.id).toBe('workspace-int-1');
     // `tenant_integrations` unique index is (workspaceId, tenantId, provider).
     // Without provider, we can't do a deterministic tenant-scoped lookup.
+    // (syncConversations infers provider from tenant_integrations before
+    // calling this resolver — see the syncConversations provider-inference
+    // test below.)
+    expect(tenantIntegrationRepo.findOne).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 2026-09-10 Task 7 gap-close. The sync controllers pass `tenantId` from the
+ * request auth but only pass `provider` when the operator explicitly picks
+ * one. Without a provider, `resolveIntegrationForCaller` (correctly) can't
+ * do a tenant-scoped lookup and falls back to the workspace-scoped row —
+ * which on shared OpenPhone workspaces holds a sibling tenant's credentials.
+ *
+ * `syncConversations` now infers `providerType` from `tenant_integrations`
+ * BEFORE calling the resolver, so the resolver's tenant-scoped branch fires
+ * on shared-workspace tenant callers. This block pins that inference.
+ */
+describe('CommunicationService.syncConversations provider inference (Task 7 follow-up)', () => {
+  const WORKSPACE = 'workspace-shared';
+  const CALLER_TENANT = 'tenant-abc';
+
+  it('infers provider from tenant_integrations when tenantId is set but options.provider is not', async () => {
+    const { service, tenantIntegrationRepo, integrationRepo } = buildService();
+    // The tenant has an ACTIVE OpenPhone integration; the sync controller
+    // didn't forward `provider` in the request options.
+    tenantIntegrationRepo.find.mockResolvedValue([
+      { id: 'tenant-int-op', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:abc-tenant-key' },
+    ]);
+    // Downstream resolver's ACTIVE-only findOne returns the same tenant row.
+    tenantIntegrationRepo.findOne.mockResolvedValue({ id: 'tenant-int-op', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:abc-tenant-key' });
+
+    // syncConversations will throw downstream (getProvider on a mock will
+    // return undefined, etc.) — we only care that the inference layer ran
+    // and threaded provider into the resolver lookup.
+    await service.syncConversations(WORKSPACE, { tenantId: CALLER_TENANT }).catch(() => {});
+
+    // Inference query fired with the correct composite key + ACTIVE filter.
+    expect(tenantIntegrationRepo.find).toHaveBeenCalledWith({
+      where: { workspaceId: WORKSPACE, tenantId: CALLER_TENANT, status: IntegrationStatus.ACTIVE },
+    });
+    // Resolver's ACTIVE-only lookup got the inferred provider — without the
+    // inference, `provider` would be undefined here and the resolver would
+    // fall straight through to the workspace-scoped fallback (the bug).
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledWith({
+      where: {
+        workspaceId: WORKSPACE,
+        tenantId: CALLER_TENANT,
+        provider: ProviderType.OPENPHONE,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+    // Workspace-scoped fallback must NOT have run — the resolver took the
+    // tenant-scoped branch on the strength of the inferred provider.
+    expect(integrationRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('prefers OpenPhone when multiple ACTIVE tenant integrations exist', async () => {
+    const { service, tenantIntegrationRepo } = buildService();
+    tenantIntegrationRepo.find.mockResolvedValue([
+      { id: 'tenant-int-tw', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:tw' },
+      { id: 'tenant-int-op', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:op' },
+    ]);
+    tenantIntegrationRepo.findOne.mockResolvedValue({ id: 'tenant-int-op', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.OPENPHONE, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:op' });
+
+    await service.syncConversations(WORKSPACE, { tenantId: CALLER_TENANT }).catch(() => {});
+
+    // OpenPhone wins the tie-break — this is the canonical conversation-sync
+    // provider; Twilio direct sync is a separate, less-common path.
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledWith({
+      where: {
+        workspaceId: WORKSPACE,
+        tenantId: CALLER_TENANT,
+        provider: ProviderType.OPENPHONE,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+  });
+
+  it('honors explicit options.provider — no inference query fired', async () => {
+    const { service, tenantIntegrationRepo, integrationRepo } = buildService();
+    tenantIntegrationRepo.findOne.mockResolvedValue({ id: 'tenant-int-tw', workspaceId: WORKSPACE, tenantId: CALLER_TENANT, provider: ProviderType.TWILIO, status: IntegrationStatus.ACTIVE, credentialsEncrypted: 'enc:tw' });
+    integrationRepo.findOne.mockResolvedValue(null);
+
+    await service
+      .syncConversations(WORKSPACE, { tenantId: CALLER_TENANT, provider: ProviderType.TWILIO })
+      .catch(() => {});
+
+    // Inference skipped — provider was explicit.
+    expect(tenantIntegrationRepo.find).not.toHaveBeenCalled();
+    // Resolver ran with the explicit Twilio provider.
+    expect(tenantIntegrationRepo.findOne).toHaveBeenCalledWith({
+      where: {
+        workspaceId: WORKSPACE,
+        tenantId: CALLER_TENANT,
+        provider: ProviderType.TWILIO,
+        status: IntegrationStatus.ACTIVE,
+      },
+    });
+  });
+
+  it('warns and does not infer when tenantId is set but zero ACTIVE tenant integrations exist', async () => {
+    const { service, tenantIntegrationRepo } = buildService();
+    tenantIntegrationRepo.find.mockResolvedValue([]);
+    // The resolver's ACTIVE-only and ANY-status lookups both return null;
+    // getIntegration returns null → resolveIntegrationForCaller throws.
+    tenantIntegrationRepo.findOne.mockResolvedValue(null);
+
+    await service.syncConversations(WORKSPACE, { tenantId: CALLER_TENANT }).catch(() => {});
+
+    // Inference ran but found nothing → didn't call the resolver's tenant
+    // findOne (composite key still requires provider).
+    expect(tenantIntegrationRepo.find).toHaveBeenCalledTimes(1);
+    // Resolver's tenant lookup NOT called (provider still undefined).
     expect(tenantIntegrationRepo.findOne).not.toHaveBeenCalled();
   });
 });
