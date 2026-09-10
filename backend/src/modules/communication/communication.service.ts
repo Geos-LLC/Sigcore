@@ -1815,12 +1815,49 @@ export class CommunicationService {
         message: `Fetching conversations from ${providerName}...`,
       });
 
-      // Pass limit, phoneNumberId, and since filter to provider so it can filter at API level
-      // For OpenPhone, passing 'since' enables message-based filtering to work around stale lastActivityAt
-      let conversations = await provider.getConversations(credentials, limit, phoneNumberId, since);
+      // Task 8 (2026-09-10) — tenant-scoped allowedPhoneNumberIds.
+      //
+      // For OpenPhone, load the set of Quo `phoneNumberId`s the caller-tenant
+      // owns (tenant_phone_numbers.provider_id where tenant_id = T, provider =
+      // openphone). Pass to the provider so its extractor
+      //   (a) strips foreign entries from its workspace-wide phoneNumberMap
+      //       — preventing a foreign phone from being emitted as this
+      //         conversation's tenant-side phone_number, and
+      //   (b) post-filters conversations by conv.phoneNumberId — belt-and-
+      //       suspenders against Quo's lax server-side filter on shared
+      //       workspaces (verified 2026-09-10: `phoneNumbers=X` and
+      //       `phoneNumbers=Y` returned identical top-5 for ABC's key).
+      //
+      // Skipped for Twilio (its provider ignores the param) and for
+      // workspace-scoped callers (no tenantId → no scope to derive).
+      let allowedPhoneNumberIds: Set<string> | undefined;
+      if (tenantId && integration.provider === ProviderType.OPENPHONE) {
+        const ownedRows: Array<{ provider_id: string | null }> = await this.tenantPhoneNumberRepo.query(
+          `SELECT provider_id FROM tenant_phone_numbers
+            WHERE workspace_id = $1 AND tenant_id = $2
+              AND provider = 'openphone' AND provider_id IS NOT NULL`,
+          [workspaceId, tenantId],
+        );
+        allowedPhoneNumberIds = new Set(
+          ownedRows.map((r) => r.provider_id).filter((v): v is string => typeof v === 'string' && v.length > 0),
+        );
+        this.logger.log(
+          `[SYNC OWN-IDS] tenant=${tenantId} owns ${allowedPhoneNumberIds.size} OpenPhone providerIds — extractor will scope phone-map and conv-list to these`,
+        );
+        if (allowedPhoneNumberIds.size === 0) {
+          this.logger.warn(
+            `[SYNC OWN-IDS] tenant=${tenantId} has zero OpenPhone provider_id rows in tenant_phone_numbers — did registerOpenPhoneNumbersForTenant run at connect time? Sync will attribute nothing.`,
+          );
+        }
+      }
+
+      // Pass limit, phoneNumberId, since filter, and allowedPhoneNumberIds to
+      // the provider so it can filter at API level and scope tenant ownership.
+      // For OpenPhone, passing 'since' enables message-based filtering to work around stale lastActivityAt.
+      let conversations = await provider.getConversations(credentials, limit, phoneNumberId, since, allowedPhoneNumberIds);
       const conversationsFromProvider = conversations.length;
       result.conversationsFromProvider = conversationsFromProvider;
-      this.logger.log(`Fetched ${conversationsFromProvider} conversations from ${providerName}${phoneNumberId ? ` (filtered by phoneNumberId: ${phoneNumberId})` : ''}${since ? ` since ${since.toISOString()}` : ''}`);
+      this.logger.log(`Fetched ${conversationsFromProvider} conversations from ${providerName}${phoneNumberId ? ` (filtered by phoneNumberId: ${phoneNumberId})` : ''}${since ? ` since ${since.toISOString()}` : ''}${allowedPhoneNumberIds ? ` (tenant-scoped to ${allowedPhoneNumberIds.size} owned phoneNumberIds)` : ''}`);
 
       // Apply date filter if specified (note: this may reduce count below limit)
       if (since || until) {

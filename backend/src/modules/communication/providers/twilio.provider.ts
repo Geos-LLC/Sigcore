@@ -267,7 +267,19 @@ export class TwilioProvider implements CommunicationProvider {
     return Array.from(phoneNumberMap.values());
   }
 
-  async getConversations(workspaceId: string, limit?: number, phoneNumberId?: string, since?: Date): Promise<ConversationData[]> {
+  async getConversations(
+    workspaceId: string,
+    limit?: number,
+    phoneNumberId?: string,
+    since?: Date,
+    // Twilio has no analogue to OpenPhone's workspace-scoped `phoneNumberId`;
+    // conversations are derived from message from/to pairs and each Twilio
+    // credential set is inherently per-tenant. The param is accepted so
+    // callers can pass it uniformly; here it is intentionally ignored.
+    // See TASKS_2026-09-08_CONVERSATION_SYNC.md Task 8.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _allowedPhoneNumberIds?: Set<string>,
+  ): Promise<ConversationData[]> {
     try {
       const credentials = JSON.parse(workspaceId) as TwilioCredentials;
       const client = this.createClient(credentials);

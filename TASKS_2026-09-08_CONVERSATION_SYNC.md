@@ -4,7 +4,7 @@
 
 Full context in [LB Obsidian → LeadBridge → "Quo conversation-sync path"], but the short version: LB's `ConversationSyncService.hydrateLeadFromQuo` + `matchLeadConversations` rely on Sigcore's OpenPhone integration to be the single provider abstraction for tenant-owned Quo workspaces. LB just calls Sigcore's `/conversations` and `/conversations/:id/messages` and projects the results into its canonical `Message` table. The findings below block that pipeline for ABC (and expose data-integrity risks that likely affect other tenants).
 
-There are **7 tasks**, ordered by severity.
+There are **8 tasks**, ordered by severity.
 
 ## Status
 
@@ -16,7 +16,10 @@ There are **7 tasks**, ordered by severity.
 | 4 | ✅ shipped `4b709c6a` | Auth guard header trim |
 | 5 | ✅ shipped `4b709c6a` | `GET /integrations/openphone` endpoint |
 | 6 | ✅ shipped `4385b81d` | Extractor null-safety on lookup miss |
-| 7 | 🔴 filed | Extractor mis-mapping for shared workspaces (this unblocks ABC) |
+| 7 | ✅ shipped `eb61a9e1` | Tenant-scoped credential resolution in `syncConversations` |
+| 8 | ✅ **fix landed** (see "Fix landed" block under Task 8) | OpenPhone extractor now tenant-scopes phone map + post-filters conversations |
+
+**Correction (2026-09-10):** an earlier revision of this doc claimed "all closed, LB-direct pilot picks up the slack." That LB-direct pilot violated the "no comms in LB" architectural rule and was reverted (LB commits `300d8b4b` + `1ffd689a` — both reverted as `82e5f2b2` + drop-columns migration `0a0412d5`, ABC's Quo message webhook `WH9d4ac7c3…` deleted). **Task 8 below is the actual work needed to unblock ABC via the Sigcore-mediated path.**
 
 ---
 
@@ -369,9 +372,65 @@ curl -sS "https://sigcore-production.up.railway.app/api/conversations?limit=200&
 
 ---
 
-## Task 7 — 🔴 CORRECTNESS — OpenPhone extractor still maps `phone_number` to the wrong tenant's phone for shared workspaces
+## Task 7 — ✅ SHIPPED (`eb61a9e1`) — tenant-scoped credential resolution in `syncConversations`
 
-**Severity**: P1 — Task 6 hardened the null case, but shared-workspace tenants still see `phone_number` populated with a foreign tenant's phone. Read-path scoping (`applyConvTenantPhoneScope`) then filters those rows out, so the tenant's own conversations remain invisible via `/conversations`.
+**Root cause (user's own analysis, corrected mine)**: `syncConversations` called `getIntegration(workspaceId, provider)` which reads only `communication_integrations` (workspace-scoped, no tenant filter). ABC's per-tenant Quo credentials, stored in `tenant_integrations` by `connectOpenPhoneForTenant`, were ignored. ABC's sync ran under whichever tenant's key seeded the shared workspace first (a sibling), Quo returned that sibling's data, and Task 2's phone-ownership guard correctly rejected everything.
+
+**Fix (shipped 2026-09-09):**
+- `resolveIntegrationForCaller(workspaceId, tenantId, provider)` — tenant-first, workspace-fallback (mirrors the pattern in `sendMessageToPhoneNumber` at `communication.service.ts:999-1005`).
+- `syncConversations` now uses the new resolver.
+- `OpenPhoneContactCacheService.resolveOpenPhoneTenant` audit-fixed with the same shape bug (newest-tenant heuristic in shared workspaces). New optional `phoneNumber` param routes to the tenant that owns the phone via `tenant_phone_numbers`.
+- 4 new regression tests (417/417 suite pass).
+
+**Verification post-deploy (2026-09-09):** `GET /integrations/openphone` for ABC correctly returns `integrationId: eea2f538…` (ABC's `tenant_integrations` row) and `ownedPhoneNumberCount: 2`. Credential resolution end-to-end works.
+
+**But**: even with the right credentials, ABC's `/conversations` still returned 1 (unchanged). Investigation of the workspace state showed the sync IS running with ABC's key but the OpenPhone provider's `phone_number` values still land as foreign. That's Task 8 below.
+
+---
+
+## Task 8 — ✅ FIX LANDED (2026-09-10) — OpenPhone extractor now tenant-scopes phone map + post-filters conversations
+
+### Fix landed (staged, awaiting deploy)
+
+**What shipped** (backend, on current branch, pre-commit):
+
+1. **`backend/src/modules/communication/interfaces/communication-provider.interface.ts`** — `getConversations` gained an optional 5th param `allowedPhoneNumberIds?: Set<string>` with a doc-comment mandating (a) phone-map scoping and (b) conv-list post-filtering when set.
+2. **`backend/src/modules/communication/providers/openphone.provider.ts`** — implementation:
+   - After building the workspace-wide `phoneNumberMap` from `/phone-numbers`, entries whose id is not in `allowedPhoneNumberIds` are stripped. Foreign phones can no longer be emitted as a tenant-side `phoneNumber` for shared workspaces.
+   - After fetching `/conversations`, the array is post-filtered by `conv.phoneNumberId ∈ allowedPhoneNumberIds` — defense against Quo's lax server-side filter (verified 2026-09-10: `phoneNumbers=X` and `phoneNumbers=Y` returned identical top-5 for ABC's key).
+   - `getConversationsFromMessages` short-circuits (returns `[]`) when the caller-supplied `phoneNumberId` isn't in the allowed set.
+3. **`backend/src/modules/communication/providers/twilio.provider.ts`** — accepts the new param and ignores it (Twilio has no analogue to workspace-scoped `phoneNumberId`).
+4. **`backend/src/modules/communication/communication.service.ts`** — `syncConversations` loads the caller-tenant's owned OpenPhone `provider_id`s from `tenant_phone_numbers` and passes them as `allowedPhoneNumberIds` for OpenPhone syncs. Only applied when `tenantId` is set (workspace-scoped callers still see everything). Logs `[SYNC OWN-IDS]` counts and warns loudly when the tenant has zero owned providerIds (indicating `registerOpenPhoneNumbersForTenant` didn't run at connect time).
+5. **`backend/src/modules/communication/providers/openphone.provider.phone-extractor.spec.ts`** — 4 new tests under `describe('Task 8 — tenant-scoped allowedPhoneNumberIds')`:
+   - Scopes phoneNumberMap AND conv-list to allowed set (foreign convs dropped, owned convs carry own phone).
+   - Strips ALL convs when no id matches.
+   - Post-filters even when Quo returns ids outside the filter (lax-filter defense).
+   - No-op when allowedPhoneNumberIds is not provided (workspace-scoped caller regression guard).
+
+**Test status**: `npx jest --no-coverage` — 94 suites / **1213 tests pass**, no regressions. TypeScript `noEmit` clean (only pre-existing unrelated error: missing `@fixprompt/node` types in `main.ts`).
+
+**Deploy verification steps** (post-Railway deploy):
+
+```bash
+# 1. Kick off a fresh ABC sync with the tenant-scoped Sigcore key
+curl -sS -X POST "https://sigcore-production.up.railway.app/api/integrations/sync" \
+  -H "x-api-key: <ABC's sigcore key>" -H "Content-Type: application/json" \
+  -d '{"syncMessages": true}'
+
+# 2. Poll status — expect `[SYNC OWN-IDS] tenant=d471a324... owns 2 OpenPhone providerIds` in logs
+curl -sS "https://sigcore-production.up.railway.app/api/integrations/sync/status" \
+  -H "x-api-key: <ABC's sigcore key>"
+
+# 3. List conversations — expect ~200+ rows (vs. 1 pre-fix), all phone_number ∈ {+14254064045, +14256756379}
+curl -sS "https://sigcore-production.up.railway.app/api/conversations?limit=200&page=1" \
+  -H "x-api-key: <ABC's sigcore key>"
+```
+
+**Backfill note**: pre-existing rows in `communication_conversations` for ABC that were previously written with foreign `phone_number` values will NOT be corrected by this fix on their own (the update branch's Task-6 guard prevents an unresolved extractor result from overwriting a stored value, but on the tenant-scoped write path the extractor now correctly returns owned values for ABC's own conversations, so NEW rows land correctly and prior mis-attributed rows in the workspace stay tagged to whichever tenant owned them originally). If backfill is needed, a one-shot resync following the fix should suffice since ABC has almost no attributable rows today.
+
+### Original problem statement (kept for context)
+
+**Severity**: P1 — with Task 7 confirmed shipped and credential resolution verified correct, the extractor still writes `phone_number` values that DON'T match the caller-tenant's owned phones. `applyConvTenantPhoneScope` then correctly filters those rows out, so the tenant's own conversations remain invisible via `/conversations`.
 
 ### Discovery (2026-09-09 post-Task 6 deploy `4385b81d`)
 
@@ -450,6 +509,18 @@ curl -sS "https://sigcore-production.up.railway.app/api/conversations?limit=200&
 - Shared Sigcore workspace: `1bcbb4e0-df1b-481c-83ba-0730df47a720`
 - Foreign phone bleeding into ABC's ingest: `+18139212100` (owned by tenant `0361e158-f745-445e-9867-bdd3c33caea0`)
 - Post-Task-6 sync run: `2026-09-09T15:28Z` — processed ~30 conversations, 23 correctly orphaned by Task 2 guard, 0 attributed to ABC (all of them had extractor-supplied `phone_number` outside ABC's owned set)
+- Post-Task-7 verification (2026-09-10T22:15Z): `/conversations` for ABC still returns `total: 1` (the pre-existing Twilio Call-Connect notification row). Workspace-wide: 6745 conversations total; only **1** has `phone_number ∈ ABC-owned-set`. `phone_number` breakdown of orphan rows: 227 with empty string, 206 with `+18139212100` (foreign tenant), 102 with `+16193938869`, etc. Confirmed: Task 7's credential resolution is doing its job (Sigcore now calls Quo with ABC's key), but Quo returns workspace-wide conversations that reference `phoneNumberId`s outside ABC's owned set. Whatever cascade sets `phone_number` on the DB row is picking a foreign value rather than filtering-out or setting-null.
+
+### Concrete unblock criterion for ABC
+
+After Task 8 ships, verifying:
+
+```bash
+curl -sS "https://sigcore-production.up.railway.app/api/conversations?limit=200&page=1" \
+  -H "x-api-key: <ABC's sigcore key>"
+```
+
+Should return `meta.total ≈ 200+` with every row's `phone_number ∈ {+14254064045, +14256756379}`. Direct Quo probe confirms 100+ real customer conversations per ABC-owned `phoneNumberId` exist to be surfaced.
 
 ---
 
