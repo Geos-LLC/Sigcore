@@ -146,69 +146,126 @@ export async function ensureOutboundReadyForTenantPhone(
     changed = true;
   }
 
-  // 4. profile_phone_assignments — (profile_id, tpn_id) is the idempotency key
-  let ppa = await repos.ppa.findOne({
-    where: { profileId: profile.id, tenantPhoneNumberId: tpn.id },
-  });
-  if (!ppa) {
-    // Broader-semantic guard (2026-09-17 Lavanda regression) — a TPN that
-    // already has an active PPA belonging to an active profile in the same
-    // tenant is already outbound-ready. Do NOT insert a Default PPA on top;
-    // that creates two active PPAs on one TPN and the outbound resolver
-    // returns 422 AMBIGUOUS_FROM_NUMBER on every send from this tenant.
-    //
-    // The default profile is a *fallback* materialization mechanism, not
-    // something that must own every outbound-ready TPN. When a
-    // pre-existing source-specific profile (e.g. `thumbtack-<biz>` seeded
-    // by the 2026-05 backfill migration) already carries an active PPA
-    // for this TPN, we return that profile's identity and no-op the PPA
-    // insertion. Callers persisting `sigcoreProfileId` then anchor to the
-    // canonical sender, not to the Default we would otherwise materialize.
-    //
-    // Tenant-scoped by construction: profiles in a different tenant that
-    // share this TPN via a cross-tenant assignment (see
-    // phone-assignments.service.ts PR15 amendment) are excluded, because
-    // the calling tenant needs its OWN outbound identity for the TPN.
-    // Inactive profiles are excluded — an archived profile with a
-    // dangling active PPA isn't really outbound-ready and must not
-    // suppress Default materialization.
-    const canonical = await findOtherActiveProfilePpaOnTpn(
-      repos,
-      tpn.id,
-      tpn.tenantId,
-      profile.id,
-    );
-    if (canonical) {
-      return {
-        businessId: business.id,
-        profileId: canonical.profileId,
-        ppaId: canonical.ppaId,
-        changed,
-      };
-    }
+  // 4. profile_phone_assignments — precedence for outbound-ready state.
+  //
+  // The contract for EnsureOutboundReadyResult.profileId is "canonical
+  // active sender for this TPN under this tenant." That drives the order:
+  //
+  //   4a. ACTIVE PPA on (default, TPN)                → return default (canonical)
+  //   4b. no active default, but ACTIVE PPA on another
+  //       active profile in same tenant              → return that profile
+  //                                                    (canonical); DO NOT
+  //                                                    reactivate stale
+  //                                                    default — that
+  //                                                    recreates ambiguity
+  //   4c. no active PPA owns the TPN, but INACTIVE
+  //       (default, TPN) PPA exists                  → reactivate it (the
+  //                                                    unique index
+  //                                                    IDX_ppa_profile_phone
+  //                                                    is full, no partial
+  //                                                    condition — a fresh
+  //                                                    insert would violate
+  //                                                    it)
+  //   4d. nothing exists                             → insert fresh default
+  //                                                    PPA
+  //
+  // The 4a-before-4b ordering matters: if the tenant is in the healthy
+  // "default profile owns outbound" state, we must NOT accidentally scan
+  // for other profiles first (there aren't any but the check is wasted).
+  // The 4b-before-4c ordering matters more: reactivating a stale default
+  // PPA when another active profile already owns the TPN is exactly the
+  // Aug-13 Lavanda incident, just in a different disguise.
 
-    // Partial-unique IDX_ppa_default_per_profile: only the first active
-    // assignment under this profile may carry is_default=TRUE.
-    const existingDefault = await repos.ppa.findOne({
-      where: { profileId: profile.id, isDefault: true, active: true },
-    });
-    ppa = repos.ppa.create({
+  // 4a. active PPA on (default, TPN)?
+  const activeDefaultPpa = await repos.ppa.findOne({
+    where: { profileId: profile.id, tenantPhoneNumberId: tpn.id, active: true },
+  });
+  if (activeDefaultPpa) {
+    return {
+      businessId: business.id,
       profileId: profile.id,
-      tenantPhoneNumberId: tpn.id,
-      role: AssignmentRole.PRIMARY,
-      isDefault: !existingDefault,
-      priority: 100,
-      active: true,
-    });
-    ppa = await repos.ppa.save(ppa);
-    changed = true;
+      ppaId: activeDefaultPpa.id,
+      changed,
+    };
   }
 
+  // 4b. any other active profile in same tenant already owns the TPN?
+  // Broader-semantic guard (2026-09-17 Lavanda regression). See helper
+  // docblock below for the tenant-scope + status-active reasoning.
+  const canonical = await findOtherActiveProfilePpaOnTpn(
+    repos,
+    tpn.id,
+    tpn.tenantId,
+    profile.id,
+  );
+  if (canonical) {
+    return {
+      businessId: business.id,
+      profileId: canonical.profileId,
+      ppaId: canonical.ppaId,
+      changed,
+    };
+    // NOTE: we intentionally do NOT reactivate the stale (default, tpn)
+    // PPA even if one exists here — reactivating it re-creates the
+    // ambiguous two-active-PPA state that PR #63 fixed.
+  }
+
+  // 4c. no active owner. Reactivate stale (default, tpn) PPA if present.
+  const inactiveDefaultPpa = await repos.ppa.findOne({
+    where: { profileId: profile.id, tenantPhoneNumberId: tpn.id },
+  });
+  if (inactiveDefaultPpa) {
+    // Mirror phone-assignments.service.ts:218-234 exactly — same
+    // reactivation semantics so the admin assign path and this helper
+    // produce byte-identical rows for the same input state.
+    // is_default resolution: match the admin path (`resolveIsDefault`
+    // with requested=undefined) — become the default iff no OTHER active
+    // is_default PPA exists on this profile.
+    const otherActiveDefault = await repos.ppa.findOne({
+      where: { profileId: profile.id, isDefault: true, active: true },
+    });
+    const willBeDefault = !otherActiveDefault;
+    inactiveDefaultPpa.active = true;
+    inactiveDefaultPpa.role = AssignmentRole.PRIMARY;
+    inactiveDefaultPpa.priority = 100;
+    inactiveDefaultPpa.isDefault = willBeDefault;
+    // Note: admin path calls demoteOtherDefaults when the reactivated
+    // row becomes default. We can't demote via a plain repo without a
+    // dedicated find+update loop; the admin path handles a data-migration
+    // edge case (multiple active is_default rows pre-existing) that
+    // shouldn't occur in normal purchase flows — the partial-unique
+    // `IDX_ppa_default_per_profile` prevents it going forward. If it
+    // ever does, the resolver already prefers is_default DESC so
+    // behavior stays sane; a future audit can normalize.
+    const reactivated = await repos.ppa.save(inactiveDefaultPpa);
+    return {
+      businessId: business.id,
+      profileId: profile.id,
+      ppaId: reactivated.id,
+      changed: true,
+    };
+  }
+
+  // 4d. nothing exists — insert fresh default PPA.
+  // Partial-unique IDX_ppa_default_per_profile: only the first active
+  // assignment under this profile may carry is_default=TRUE.
+  const existingDefault = await repos.ppa.findOne({
+    where: { profileId: profile.id, isDefault: true, active: true },
+  });
+  const created = repos.ppa.create({
+    profileId: profile.id,
+    tenantPhoneNumberId: tpn.id,
+    role: AssignmentRole.PRIMARY,
+    isDefault: !existingDefault,
+    priority: 100,
+    active: true,
+  });
+  const inserted = await repos.ppa.save(created);
   return {
     businessId: business.id,
     profileId: profile.id,
-    ppaId: ppa.id,
-    changed,
+    ppaId: inserted.id,
+    changed: true,
   };
 }
 
