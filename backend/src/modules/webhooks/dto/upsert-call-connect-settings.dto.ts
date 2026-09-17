@@ -28,6 +28,15 @@ export class UpsertCallConnectSettingsDto {
   @IsString()
   agentAcceptDigits?: string;
 
+  /**
+   * When true, AGENT_FIRST calls play the whisper informationally and
+   * auto-bridge without requiring the agent to press a digit. Removes
+   * the whisper-timeout failure mode. Default false.
+   */
+  @IsOptional()
+  @IsBoolean()
+  agentAutoBridge?: boolean;
+
   @IsOptional()
   @IsInt()
   @Min(1)

@@ -471,6 +471,10 @@ export class CallConnectService {
       // immediately (fire-and-forget, same pattern handleAgentGatherAction
       // uses when a human agent accepts) then drop the AI leg straight
       // into the conference.
+      //
+      // Precedence: skipAgentWhisper wins over settings.agentAutoBridge —
+      // AI callers explicitly asked to bypass whisper audio too. If both
+      // are set, this branch fires and the whisper is silent.
       this.logger.log(
         `[agent-twiml] session=${sessionId} skipAgentWhisper=true — bypassing Gather, dropping agent into conference`,
       );
@@ -482,6 +486,54 @@ export class CallConnectService {
         );
         this.failSession(session, `Lead call initiation failed: ${err.message}`).catch(() => {});
       });
+      const dial = response.dial();
+      dial.conference(
+        { startConferenceOnEnter: true, endConferenceOnExit: true },
+        session.conferenceName,
+      );
+    } else if (session.mode === CallConnectMode.AGENT_FIRST && settings?.agentAutoBridge) {
+      // Whisper-without-DTMF branch: play the whisper as an informational
+      // announcement, kick off the lead call IN PARALLEL with playback so
+      // the customer's phone is ringing by the time the agent finishes
+      // hearing "New lead for Crystal, move-in cleaning," then drop the
+      // agent into the conference. No Gather, no timeout — the 15-second
+      // whisper-timeout failure mode is gone. Agent can still reject by
+      // hanging up their phone (session fails naturally via the agent-leg
+      // 'completed' path in handleProviderCallStatus).
+      //
+      // Whisper text still comes from LB (session.agentWhisperMessage) or
+      // the settings template. If that copy still contains "Press any key
+      // to connect," the agent will hear an instruction that is a no-op —
+      // operators enabling auto-bridge MUST also update their whisper
+      // template to remove the acceptance instruction. Future improvement:
+      // move the acceptance instruction out of the whisper template into
+      // Sigcore's TwiML (Sigcore appends "Press X to connect" or
+      // "Connecting now" based on mode).
+      const template =
+        session.agentWhisperMessage ||
+        settings?.agentWhisperMessage ||
+        'New lead for {category}. Customer: {customerName}. Connecting now.';
+      const whisper = this.substituteTemplateVars(template, session, { digit: '' });
+      this.logger.log(
+        `[agent-twiml] session=${sessionId} agentAutoBridge=true — playing whisper informationally, auto-bridging (whisperLen=${whisper.length})`,
+      );
+
+      await this.updateSession(session, { status: SessionStatus.AGENT_ACCEPTED });
+      await this.emitEvent(session, WebhookEventType.CALL_CONNECT_AGENT_ACCEPTED);
+      this.initiateLeadCall(session).catch((err) => {
+        this.logger.error(
+          `auto-bridge: lead call failed for session ${session.id}: ${err.message}`,
+        );
+        this.failSession(session, `Lead call initiation failed: ${err.message}`).catch(() => {});
+      });
+
+      // Audio primer (same rationale as DTMF branch — some carriers mute the
+      // channel until they detect real audio, swallowing the first words).
+      response.pause({ length: 1 });
+      response.say('Attention.');
+      response.pause({ length: 1 });
+      response.say(whisper);
+
       const dial = response.dial();
       dial.conference(
         { startConferenceOnEnter: true, endConferenceOnExit: true },
