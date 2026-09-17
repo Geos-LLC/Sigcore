@@ -1119,3 +1119,180 @@ describe('CallConnectService – startSession voice-capability preflight', () =>
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// resolveSettingsForSession — tenant-scoped precedence.
+//
+// Sigcore workspaces are often shared across multiple tenants (LB Yelp
+// shared workspace `1bcbb4e0-…` hosts several tenants). A settings row
+// keyed by workspace `business_id` would apply to every tenant sharing
+// that workspace — unacceptable blast radius for tenant-specific config
+// (e.g. agent_auto_bridge). Tenant precedence lets one tenant opt into
+// behavior without affecting siblings.
+// ---------------------------------------------------------------------------
+describe('CallConnectService – resolveSettingsForSession (tenant precedence)', () => {
+  const WS_ID = 'ws-shared-1bcbb4e0';
+  const TENANT_A = 'tenant-A-fde135ff';
+  const TENANT_B = 'tenant-B-d471a324';
+
+  function callResolver(service: any, session: any) {
+    // Private method; access via bracket notation
+    return service['resolveSettingsForSession'](session);
+  }
+
+  it('MATRIX cell 1: tenant row exists + workspace row exists → tenant wins', async () => {
+    const { service, settingsRepo } = buildService();
+    const tenantRow = makeSettings({ businessId: TENANT_A, agentAutoBridge: true });
+    const workspaceRow = makeSettings({ businessId: WS_ID, agentAutoBridge: false });
+    // First lookup (by tenantId) returns tenant row; the workspace fallback
+    // must not fire when tenant matched.
+    settingsRepo.findOne
+      .mockImplementationOnce(async (opts: any) =>
+        opts?.where?.businessId === TENANT_A ? tenantRow : workspaceRow,
+      )
+      .mockImplementationOnce(async () => workspaceRow);
+
+    const resolved = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+
+    expect(resolved).toBe(tenantRow);
+    expect(resolved?.agentAutoBridge).toBe(true);
+    // Only one DB lookup — tenant hit short-circuits fallback.
+    expect(settingsRepo.findOne).toHaveBeenCalledTimes(1);
+    expect(settingsRepo.findOne).toHaveBeenCalledWith({ where: { businessId: TENANT_A } });
+  });
+
+  it('MATRIX cell 2: tenant row exists + workspace row absent → tenant wins', async () => {
+    const { service, settingsRepo } = buildService();
+    const tenantRow = makeSettings({ businessId: TENANT_A, agentAutoBridge: true });
+    settingsRepo.findOne.mockImplementation(async (opts: any) =>
+      opts?.where?.businessId === TENANT_A ? tenantRow : null,
+    );
+
+    const resolved = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+
+    expect(resolved).toBe(tenantRow);
+    expect(settingsRepo.findOne).toHaveBeenCalledTimes(1);
+  });
+
+  it('MATRIX cell 3: tenant row absent + workspace row exists → legacy workspace row wins', async () => {
+    const { service, settingsRepo } = buildService();
+    const workspaceRow = makeSettings({ businessId: WS_ID, agentAutoBridge: false });
+    settingsRepo.findOne.mockImplementation(async (opts: any) =>
+      opts?.where?.businessId === WS_ID ? workspaceRow : null,
+    );
+
+    const resolved = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+
+    expect(resolved).toBe(workspaceRow);
+    // Tenant lookup returned null → workspace lookup fired as fallback.
+    expect(settingsRepo.findOne).toHaveBeenCalledTimes(2);
+    expect(settingsRepo.findOne).toHaveBeenNthCalledWith(1, { where: { businessId: TENANT_A } });
+    expect(settingsRepo.findOne).toHaveBeenNthCalledWith(2, { where: { businessId: WS_ID } });
+  });
+
+  it('MATRIX cell 4: neither exists → null (caller falls back to hardcoded defaults)', async () => {
+    const { service, settingsRepo } = buildService();
+    settingsRepo.findOne.mockResolvedValue(null);
+
+    const resolved = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+
+    expect(resolved).toBeNull();
+    expect(settingsRepo.findOne).toHaveBeenCalledTimes(2);
+  });
+
+  it('MATRIX cell 5: no session.tenantId → skips tenant lookup, uses workspace only (legacy behavior)', async () => {
+    const { service, settingsRepo } = buildService();
+    const workspaceRow = makeSettings({ businessId: WS_ID });
+    settingsRepo.findOne.mockResolvedValue(workspaceRow);
+
+    const resolved = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: null,
+    });
+
+    expect(resolved).toBe(workspaceRow);
+    // Only one lookup — tenant lookup skipped entirely when tenantId is falsy.
+    expect(settingsRepo.findOne).toHaveBeenCalledTimes(1);
+    expect(settingsRepo.findOne).toHaveBeenCalledWith({ where: { businessId: WS_ID } });
+  });
+
+  it('ISOLATION: two tenants sharing one workspace — A opts-in, B keeps default', async () => {
+    // The core invariant that motivates this whole PR: tenant A flipping
+    // agent_auto_bridge=true must NOT alter tenant B's behavior. Both
+    // tenants share workspace `WS_ID` (business_id in Sigcore session
+    // = API-key-resolved workspaceId). Tenant A has a tenant-scoped
+    // settings row; tenant B does not.
+    const { service, settingsRepo } = buildService();
+    const tenantARow = makeSettings({
+      businessId: TENANT_A,
+      agentAutoBridge: true,
+    });
+    // No row for tenant B; also no workspace-level row.
+    settingsRepo.findOne.mockImplementation(async (opts: any) => {
+      if (opts?.where?.businessId === TENANT_A) return tenantARow;
+      return null;
+    });
+
+    const resolvedForA = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+    const resolvedForB = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_B,
+    });
+
+    // Tenant A gets its own row with auto-bridge ON.
+    expect(resolvedForA).toBe(tenantARow);
+    expect(resolvedForA?.agentAutoBridge).toBe(true);
+
+    // Tenant B gets NULL (falls back to hardcoded defaults where
+    // agentAutoBridge is undefined/false). Explicitly proves tenant A's
+    // row cannot alter tenant B.
+    expect(resolvedForB).toBeNull();
+  });
+
+  it('ISOLATION: workspace row + tenant A row present → tenant B still gets workspace row (not tenant A)', async () => {
+    // Variant where a workspace-scoped row DOES exist (legacy config).
+    // Tenant B has no tenant row, so it falls through to workspace.
+    // Tenant A's presence must not contaminate tenant B's resolution.
+    const { service, settingsRepo } = buildService();
+    const tenantARow = makeSettings({
+      businessId: TENANT_A,
+      agentAutoBridge: true,
+    });
+    const workspaceRow = makeSettings({
+      businessId: WS_ID,
+      agentAutoBridge: false,
+    });
+    settingsRepo.findOne.mockImplementation(async (opts: any) => {
+      if (opts?.where?.businessId === TENANT_A) return tenantARow;
+      if (opts?.where?.businessId === WS_ID) return workspaceRow;
+      return null;
+    });
+
+    const resolvedForA = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_A,
+    });
+    const resolvedForB = await callResolver(service, {
+      businessId: WS_ID,
+      tenantId: TENANT_B,
+    });
+
+    expect(resolvedForA?.agentAutoBridge).toBe(true);   // tenant A wins
+    expect(resolvedForB?.agentAutoBridge).toBe(false);  // tenant B lands on workspace
+  });
+});
