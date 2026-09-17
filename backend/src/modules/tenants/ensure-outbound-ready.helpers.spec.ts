@@ -444,6 +444,173 @@ describe('ensureOutboundReadyForTenantPhone', () => {
     );
   });
 
+  // Post-cleanup Lavanda regression (2026-09-17 follow-up to PR #63). The
+  // Sep-17 data repair left Lavanda's Default profile with a SOFT-
+  // DEACTIVATED PPA (active=false) on the shared TPN while the source-
+  // specific `thumbtack-lavanda-cleaning` profile owns the active PPA.
+  //
+  // The PR #63 helper's initial findOne did not filter by active — it
+  // treated the inactive Default PPA as "already done", skipped the
+  // guard, and returned {profileId=default, ppaId=inactive_row}. That
+  // violated the EnsureOutboundReadyResult.profileId contract ("canonical
+  // active sender") and would have persisted the wrong sigcoreProfileId
+  // on the LB SavedAccount when we consumed PurchaseResult.
+  //
+  // This test asserts:
+  //   - Returned profileId = source-specific (`prof-thumbtack-lavanda`),
+  //     NOT the Default.
+  //   - Returned ppaId = the ACTIVE source-specific PPA.
+  //   - Stale Default PPA REMAINS INACTIVE — we do not reactivate it as
+  //     a side effect (that would recreate the exact Aug-13 ambiguous
+  //     two-active-PPA state we set out to prevent).
+  it('post-cleanup lavanda: soft-deactivated Default PPA + active source-specific PPA — returns source, Default stays inactive', async () => {
+    const repos = makeRepos();
+    repos.business.rows.push({
+      id: 'biz-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      slug: 'lavanda-cleaning-7ae06bb6',
+      displayName: 'Lavanda Cleaning',
+      status: 'active',
+      defaultProfileId: 'prof-default-lavanda',
+    });
+    repos.profile.rows.push({
+      id: 'prof-default-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-lavanda',
+      slug: 'default',
+      source: 'leadbridge',
+      isDefault: false,
+      status: 'active',
+      createdAt: new Date('2026-05-01T02:51:17Z'),
+    });
+    repos.profile.rows.push({
+      id: 'prof-thumbtack-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-lavanda',
+      slug: 'thumbtack-lavanda-cleaning',
+      source: 'thumbtack',
+      externalProfileId: '530741472395919364',
+      isDefault: true,
+      status: 'active',
+      createdAt: new Date('2026-05-01T23:07:48Z'),
+    });
+    repos.ppa.rows.push({
+      id: 'ppa-thumbtack-lavanda',
+      profileId: 'prof-thumbtack-lavanda',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: true,
+      priority: 100,
+      active: true,
+    });
+    // The stale Default PPA — soft-deactivated by the 2026-09-17 repair.
+    repos.ppa.rows.push({
+      id: 'ppa-default-lavanda-inactive',
+      profileId: 'prof-default-lavanda',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: true,
+      priority: 100,
+      active: false, // <-- soft-deactivated
+    });
+
+    const result = await ensureOutboundReadyForTenantPhone(repos, tpn(), {
+      name: 'Lavanda Cleaning',
+      externalId: '5b8a9ba9-de42-453f-85c4-a38ebb5ba4db',
+      webhookUrls: ['https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore/sms'],
+      apiKeyNames: ['LeadBridge Key'],
+    });
+
+    // Canonical identity is the SOURCE profile / its active PPA.
+    expect(result.profileId).toBe('prof-thumbtack-lavanda');
+    expect(result.ppaId).toBe('ppa-thumbtack-lavanda');
+
+    // Assertion the post-cleanup case exists to prove: the stale Default
+    // PPA is NOT resurrected as a side effect. Reactivating it would
+    // recreate the exact two-active-PPA ambiguity that broke Lavanda
+    // outbound sends on 2026-09-16.
+    const staleDefault = repos.ppa.rows.find((r: any) => r.id === 'ppa-default-lavanda-inactive');
+    expect(staleDefault).toBeDefined();
+    expect(staleDefault!.active).toBe(false);
+
+    // Exactly one active PPA on the TPN under the calling tenant, and it
+    // belongs to the source-specific profile.
+    const activeOnTpn = repos.ppa.rows.filter(
+      (r: any) => r.tenantPhoneNumberId === TPN_ID && r.active,
+    );
+    expect(activeOnTpn).toHaveLength(1);
+    expect(activeOnTpn[0].profileId).toBe('prof-thumbtack-lavanda');
+  });
+
+  // Repurchase-after-release on the same tenant. Only artifact left over
+  // is the soft-deactivated (default, tpn) PPA from the last release;
+  // no other active profile owns this TPN. We must REACTIVATE the stale
+  // Default PPA (the unique index IDX_ppa_profile_phone is full, so a
+  // fresh insert on the same (profile_id, tenant_phone_number_id) would
+  // violate it) and return Default as canonical.
+  it('stale-only reactivation: no other active owner + inactive Default PPA — reactivates it, returns Default', async () => {
+    const repos = makeRepos();
+    repos.business.rows.push({
+      id: 'biz-1',
+      tenantId: TENANT,
+      workspaceId: WS,
+      slug: 'globus-service-7ae06bb6',
+      displayName: 'Globus Service',
+      status: 'active',
+      defaultProfileId: 'prof-default-1',
+    });
+    repos.profile.rows.push({
+      id: 'prof-default-1',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-1',
+      slug: 'default',
+      source: 'leadbridge',
+      isDefault: true,
+      status: 'active',
+      createdAt: new Date('2026-05-01T00:00:00Z'),
+    });
+    repos.ppa.rows.push({
+      id: 'ppa-default-stale',
+      profileId: 'prof-default-1',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: false, // was demoted at some point before release
+      priority: 100,
+      active: false, // <-- the only PPA on this TPN, soft-deactivated
+    });
+
+    const result = await ensureOutboundReadyForTenantPhone(repos, tpn(), TENANT_LB);
+
+    // Canonical is Default (no other profile owns anything active here).
+    expect(result.profileId).toBe('prof-default-1');
+    expect(result.ppaId).toBe('ppa-default-stale');
+    expect(result.changed).toBe(true);
+
+    // Row was reactivated in place — same id, active flipped back to
+    // true. This matches phone-assignments.service.ts:218-234's
+    // reactivation semantics (mandatory because IDX_ppa_profile_phone is
+    // a full unique index on (profile_id, tpn_id); a fresh insert would
+    // violate it).
+    const reactivated = repos.ppa.rows.find((r: any) => r.id === 'ppa-default-stale');
+    expect(reactivated).toBeDefined();
+    expect(reactivated!.active).toBe(true);
+    expect(reactivated!.role).toBe(AssignmentRole.PRIMARY);
+    expect(reactivated!.priority).toBe(100);
+    // No other active is_default PPA on this profile → this one becomes default.
+    expect(reactivated!.isDefault).toBe(true);
+
+    // Still exactly one row in the ppa table for (profile, tpn) — no
+    // duplicate insert.
+    const rowsForKey = repos.ppa.rows.filter(
+      (r: any) => r.profileId === 'prof-default-1' && r.tenantPhoneNumberId === TPN_ID,
+    );
+    expect(rowsForKey).toHaveLength(1);
+  });
+
   // Inactive (archived/suspended) profile with a dangling active PPA in the
   // same tenant is NOT outbound-ready. The guard must not honor it —
   // otherwise repair paths that leave a dead profile behind would suppress
