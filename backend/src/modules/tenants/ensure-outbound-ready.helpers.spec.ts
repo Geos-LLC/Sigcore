@@ -304,6 +304,200 @@ describe('ensureOutboundReadyForTenantPhone', () => {
     expect(repos.profile.rows[0].source).toBe('internal');
   });
 
+  // Lavanda regression (2026-09-17). Reproduces the exact pre-seed that
+  // caused +16193303608 to end up with two active PPAs on the same tenant
+  // after the 2026-08-13 channels-PATCH hit ensureOutboundReady. The
+  // pre-existing source-specific profile owned an active PPA to the TPN;
+  // this helper used to insert a second Default PPA regardless, breaking
+  // outbound resolution with AMBIGUOUS_FROM_NUMBER. It must now no-op the
+  // PPA insertion and return the source-specific profile's identity.
+  it('lavanda regression: active source-specific PPA on TPN suppresses Default PPA insertion, returns source profile id', async () => {
+    const repos = makeRepos();
+    repos.business.rows.push({
+      id: 'biz-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      slug: 'lavanda-cleaning-7ae06bb6',
+      displayName: 'Lavanda Cleaning',
+      status: 'active',
+      defaultProfileId: 'prof-default-lavanda',
+    });
+    repos.profile.rows.push({
+      id: 'prof-default-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-lavanda',
+      slug: 'default',
+      source: 'leadbridge',
+      isDefault: false, // Lavanda's real data: Default is not isDefault=true
+      status: 'active',
+      createdAt: new Date('2026-05-01T02:51:17Z'),
+    });
+    repos.profile.rows.push({
+      id: 'prof-thumbtack-lavanda',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-lavanda',
+      slug: 'thumbtack-lavanda-cleaning',
+      source: 'thumbtack',
+      externalProfileId: '530741472395919364',
+      isDefault: true, // the canonical source-specific profile carries is_default=TRUE
+      status: 'active',
+      createdAt: new Date('2026-05-01T23:07:48Z'),
+    });
+    repos.ppa.rows.push({
+      id: 'ppa-thumbtack-lavanda',
+      profileId: 'prof-thumbtack-lavanda',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: true,
+      priority: 100,
+      active: true,
+    });
+
+    const result = await ensureOutboundReadyForTenantPhone(repos, tpn(), {
+      name: 'Lavanda Cleaning',
+      externalId: '5b8a9ba9-de42-453f-85c4-a38ebb5ba4db',
+      webhookUrls: ['https://thumbtack-bridge-production.up.railway.app/api/webhooks/sigcore/sms'],
+      apiKeyNames: ['LeadBridge Key'],
+    });
+
+    // No second PPA inserted on the shared TPN.
+    const activeOnTpn = repos.ppa.rows.filter((r: any) => r.tenantPhoneNumberId === TPN_ID && r.active);
+    expect(activeOnTpn).toHaveLength(1);
+    expect(activeOnTpn[0].id).toBe('ppa-thumbtack-lavanda');
+    expect(activeOnTpn[0].profileId).toBe('prof-thumbtack-lavanda');
+
+    // Result surfaces the canonical (source-specific) sender identity, NOT
+    // the Default profile — so callers persisting sigcoreProfileId anchor
+    // to the profile that actually owns the outbound path.
+    expect(result.profileId).toBe('prof-thumbtack-lavanda');
+    expect(result.ppaId).toBe('ppa-thumbtack-lavanda');
+
+    // Resolver simulation: outbound from TPN under this tenant resolves to
+    // exactly one profile. Same shape as
+    // resolve-profile-for-outbound.service.ts step B (phone-only path).
+    const profilesForTenant = repos.profile.rows.filter((p: any) => p.tenantId === TENANT);
+    const profileIds = new Set(profilesForTenant.map((p: any) => p.id));
+    const matchingPpas = repos.ppa.rows.filter(
+      (p: any) => profileIds.has(p.profileId) && p.tenantPhoneNumberId === TPN_ID && p.active,
+    );
+    expect(matchingPpas).toHaveLength(1);
+  });
+
+  // Cross-tenant PPA on the same TPN is a legitimate shared-assignment case
+  // (phone-assignments.service.ts PR15). It MUST NOT suppress Default
+  // materialization for the calling tenant — the calling tenant needs its
+  // own outbound identity for the TPN.
+  it('cross-tenant boundary: active PPA under a DIFFERENT tenant\'s profile does not suppress Default materialization', async () => {
+    const repos = makeRepos();
+    const OTHER_TENANT = 'ffffffff-0000-0000-0000-000000000001';
+    repos.business.rows.push({
+      id: 'biz-other',
+      tenantId: OTHER_TENANT,
+      workspaceId: WS,
+      slug: 'other-tenant-ffffffff',
+      displayName: 'Other Tenant',
+      status: 'active',
+      defaultProfileId: 'prof-other-default',
+    });
+    repos.profile.rows.push({
+      id: 'prof-other-default',
+      tenantId: OTHER_TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-other',
+      slug: 'default',
+      source: 'leadbridge',
+      isDefault: true,
+      status: 'active',
+      createdAt: new Date('2026-05-01T00:00:00Z'),
+    });
+    repos.ppa.rows.push({
+      id: 'ppa-other-tenant',
+      profileId: 'prof-other-default',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: true,
+      priority: 100,
+      active: true,
+    });
+
+    const result = await ensureOutboundReadyForTenantPhone(repos, tpn(), TENANT_LB);
+
+    // Default was materialized for the CALLING tenant (business + profile +
+    // its own PPA), independent of the cross-tenant PPA.
+    expect(result.changed).toBe(true);
+    const callingBiz = repos.business.rows.find((b: any) => b.tenantId === TENANT);
+    expect(callingBiz).toBeDefined();
+    expect(result.businessId).toBe(callingBiz!.id);
+    const callingProfile = repos.profile.rows.find(
+      (p: any) => p.tenantId === TENANT && p.slug === 'default',
+    );
+    expect(callingProfile).toBeDefined();
+    expect(result.profileId).toBe(callingProfile!.id);
+    // Two active PPAs on the TPN — one per tenant. The resolver joins by
+    // p.tenant_id, so this is unambiguous per-tenant.
+    const activeOnTpn = repos.ppa.rows.filter((r: any) => r.tenantPhoneNumberId === TPN_ID && r.active);
+    expect(activeOnTpn).toHaveLength(2);
+    expect(activeOnTpn.map((r: any) => r.profileId).sort()).toEqual(
+      [callingProfile!.id, 'prof-other-default'].sort(),
+    );
+  });
+
+  // Inactive (archived/suspended) profile with a dangling active PPA in the
+  // same tenant is NOT outbound-ready. The guard must not honor it —
+  // otherwise repair paths that leave a dead profile behind would suppress
+  // Default materialization forever.
+  it('inactive profile in same tenant: active PPA does not suppress Default materialization', async () => {
+    const repos = makeRepos();
+    repos.business.rows.push({
+      id: 'biz-1',
+      tenantId: TENANT,
+      workspaceId: WS,
+      slug: 'globus-service-7ae06bb6',
+      displayName: 'Globus Service',
+      status: 'active',
+      defaultProfileId: null,
+    });
+    repos.profile.rows.push({
+      id: 'prof-archived',
+      tenantId: TENANT,
+      workspaceId: WS,
+      communicationBusinessId: 'biz-1',
+      slug: 'thumbtack-legacy',
+      source: 'thumbtack',
+      isDefault: false,
+      status: 'inactive', // deactivated / archived
+      createdAt: new Date('2026-05-01T00:00:00Z'),
+    });
+    repos.ppa.rows.push({
+      id: 'ppa-archived',
+      profileId: 'prof-archived',
+      tenantPhoneNumberId: TPN_ID,
+      role: AssignmentRole.PRIMARY,
+      isDefault: true,
+      priority: 100,
+      active: true, // dangling active PPA on an inactive profile
+    });
+
+    const result = await ensureOutboundReadyForTenantPhone(repos, tpn(), TENANT_LB);
+
+    // Default WAS materialized — the archived profile does not count.
+    expect(result.changed).toBe(true);
+    const defaultProfile = repos.profile.rows.find(
+      (p: any) => p.slug === 'default' && p.tenantId === TENANT,
+    );
+    expect(defaultProfile).toBeDefined();
+    expect(result.profileId).toBe(defaultProfile!.id);
+    // Two active PPAs exist on the TPN (dangling + fresh Default), but
+    // only one lives under an ACTIVE profile in this tenant. The resolver
+    // joins on p.status via caller code; documenting expectation here.
+    const activeOnTpn = repos.ppa.rows.filter((r: any) => r.tenantPhoneNumberId === TPN_ID && r.active);
+    expect(activeOnTpn.map((r: any) => r.profileId).sort()).toEqual(
+      [defaultProfile!.id, 'prof-archived'].sort(),
+    );
+  });
+
   it('outbound-resolution shape: after run, (tpn.phone_number, profile.tenant_id, ppa.active=true) match', async () => {
     // Mirrors the SQL in resolve-profile-for-outbound.service.ts
     const repos = makeRepos();

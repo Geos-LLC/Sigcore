@@ -51,6 +51,18 @@ export interface PurchaseResult {
   success: boolean;
   order: PhoneNumberOrder;
   allocation?: TenantPhoneNumber;
+  /**
+   * CommunicationProfile.id that will own outbound sends from this
+   * allocation under the calling tenant. Materialized by
+   * ensureOutboundReadyForTenantPhone — usually the Default profile this
+   * helper creates, but preserves a pre-existing source-specific profile
+   * when one already carries an active PPA for the TPN (Lavanda-shaped
+   * case). Callers persisting a `sigcoreProfileId` should use this
+   * value, NOT infer it from allocation.id (that's a PPA, different
+   * identifier class). Undefined on failure or when outbound-ready
+   * materialization was skipped.
+   */
+  profileId?: string;
   error?: string;
 }
 
@@ -178,7 +190,9 @@ export class PhoneNumberProvisioningService {
    * clear warning so the next call (or a manual re-trigger) can heal the
    * chain, and the operator can fall back to admin/phone-numbers/assign.
    */
-  private async ensureOutboundReady(allocation: TenantPhoneNumber): Promise<void> {
+  private async ensureOutboundReady(
+    allocation: TenantPhoneNumber,
+  ): Promise<{ profileId: string } | null> {
     try {
       const tenant = await this.tenantRepo.findOne({
         where: { id: allocation.tenantId, workspaceId: allocation.workspaceId },
@@ -187,7 +201,7 @@ export class PhoneNumberProvisioningService {
         this.logger.warn(
           `[ensureOutboundReady] tenant ${allocation.tenantId} not found — skipping (phone ${allocation.phoneNumber} purchased but not linked)`,
         );
-        return;
+        return null;
       }
 
       const webhooks = await this.webhookSubscriptionRepo.find({
@@ -219,12 +233,17 @@ export class PhoneNumberProvisioningService {
           `[ensureOutboundReady] ${allocation.phoneNumber} → business=${result.businessId.slice(0, 8)} profile=${result.profileId.slice(0, 8)} ppa=${result.ppaId.slice(0, 8)}`,
         );
       }
+      // Surface the canonical outbound profile so PurchaseResult can carry
+      // it up to API callers (LB uses this as `sigcoreProfileId` for
+      // explicit-identity outbound sends).
+      return { profileId: result.profileId };
     } catch (err: any) {
       // Twilio purchase already succeeded; record so operator can heal via
       // POST /admin/phone-numbers/assign. Do NOT throw.
       this.logger.warn(
         `[ensureOutboundReady] Failed to materialize outbound chain for ${allocation.phoneNumber} (tenant=${allocation.tenantId}): ${err?.message ?? err}. Re-running the helper or calling /admin/phone-numbers/assign will heal it.`,
       );
+      return null;
     }
   }
 
@@ -504,7 +523,7 @@ export class PhoneNumberProvisioningService {
       // number immediately. Sigcore owns this invariant; clients must not
       // construct the chain. Failures here are logged and do NOT roll
       // back the Twilio purchase — see ensureOutboundReady for recovery.
-      await this.ensureOutboundReady(allocation);
+      const outboundReady = await this.ensureOutboundReady(allocation);
 
       // Update order with allocation reference
       order.tenantPhoneNumberId = allocation.id;
@@ -518,6 +537,7 @@ export class PhoneNumberProvisioningService {
         success: true,
         order,
         allocation,
+        profileId: outboundReady?.profileId,
       };
     } catch (error) {
       // Update order with failure

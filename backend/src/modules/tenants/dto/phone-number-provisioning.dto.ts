@@ -215,6 +215,14 @@ export class PurchaseResultResponse {
     a2pStatus?: string;
     messagingServiceSid?: string;
   };
+  /**
+   * CommunicationProfile.id that owns outbound sends from this allocation
+   * under the calling tenant. Persist alongside `allocation.id` (which is
+   * the PPA/TPN identity, NOT a profile identity) — outbound resolution
+   * disambiguates on `profileId`. See PurchaseResult in
+   * phone-number-provisioning.service.ts for full contract.
+   */
+  profileId?: string;
   error?: string;
 }
 
