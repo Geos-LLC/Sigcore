@@ -77,6 +77,7 @@ function makeSettings(overrides: Partial<CallConnectSettings> = {}): CallConnect
     mode: CallConnectMode.AGENT_FIRST,
     ringTimeoutSeconds: 60,
     agentAcceptDigits: '1',
+    agentAutoBridge: false,
     maxAgentAttempts: 2,
     agentStrategy: AgentStrategy.OWNER,
     leadRetryPolicy: null as any,
@@ -424,6 +425,113 @@ describe('CallConnectService – handleAgentTwiml skipAgentWhisper branch', () =
 
     expect(twiml).toContain('<Gather');
     expect(twiml).toContain('Human-agent whisper.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// agentAutoBridge — whisper-without-DTMF branch. When enabled per-tenant,
+// AGENT_FIRST calls play the whisper informationally and auto-bridge
+// instead of hanging up on the DTMF gather timeout. Removes the 15-second
+// "Agent answered but did not accept" failure mode. Agent can still
+// reject by hanging up their phone.
+// ---------------------------------------------------------------------------
+describe('CallConnectService – handleAgentTwiml agentAutoBridge branch', () => {
+  it('plays whisper informationally, fires initiateLeadCall, bridges into conference (no Gather, no hangup)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: false,
+        agentWhisperMessage: 'New lead for Crystal — move-in cleaning.',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentAutoBridge: true }),
+    );
+    const initiateSpy = jest
+      .spyOn(service as any, 'initiateLeadCall')
+      .mockResolvedValue(undefined);
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    // Whisper is played
+    expect(twiml).toContain('New lead for Crystal — move-in cleaning.');
+    // No Gather (no DTMF gate) and no "No input received" hangup path
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('No input received');
+    // Conference bridge
+    expect(twiml).toMatch(/<Dial>[\s\S]*<Conference[^>]*>cc_session-1<\/Conference>[\s\S]*<\/Dial>/);
+    // Lead call was kicked off in parallel with playback (same fire-and-forget
+    // pattern as skipAgentWhisper) — this is what removes the 15s stall.
+    expect(initiateSpy).toHaveBeenCalledTimes(1);
+    // Session advanced to AGENT_ACCEPTED so downstream state machine treats
+    // this like a normal accept.
+    const lastSave = sessionRepo.save.mock.calls[sessionRepo.save.mock.calls.length - 1][0];
+    expect(lastSave.status).toBe(SessionStatus.AGENT_ACCEPTED);
+  });
+
+  it('MATRIX: skipAgentWhisper=true wins over agentAutoBridge=true (silent bridge, no whisper audio)', async () => {
+    // Documented precedence — if both flags are set, the AI-routing branch
+    // takes over and the whisper is intentionally silent (AI caller does
+    // not need spoken context). Kept explicit so accidental combinations
+    // don't produce surprise behavior.
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: true,
+        agentWhisperMessage: 'SHOULD NOT PLAY — AI routing branch wins',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentAutoBridge: true }),
+    );
+    jest.spyOn(service as any, 'initiateLeadCall').mockResolvedValue(undefined);
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).not.toContain('<Gather');
+    expect(twiml).not.toContain('SHOULD NOT PLAY');
+    expect(twiml).toMatch(/<Dial>[\s\S]*<Conference/);
+  });
+
+  it('MATRIX: agentAutoBridge=false + skipAgentWhisper=false → falls back to default DTMF Gather flow', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: false,
+        agentWhisperMessage: 'Default DTMF whisper.',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentAutoBridge: false }),
+    );
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    expect(twiml).toContain('<Gather');
+    expect(twiml).toContain('Default DTMF whisper.');
+    expect(twiml).toContain('to connect');
+  });
+
+  it('substitutes {digit} to empty string when whisper template contains it (auto-bridge has no digit)', async () => {
+    const { service, settingsRepo, sessionRepo } = buildService();
+    sessionRepo.findOne.mockResolvedValue(
+      makeSession({
+        skipAgentWhisper: false,
+        agentWhisperMessage: 'New lead. Press {digit} to connect.',
+      }),
+    );
+    settingsRepo.findOne.mockResolvedValue(
+      makeSettings({ agentAutoBridge: true }),
+    );
+    jest.spyOn(service as any, 'initiateLeadCall').mockResolvedValue(undefined);
+
+    const twiml = await service.handleAgentTwiml('session-1');
+
+    // Template's "Press {digit} to connect" collapses to "Press  to connect" —
+    // still a lie to the agent, but harmless. Operators are expected to
+    // update their whisper text when enabling auto-bridge; this test just
+    // documents that the substitution doesn't crash.
+    expect(twiml).not.toContain('{digit}');
   });
 });
 

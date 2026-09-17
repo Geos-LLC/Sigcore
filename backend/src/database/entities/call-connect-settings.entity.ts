@@ -73,6 +73,20 @@ export class CallConnectSettings {
   @Column({ name: 'agent_accept_digits', default: '1' })
   agentAcceptDigits: string;
 
+  /**
+   * When true, AGENT_FIRST calls bypass the DTMF-acceptance Gather: the
+   * whisper plays as an informational announcement, `initiateLeadCall` fires
+   * immediately in parallel with playback, and the agent leg drops straight
+   * into the conference. Removes the whisper-timeout failure mode where an
+   * agent who doesn't press a digit within 15s loses the lead entirely.
+   *
+   * Independent from session.skipAgentWhisper (which also drops the whisper
+   * audio, used by AI-routed calls). See handleAgentTwiml matrix in
+   * call-connect.service.ts.
+   */
+  @Column({ name: 'agent_auto_bridge', type: 'boolean', default: false })
+  agentAutoBridge: boolean;
+
   @Column({ name: 'max_agent_attempts', type: 'int', default: 2 })
   maxAgentAttempts: number;
 
