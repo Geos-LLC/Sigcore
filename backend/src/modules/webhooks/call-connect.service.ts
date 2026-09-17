@@ -127,6 +127,51 @@ export class CallConnectService {
   ) {}
 
   // ──────────────────────────────────────────────────────────────
+  // Session-scoped settings resolution — SINGLE SOURCE OF TRUTH
+  // ──────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve CallConnectSettings for an in-flight session. This is the ONLY
+   * settings-lookup helper that TwiML / status / call-lifecycle code paths
+   * should use — centralized so precedence rules cannot drift between
+   * consumers.
+   *
+   * Precedence:
+   *   1. Tenant-scoped row  (business_id = session.tenant_id)
+   *   2. Workspace-scoped row (business_id = session.business_id)
+   *   3. null  → caller falls back to hardcoded defaults
+   *
+   * Rationale — Sigcore workspaces are often shared across multiple
+   * tenants (LB Yelp shared workspace `1bcbb4e0-…` hosts several
+   * tenants incl. Spotless `fde135ff-…`). A settings row keyed by
+   * workspace `business_id` would apply to every tenant sharing that
+   * workspace — unacceptable blast radius for tenant-specific config
+   * (e.g. `agent_auto_bridge`). Tenant precedence lets one tenant
+   * opt into behavior without affecting siblings.
+   *
+   * Not used by:
+   *   - upsertSettings / getSettings (external CRUD — keyed by request
+   *     dto.businessId, not by an in-flight session)
+   *   - startSession's outbound-ready settings check (pre-session; no
+   *     session.tenant_id exists yet — that check uses dto.businessId
+   *     with the legacy workspaceId fallback)
+   *   - stale-legacy cleanup (findAll by botNumberE164, not by session)
+   */
+  private async resolveSettingsForSession(
+    session: Pick<CallConnectSession, 'businessId' | 'tenantId'>,
+  ): Promise<CallConnectSettings | null> {
+    if (session.tenantId) {
+      const tenantRow = await this.settingsRepo.findOne({
+        where: { businessId: session.tenantId },
+      });
+      if (tenantRow) return tenantRow;
+    }
+    return this.settingsRepo.findOne({
+      where: { businessId: session.businessId },
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────
   // Settings CRUD
   // ──────────────────────────────────────────────────────────────
 
@@ -459,9 +504,7 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     const baseUrl = this.getBaseUrl();
     const response = new twilio.twiml.VoiceResponse();
@@ -626,9 +669,7 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     const isMachine =
       answeredBy === 'machine_start' ||
@@ -741,9 +782,7 @@ export class CallConnectService {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return this.hangupTwiml();
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     const greetingTemplate = session.leadGreetingMessage || settings?.leadGreetingMessage || 'Please hold while we connect you.';
     const greeting = this.substituteTemplateVars(greetingTemplate, session);
@@ -769,9 +808,7 @@ export class CallConnectService {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session) return this.hangupTwiml();
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     const response = new twilio.twiml.VoiceResponse();
     // Pause duration depends on how precisely we know when the beep fired:
@@ -828,7 +865,7 @@ export class CallConnectService {
     const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
     if (!session || TERMINAL_STATUSES.has(session.status)) return this.hangupTwiml();
 
-    const settings = await this.settingsRepo.findOne({ where: { businessId: session.businessId } });
+    const settings = await this.resolveSettingsForSession(session);
     if (!settings?.leadVoicemailEnabled) return this.hangupTwiml();
 
     this.logger.log(
@@ -1118,9 +1155,7 @@ export class CallConnectService {
       return this.hangupTwiml();
     }
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
     const acceptDigits = settings?.agentAcceptDigits || '0123456789';
 
     if (acceptDigits.includes(digits)) {
@@ -1215,9 +1250,7 @@ export class CallConnectService {
       // Fall through: automated drop is pending, deliver it despite ENDED status
     }
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     if (!settings?.leadVoicemailEnabled) {
       // Voicemail drop disabled — hang up lead and fail session (only act on machine_start
@@ -1339,9 +1372,7 @@ export class CallConnectService {
       `Call Connect status: session=${session.id}, ${isAgentLeg ? 'AGENT' : 'LEAD'} leg, status=${callStatus}`,
     );
 
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     switch (callStatus) {
       case 'ringing':
@@ -1762,9 +1793,7 @@ export class CallConnectService {
   private async initiateLeadCall(session: CallConnectSession): Promise<void> {
     const selection = await this.selectTwilioClientForLeg(session, 'lead');
     const baseUrl = this.getBaseUrl();
-    const settings = await this.settingsRepo.findOne({
-      where: { businessId: session.businessId },
-    });
+    const settings = await this.resolveSettingsForSession(session);
 
     this.logger.log(
       `Initiating lead call ${session.leadPhoneE164} for session ${session.id}`,
